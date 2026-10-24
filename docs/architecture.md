@@ -961,6 +961,19 @@ receiving no managed preference writes. Values outside a release's proven domain
 are skipped and reported rather than clamped, and unknown and mod-added lines
 always survive an edit.
 
+Settings outside the catalog can still be put into a new instance as raw
+`options.txt` lines kept in the configuration beside the preferences. They are
+applied after every managed preference and after the startup preset line, so
+they win over both: a line whose key exists replaces it, any other line is
+appended. They are never checked against a release's settings or codecs, so
+their meaning is the user's responsibility. Only the file format is enforced: a
+line needs a non-empty key and a `:`, and may hold no control character. A line
+that fails is reported on the Minecraft defaults screen and skipped when the
+file is written, and the data-version marker is never taken from the text. Like
+every other default, raw lines reach only instances created or imported
+afterwards. A file created for a release the dataset does not name carries no
+data version, because there is none to state.
+
 The set of languages a release offers is Mojang's data, resolved from that
 release's own `pack.mcmeta` asset object and cached per release alongside the
 version manifest. Without a catalog the managed language preference is not

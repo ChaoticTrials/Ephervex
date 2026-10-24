@@ -1,5 +1,6 @@
 // Buttons, fields, toggles, pills, navigation items, and the small panels built from them.
 
+import { ScrollView } from "std-widgets.slint";
 import { ContextTouchArea, PopupMenu } from "menus.slint";
 import { BodyText, Heading, HoverNote } from "text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -316,6 +317,56 @@ export component TextField inherits Rectangle {
         font-size: Theme.body-size;
         overflow: elide;
         vertical-alignment: center;
+    }
+}
+
+// A text box for many lines, such as a list of raw settings. The text wraps at
+// the box's width, scrolls inside it, and the view follows the caret.
+export component MultilineField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    in property <string> placeholder;
+    in property <string> accessible-name: placeholder;
+    in property <bool> enabled: true;
+    callback edited(string);
+    min-height: 4 * Theme.control-height;
+    border-radius: 6px;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    background: Theme.field;
+    accessible-role: text-input;
+    accessible-label: accessible-name;
+    accessible-enabled: enabled;
+    scroller := ScrollView {
+        x: 6px; y: 6px; width: parent.width - 12px; height: parent.height - 12px;
+        viewport-width: self.visible-width;
+        viewport-height: max(self.visible-height, input.preferred-height + 2px);
+        input := TextInput {
+            x: 5px; y: 0px;
+            width: scroller.visible-width - 10px;
+            height: max(scroller.visible-height, self.preferred-height);
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            font-family: Theme.mono-family;
+            font-size: Theme.body-size;
+            enabled: root.enabled;
+            single-line: false;
+            wrap: char-wrap;
+            edited => { root.edited(self.text); }
+            cursor-position-changed(position) => {
+                if (position.y + scroller.viewport-y < 0px) {
+                    scroller.viewport-y = -position.y;
+                } else if (position.y + Theme.body-size * 1.6 + scroller.viewport-y > scroller.visible-height) {
+                    scroller.viewport-y = scroller.visible-height - position.y - Theme.body-size * 1.6;
+                }
+            }
+        }
+    }
+    if root.text == "" : Text {
+        x: 11px; y: 6px; width: parent.width - 22px;
+        text: root.placeholder;
+        color: Theme.text-muted;
+        font-family: Theme.mono-family;
+        font-size: Theme.body-size;
+        wrap: char-wrap;
     }
 }
 

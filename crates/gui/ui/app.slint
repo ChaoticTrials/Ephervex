@@ -15,6 +15,7 @@ import {
     InlineToggle,
     LabeledToggle,
     LoadingState,
+    MultilineField,
     NavItem,
     Pill,
     SettingCard,
@@ -350,6 +351,11 @@ export component AppWindow inherits Window {
     in-out property <string> minecraft-preserved-notice;
     in-out property <string> minecraft-unusable-notice;
     in-out property <bool> minecraft-saving: false;
+    // The custom options.txt lines, and which of them will not be written.
+    in-out property <string> minecraft-raw-options;
+    in-out property <string> minecraft-raw-problems;
+    // Whether the custom lines are shown in place of the settings tabs.
+    in-out property <bool> minecraft-raw-open: false;
     // A save started from each settings group and not yet finished. The
     // group's Save and Reset buttons stay disabled until it is.
     in-out property <bool> java-saving: false;
@@ -1025,6 +1031,7 @@ export component AppWindow inherits Window {
     callback minecraft-captured-key(string, string);
     callback minecraft-captured-mouse(string, string);
     callback minecraft-retry-languages();
+    callback minecraft-edit-raw-options(string);
     callback minecraft-save-defaults();
     callback minecraft-discard-defaults();
     callback cancel-operation(string);
@@ -1978,13 +1985,33 @@ export component AppWindow inherits Window {
                                     for category[index] in root.minecraft-categories : WorkspaceTab {
                                         text: category;
                                         min-width: max(88px, self.preferred-width);
-                                        selected: index == root.minecraft-category-index;
-                                        clicked => { root.minecraft-select-category(index); }
+                                        selected: !root.minecraft-raw-open && index == root.minecraft-category-index;
+                                        clicked => { root.minecraft-raw-open = false; root.minecraft-select-category(index); }
+                                    }
+                                    WorkspaceTab {
+                                        text: GuiI18n.text("gui-minecraft-raw-tab");
+                                        min-width: max(88px, self.preferred-width);
+                                        selected: root.minecraft-raw-open;
+                                        clicked => { root.minecraft-raw-open = true; }
                                     }
                                 }
                             }
                             Divider { }
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
+                            if root.minecraft-raw-open : VerticalLayout { spacing: 10px; vertical-stretch: 1;
+                                BodyText { text: GuiI18n.text("gui-minecraft-raw-detail"); color: Theme.text-muted; wrap: word-wrap; vertical-stretch: 0; }
+                                MultilineField {
+                                    vertical-stretch: 1;
+                                    text <=> root.minecraft-raw-options;
+                                    placeholder: GuiI18n.text("gui-minecraft-raw-placeholder");
+                                    accessible-name: GuiI18n.text("gui-minecraft-raw-label");
+                                    enabled: !root.minecraft-saving;
+                                    edited(value) => { root.minecraft-edit-raw-options(value); }
+                                }
+                                if root.minecraft-raw-problems != "" : Rectangle { height: max(46px, raw-problems-text.preferred-height + 22px); vertical-stretch: 0; border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
+                                    raw-problems-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-raw-problems; color: Theme.warning; wrap: word-wrap; }
+                                }
+                            }
+                            if !root.minecraft-raw-open : HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
                                 filter-field := TextField {
                                     horizontal-stretch: 1;
                                     max-width: 340px;
@@ -2000,7 +2027,7 @@ export component AppWindow inherits Window {
                                 if root.minecraft-has-advanced : BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
                                 if root.minecraft-has-advanced : Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
                             }
-                            HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
+                            if !root.minecraft-raw-open : HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
                                 VerticalLayout { horizontal-stretch: 1; spacing: 2px;
                                     FieldLabel { text: GuiI18n.text("gui-minecraft-preview"); }
                                     BodyText { text: GuiI18n.text("gui-minecraft-preview-detail"); color: Theme.text-muted; wrap: word-wrap; }
@@ -2013,7 +2040,7 @@ export component AppWindow inherits Window {
                                     selected(value) => { root.minecraft-set-preview-release(value); }
                                 }
                             }
-                            ScrollView { vertical-stretch: 1; viewport-width: self.width; VerticalLayout { alignment: start; spacing: 12px;
+                            if !root.minecraft-raw-open : ScrollView { vertical-stretch: 1; viewport-width: self.width; VerticalLayout { alignment: start; spacing: 12px;
                             if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
                             for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard {
                                 item: row;

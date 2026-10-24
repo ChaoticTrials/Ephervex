@@ -815,6 +815,9 @@ pub enum Command {
     /// configuration exactly as it was.
     SaveMinecraftPreferences {
         edits: Vec<PreferenceEdit>,
+        /// The custom `options.txt` lines to store with the batch, or `None`
+        /// to leave the stored lines alone.
+        raw_options: Option<String>,
     },
     /// Resolves what one exact release would do with a draft nobody has saved.
     ///
@@ -6491,8 +6494,8 @@ fn run_worker(
                     }
                 }
             }
-            Command::SaveMinecraftPreferences { edits } => {
-                let outcome = app.save_global_minecraft_preferences(&edits);
+            Command::SaveMinecraftPreferences { edits, raw_options } => {
+                let outcome = app.save_global_minecraft_defaults(&edits, raw_options.as_deref());
                 let succeeded = outcome.is_ok();
                 match outcome {
                     Ok(()) => {

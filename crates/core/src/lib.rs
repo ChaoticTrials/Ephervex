@@ -359,7 +359,8 @@ pub use ephervex_options::{
     PreferenceApplication, PreferenceCategory, PreferenceDisposition, PreferenceId, PreferenceKey,
     PreferencePlan, PreferencePresentation, PreferenceSupport, PreferenceValue,
     PreferenceValueError, PreferenceValueProblem, PreferenceValueShape, PresentationTier,
-    ReleaseSupport, SkipReason, SkippedPreference, WindowSize,
+    RawLineProblem, RawOptionLines, RejectedRawLine, ReleaseSupport, SkipReason, SkippedPreference,
+    WindowSize,
 };
 pub use ephervex_pack::{
     AppliedLayer, AuxiliaryKind, BlockedProviderFile, DataPackOwner, DuplicateFileReason,

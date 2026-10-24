@@ -38,6 +38,7 @@ use crate::preference::{
     ConfiguredPreferences, MinecraftPreferenceValue, PreferenceId, PreferenceValueProblem,
 };
 use crate::preferences::GlobalMinecraftPreferences;
+use crate::raw_lines::{RawOptionLines, RejectedRawLine};
 
 /// The name of Minecraft's own settings file inside a game directory.
 pub const OPTIONS_FILE_NAME: &str = "options.txt";
@@ -215,9 +216,24 @@ pub struct PreferencePlan {
     /// empty unless an entry writes a setting the release's startup preset
     /// would otherwise replace on the next launch.
     preset_writes: Vec<(String, String)>,
+    /// The user's raw lines, applied after everything else.
+    raw_writes: Vec<(String, String)>,
+    raw_rejected: Vec<RejectedRawLine>,
 }
 
 impl PreferencePlan {
+    /// Adds the user's raw lines, which are written after every preference and
+    /// after the startup preset's assignment and so win over both.
+    ///
+    /// Lines that cannot be written are kept as a report and never reach the
+    /// file.
+    #[must_use]
+    pub fn with_raw_lines(mut self, raw: &RawOptionLines) -> Self {
+        self.raw_writes = raw.assignments().to_vec();
+        self.raw_rejected = raw.rejected().to_vec();
+        self
+    }
+
     /// One preference's resolution, or `None` when it is not configured.
     #[must_use]
     pub fn entry(&self, id: &PreferenceId) -> Option<&PlannedPreference> {
@@ -246,12 +262,13 @@ impl PreferencePlan {
     }
 
     /// Every assignment this plan makes: the entries' in id order, then the
-    /// startup preset's.
+    /// startup preset's, then the raw lines'.
     fn assignments(&self) -> Vec<(String, String)> {
         self.entries
             .iter()
             .flat_map(|entry| entry.writes.iter().cloned())
             .chain(self.preset_writes.iter().cloned())
+            .chain(self.raw_writes.iter().cloned())
             .collect()
     }
 }
@@ -290,13 +307,17 @@ pub struct PreferenceApplication {
     /// Preferences the release does have, but whose configured value it cannot
     /// express.
     pub skipped: Vec<SkippedPreference>,
+    /// How many of the user's raw lines were written.
+    pub raw_lines_applied: usize,
+    /// Raw lines that could not be written, which the file never received.
+    pub raw_lines_rejected: Vec<RejectedRawLine>,
 }
 
 impl PreferenceApplication {
     /// Whether anything at all was written to the instance.
     #[must_use]
     pub fn changed_anything(&self) -> bool {
-        !self.applied.is_empty()
+        !self.applied.is_empty() || self.raw_lines_applied > 0
     }
 }
 
@@ -350,6 +371,8 @@ pub fn plan_managed_preferences(
         data_version: compatibility.data_version(minecraft_version),
         entries,
         preset_writes,
+        raw_writes: Vec::new(),
+        raw_rejected: Vec::new(),
     }
 }
 
@@ -468,6 +491,8 @@ pub fn apply_plan(
         unknown: Vec::new(),
         unrecognized: Vec::new(),
         skipped: Vec::new(),
+        raw_lines_applied: 0,
+        raw_lines_rejected: plan.raw_rejected.clone(),
     };
 
     for entry in &plan.entries {
@@ -539,6 +564,7 @@ pub fn apply_plan(
     for (key, value) in writes {
         updated.set(&key, value);
     }
+    report.raw_lines_applied = plan.raw_writes.len();
     write_options(&path, &updated.render())?;
 
     tracing::info!(
@@ -585,6 +611,8 @@ pub fn apply_to_game_directory(
                 unknown: Vec::new(),
                 unrecognized: Vec::new(),
                 skipped: Vec::new(),
+                raw_lines_applied: 0,
+                raw_lines_rejected: Vec::new(),
             });
         }
     };

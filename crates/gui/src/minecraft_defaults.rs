@@ -32,7 +32,7 @@ use ephervex_core::{
     InputBinding, LanguageEntry, MinecraftPreferenceDescriptor, MinecraftPreferenceEntry,
     MinecraftPreferencePreview, MinecraftPreferenceSnapshot, MinecraftPreferenceValue, MouseButton,
     PhysicalKey, PreferenceCategory, PreferenceId, PreferencePresentation, PreferenceValueShape,
-    PresentationTier, ReleaseSupport, SkipReason, WindowSize,
+    PresentationTier, RawOptionLines, ReleaseSupport, SkipReason, WindowSize,
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{ModelRc, SharedString, VecModel};
@@ -99,6 +99,9 @@ impl RequestChannel {
         }
     }
 }
+
+/// How many unwritable custom lines are spelled out before the rest are counted.
+const MAX_RAW_PROBLEMS_SHOWN: usize = 6;
 
 /// The tab label for one category.
 ///
@@ -778,6 +781,11 @@ pub struct MinecraftDefaultsModel {
     overlay: BTreeMap<PreferenceId, DraftState>,
     /// Raw field text for rows being typed into.
     pending: BTreeMap<PreferenceId, PendingText>,
+    /// The custom `options.txt` lines core last confirmed.
+    raw_baseline: String,
+    /// The user's unsaved custom lines, present only when they differ from
+    /// the baseline.
+    raw_draft: Option<String>,
     /// The release the bundled catalog was generated from.
     catalog_minecraft_version: String,
     /// How many configured ids this build has no descriptor for.
@@ -844,6 +852,10 @@ impl MinecraftDefaultsModel {
             })
             .collect();
         self.entries = snapshot.entries;
+        self.raw_baseline = snapshot.raw_options;
+        if self.raw_draft.as_deref() == Some(self.raw_baseline.as_str()) {
+            self.raw_draft = None;
+        }
         self.overlay
             .retain(|id, state| *state != self.baseline.get(id).cloned().unwrap_or_default());
         if self.preview_release.is_empty() {
@@ -861,6 +873,7 @@ impl MinecraftDefaultsModel {
     /// Abandons every unsaved edit, restoring the last confirmed state.
     pub fn discard(&mut self) {
         self.overlay.clear();
+        self.raw_draft = None;
         self.pending.clear();
         self.capturing = None;
     }
@@ -868,13 +881,61 @@ impl MinecraftDefaultsModel {
     /// Whether anything is unsaved.
     #[must_use]
     pub fn is_dirty(&self) -> bool {
-        !self.overlay.is_empty()
+        !self.overlay.is_empty() || self.raw_draft.is_some()
     }
 
-    /// How many preferences the draft would change.
+    /// How many unsaved changes the draft holds: one per preference it would
+    /// change, and one for the custom lines.
     #[must_use]
     pub fn dirty_count(&self) -> usize {
-        self.overlay.len()
+        self.overlay.len() + usize::from(self.raw_draft.is_some())
+    }
+
+    /// The custom `options.txt` lines as the screen holds them.
+    #[must_use]
+    pub fn raw_options(&self) -> &str {
+        self.raw_draft.as_deref().unwrap_or(&self.raw_baseline)
+    }
+
+    /// Records the custom lines the user has typed.
+    ///
+    /// The text is kept as typed, including lines that cannot be written: they
+    /// are still the user's to fix, and are reported by
+    /// [`Self::raw_problems`] rather than refused.
+    pub fn set_raw_options(&mut self, text: &str) {
+        self.raw_draft = (text != self.raw_baseline).then(|| text.to_owned());
+    }
+
+    /// The custom lines to save, or `None` when they are unchanged.
+    #[must_use]
+    pub fn raw_edit(&self) -> Option<String> {
+        self.raw_draft.clone()
+    }
+
+    /// Which custom lines will not be written, as sentences: the first few
+    /// are spelled out and the rest are counted.
+    #[must_use]
+    pub fn raw_problems(&self) -> String {
+        let rejected = RawOptionLines::parse(self.raw_options())
+            .rejected()
+            .to_vec();
+        if rejected.is_empty() {
+            return String::new();
+        }
+        let mut lines = vec![lookup("gui-minecraft-raw-problems")];
+        lines.extend(rejected.iter().take(MAX_RAW_PROBLEMS_SHOWN).map(|line| {
+            lookup_args(
+                line.problem.message_id(),
+                [("line", Arg::from(line.line_number))],
+            )
+        }));
+        if rejected.len() > MAX_RAW_PROBLEMS_SHOWN {
+            lines.push(lookup_args(
+                "gui-minecraft-raw-problems-more",
+                [("count", Arg::from(rejected.len() - MAX_RAW_PROBLEMS_SHOWN))],
+            ));
+        }
+        lines.join("\n")
     }
 
     /// Whether saving is allowed: something to save, nothing invalid, and no
@@ -2559,6 +2620,7 @@ mod tests {
                 .collect(),
             unusable: Vec::new(),
             unrecognized: 0,
+            raw_options: String::new(),
         }
     }
 
@@ -4303,6 +4365,104 @@ mod tests {
             Some("General"),
             "ungrouped rows come first"
         );
+    }
+
+    // ------------------------------------------------------- custom lines
+
+    #[test]
+    fn typing_custom_lines_is_an_unsaved_change_that_can_be_saved_alone() {
+        let mut model = loaded_model();
+        assert!(!model.is_dirty());
+        assert_eq!(model.raw_options(), "");
+
+        model.set_raw_options("autoJump:true");
+
+        assert!(model.is_dirty());
+        assert_eq!(model.dirty_count(), 1);
+        assert!(model.can_save());
+        assert_eq!(model.raw_edit().as_deref(), Some("autoJump:true"));
+        let edits = model.begin_save().expect("a batch");
+        assert!(edits.is_empty(), "no preference changed");
+    }
+
+    #[test]
+    fn typing_the_saved_lines_back_stops_them_being_unsaved() {
+        let mut snapshot = bundled_snapshot();
+        snapshot.raw_options = "a:1".to_owned();
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot);
+        assert_eq!(model.raw_options(), "a:1");
+
+        model.set_raw_options("a:1\nb:2");
+        assert!(model.is_dirty());
+        model.set_raw_options("a:1");
+
+        assert!(!model.is_dirty());
+        assert_eq!(model.raw_edit(), None);
+    }
+
+    #[test]
+    fn discarding_drops_the_typed_lines_and_counts_beside_preference_edits() {
+        let mut model = loaded_model();
+        model.set_boolean(&id("fullscreen"), true);
+        model.set_raw_options("a:1");
+        assert_eq!(model.dirty_count(), 2);
+
+        model.discard();
+
+        assert!(!model.is_dirty());
+        assert_eq!(model.raw_options(), "");
+    }
+
+    #[test]
+    fn a_confirmed_snapshot_retires_only_lines_it_caught_up_with() {
+        let mut model = loaded_model();
+        model.set_raw_options("a:1");
+
+        let mut other = bundled_snapshot();
+        other.raw_options = "b:2".to_owned();
+        model.apply_snapshot(other);
+        assert_eq!(
+            model.raw_options(),
+            "a:1",
+            "a refresh never discards a draft"
+        );
+        assert!(model.is_dirty());
+
+        let mut saved = bundled_snapshot();
+        saved.raw_options = "a:1".to_owned();
+        model.apply_snapshot(saved);
+        assert!(!model.is_dirty());
+        assert_eq!(model.raw_options(), "a:1");
+    }
+
+    #[test]
+    fn lines_that_cannot_be_written_are_named_but_do_not_block_saving() {
+        let mut model = loaded_model();
+        assert_eq!(model.raw_problems(), "");
+
+        model.set_raw_options("fine:1\nno separator\nversion:1");
+
+        let problems = model.raw_problems();
+        assert!(problems.contains("Line 2"), "{problems}");
+        assert!(problems.contains("Line 3"), "{problems}");
+        assert!(!problems.contains("Line 1"), "{problems}");
+        assert!(model.can_save(), "the text is still the user's to fix");
+    }
+
+    #[test]
+    fn many_unwritable_lines_are_summarized_after_the_first_few() {
+        let mut model = loaded_model();
+        let text = (0..10)
+            .map(|n| format!("bad{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        model.set_raw_options(&text);
+
+        let problems = model.raw_problems();
+        assert!(problems.contains("Line 6"), "{problems}");
+        assert!(!problems.contains("Line 7"), "{problems}");
+        assert!(problems.contains("4 more lines"), "{problems}");
     }
 
     // ------------------------------------------------------ save completion

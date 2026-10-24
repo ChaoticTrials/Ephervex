@@ -75,6 +75,7 @@ pub mod file;
 pub mod input;
 pub mod preference;
 pub mod preferences;
+pub mod raw_lines;
 
 pub use apply::{
     LanguageAvailability, OPTIONS_FILE_NAME, PlannedPreference, PreferenceApplication,
@@ -112,3 +113,4 @@ pub use preferences::{
     GlobalMinecraftPreferences, GuiScalePreference, InvalidPreferenceValue, LoadedPreferences,
     MAXIMUM_FOV_DEGREES, MINIMUM_FOV_DEGREES, Managed, PreferenceKey, PreferenceValue, WindowSize,
 };
+pub use raw_lines::{RawLineProblem, RawOptionLines, RejectedRawLine};

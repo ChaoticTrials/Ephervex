@@ -971,6 +971,9 @@ pub struct Config {
     /// rather than a fixed struct because the set of managed keys grows with
     /// the version-aware options adapters.
     pub minecraft_preferences: BTreeMap<String, PreferenceSetting>,
+    /// Raw `options.txt` lines applied to new instances after the managed
+    /// preferences, exactly as the user typed them. Empty when there are none.
+    pub minecraft_raw_options: String,
     /// Policy for browsing mod catalogs. Which catalog, never how to reach one.
     pub mods: ModsConfig,
     /// Which hosts the user has agreed a pack may be downloaded from.
@@ -1019,6 +1022,7 @@ impl Default for Config {
             java: JavaConfig::default(),
             favorite_minecraft_versions: Vec::new(),
             minecraft_preferences: BTreeMap::new(),
+            minecraft_raw_options: String::new(),
             mods: ModsConfig::default(),
             import: ImportConfig::default(),
             server_defaults: ServerDefaults::default(),
@@ -3479,6 +3483,21 @@ reference = ""
             round_tripped.minecraft_preferences["fullscreen"].value,
             "false"
         );
+    }
+
+    #[test]
+    fn raw_minecraft_option_lines_default_to_empty_and_round_trip_verbatim() {
+        let older = Config::from_toml_str("schema_version = 1\n").expect("parse");
+        assert_eq!(older.minecraft_raw_options, "");
+
+        let config = Config {
+            minecraft_raw_options: "key_key.modmenu.open:key.keyboard.m\n\n  spaced: 2 \n"
+                .to_owned(),
+            ..Config::default()
+        };
+        let parsed =
+            Config::from_toml_str(&config.to_toml_string().expect("serialize")).expect("re-parse");
+        assert_eq!(parsed.minecraft_raw_options, config.minecraft_raw_options);
     }
 
     #[test]

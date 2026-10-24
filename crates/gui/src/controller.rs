@@ -6625,6 +6625,16 @@ fn register_minecraft_defaults(
         render_minecraft(&ui, &state);
     });
 
+    // The custom lines are one text box and one edit. Typing records the text
+    // without writing it back to the box, which would move the caret.
+    let handle = ui.as_weak();
+    let state = Rc::clone(minecraft);
+    ui.on_minecraft_edit_raw_options(move |text| {
+        let Some(ui) = handle.upgrade() else { return };
+        state.borrow_mut().set_raw_options(&text);
+        refresh_minecraft_totals(&ui, &state);
+    });
+
     // -- the draft itself.
     register_minecraft_editors(ui, commands, minecraft, keys);
     register_minecraft_capture(ui, commands, minecraft, keys);
@@ -6639,8 +6649,12 @@ fn register_minecraft_defaults(
         let Some(edits) = state.borrow_mut().begin_save() else {
             return;
         };
+        let raw_options = state.borrow().raw_edit();
         refresh_minecraft_totals(&ui, &state);
-        send(&sender, Command::SaveMinecraftPreferences { edits });
+        send(
+            &sender,
+            Command::SaveMinecraftPreferences { edits, raw_options },
+        );
     });
 
     let handle = ui.as_weak();
@@ -7781,6 +7795,7 @@ fn render_minecraft_summary(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefa
     ui.set_minecraft_unusable_notice(
         preserved_notice("gui-minecraft-unusable-notice", state.unusable()).into(),
     );
+    ui.set_minecraft_raw_options(state.raw_options().into());
     drop(state);
     refresh_minecraft_totals(ui, minecraft);
 }
@@ -7821,6 +7836,7 @@ fn refresh_minecraft_totals(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefa
     ui.set_minecraft_can_save(state.can_save());
     ui.set_minecraft_dirty_count(to_i32(state.dirty_count()));
     ui.set_minecraft_total_count(to_i32(state.entries().len()));
+    ui.set_minecraft_raw_problems(state.raw_problems().into());
 }
 
 /// One low-emphasis sentence about configuration this build leaves alone, or
@@ -21994,6 +22010,34 @@ mod tests {
     }
 
     #[test]
+    fn typed_custom_lines_are_saved_with_the_batch_and_listed_when_unwritable() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let minecraft = Rc::new(RefCell::new(MinecraftDefaultsModel::new()));
+        register_minecraft_defaults(&ui, &sender, &minecraft, &BindingCapture::default());
+        assert!(!ui.get_minecraft_can_save());
+
+        ui.invoke_minecraft_edit_raw_options("autoJump:true\nnot a line".into());
+
+        assert!(ui.get_minecraft_dirty());
+        assert!(ui.get_minecraft_can_save());
+        assert!(ui.get_minecraft_raw_problems().contains("Line 2"));
+
+        ui.invoke_minecraft_save_defaults();
+        let Command::SaveMinecraftPreferences { edits, raw_options } =
+            commands.try_recv().expect("a save is sent")
+        else {
+            panic!("saving sends the preference batch");
+        };
+        assert!(edits.is_empty());
+        assert_eq!(raw_options.as_deref(), Some("autoJump:true\nnot a line"));
+        assert!(ui.get_minecraft_saving());
+
+        ui.invoke_minecraft_discard_defaults();
+        assert_eq!(ui.get_minecraft_raw_options(), "");
+    }
+
+    #[test]
     fn a_press_with_no_capturing_row_disarms_the_reader() {
         let (ui, keys, _minecraft, _commands) = window_with_open_capture();
         // The row went away without any handler running.
@@ -22082,6 +22126,7 @@ mod tests {
                     .collect(),
                 unusable: Vec::new(),
                 unrecognized: 0,
+                raw_options: String::new(),
             });
             minecraft.set_show_advanced(true);
             minecraft.set_preview_release(&catalog.canonical_minecraft_version);
@@ -22122,6 +22167,7 @@ mod tests {
                         .collect(),
                     unusable: Vec::new(),
                     unrecognized: 0,
+                    raw_options: String::new(),
                 });
             minecraft.borrow_mut().set_show_advanced(true);
             minecraft

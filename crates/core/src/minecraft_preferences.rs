@@ -100,6 +100,9 @@ pub struct MinecraftPreferenceSnapshot {
     /// How many configured ids this build has no descriptor for. They stay in
     /// the configuration file untouched.
     pub unrecognized: usize,
+    /// The raw `options.txt` lines applied after the preferences, exactly as
+    /// the user typed them.
+    pub raw_options: String,
 }
 
 /// What one exact Minecraft release could do with preference values a settings
@@ -261,6 +264,7 @@ impl App {
             entries,
             unusable: loaded.rejected,
             unrecognized: loaded.unrecognized,
+            raw_options: self.config().minecraft_raw_options.clone(),
         })
     }
 
@@ -368,6 +372,25 @@ impl App {
         &mut self,
         edits: &[PreferenceEdit],
     ) -> CoreResult<()> {
+        self.save_global_minecraft_defaults(edits, None)
+    }
+
+    /// Applies a batch of preference edits and, with it, a replacement for the
+    /// raw `options.txt` lines, or none of it.
+    ///
+    /// `raw_options` is stored exactly as given: it is the user's own text and
+    /// is read again, line by line, each time an instance is created. `None`
+    /// leaves the stored lines alone. Lines that cannot be one `options.txt`
+    /// line are not a reason to refuse the save, because the text is still the
+    /// user's to fix; they are reported by [`ephervex_options::RawOptionLines::rejected`] and
+    /// skipped when an instance is written.
+    #[instrument(skip(self, edits, raw_options))]
+    pub fn save_global_minecraft_defaults(
+        &mut self,
+        edits: &[PreferenceEdit],
+        raw_options: Option<&str>,
+    ) -> CoreResult<()> {
+        let raw_options = raw_options.map(str::to_owned);
         let catalog = self.minecraft_preference_catalog()?;
         // Validated before anything is written, then applied in order to the
         // file as it is on disk, so an edit that keeps a stored value keeps the
@@ -388,6 +411,9 @@ impl App {
         }
 
         self.mutate_config(|config| {
+            if let Some(raw_options) = raw_options {
+                config.minecraft_raw_options = raw_options;
+            }
             for (id, change) in changes {
                 match change {
                     PreferenceChange::Set { managed, value } => {
@@ -1004,6 +1030,100 @@ mod tests {
             "guiScale:4\nrenderDistance:32\n",
             "a duplicate keeps what it copied"
         );
+    }
+
+    #[test]
+    fn raw_lines_reach_a_new_instance_after_and_over_the_managed_preferences() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_defaults(
+            &[PreferenceEdit::manage(
+                id("gui_scale"),
+                MinecraftPreferenceValue::Integer(3),
+            )],
+            Some("guiScale:2\n\nsomeModOption:{\"a\":1}\nnot a line\nversion:1\n"),
+        )
+        .expect("save");
+
+        let record = create(&app, "Raw", "1.20.1");
+
+        let options = options_of(&record).expect("options");
+        assert!(options.contains("guiScale:2\n"), "{options:?}");
+        assert!(!options.contains("guiScale:3"), "{options:?}");
+        assert!(options.contains("someModOption:{\"a\":1}\n"), "{options:?}");
+        assert!(!options.contains("not a line"), "{options:?}");
+        assert!(options.starts_with("version:3465\n"), "{options:?}");
+    }
+
+    #[test]
+    fn raw_lines_are_stored_exactly_and_only_replaced_when_a_save_names_them() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        assert_eq!(app.config().minecraft_raw_options, "");
+
+        let text = "  spaced: 2 \n\nnot a line yet";
+        app.save_global_minecraft_defaults(&[], Some(text))
+            .expect("save");
+        assert_eq!(app.config().minecraft_raw_options, text);
+        assert_eq!(
+            app.global_minecraft_preference_snapshot()
+                .expect("snapshot")
+                .raw_options,
+            text
+        );
+
+        app.save_global_minecraft_preferences(&[PreferenceEdit::manage(
+            id("fullscreen"),
+            MinecraftPreferenceValue::Boolean(true),
+        )])
+        .expect("save");
+        assert_eq!(
+            app.config().minecraft_raw_options,
+            text,
+            "a save that does not name the lines leaves them alone"
+        );
+
+        app.save_global_minecraft_defaults(&[], Some(""))
+            .expect("save");
+        assert_eq!(app.config().minecraft_raw_options, "");
+    }
+
+    #[test]
+    fn an_invalid_batch_does_not_replace_the_raw_lines() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_defaults(&[], Some("a:1"))
+            .expect("save");
+
+        let refused = app.save_global_minecraft_defaults(
+            &[PreferenceEdit::manage(
+                id("fov"),
+                MinecraftPreferenceValue::Boolean(true),
+            )],
+            Some("b:2"),
+        );
+
+        assert!(refused.is_err());
+        assert_eq!(app.config().minecraft_raw_options, "a:1");
+    }
+
+    #[test]
+    fn changing_the_raw_lines_later_never_rewrites_an_existing_instance() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        app.save_global_minecraft_defaults(&[], Some("autoJump:true"))
+            .expect("save");
+        let existing = create(&app, "Existing", "1.20.1");
+        let before = options_of(&existing).expect("options");
+        assert!(before.contains("autoJump:true"));
+
+        app.save_global_minecraft_defaults(&[], Some("autoJump:false\nother:1"))
+            .expect("save");
+
+        assert_eq!(options_of(&existing).expect("options"), before);
+        let later = create(&app, "Later", "1.20.1");
+        let options = options_of(&later).expect("options");
+        assert!(options.contains("autoJump:false") && options.contains("other:1"));
     }
 
     /// The preview's own fixture: a draft built without touching configuration.

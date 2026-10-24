@@ -446,6 +446,12 @@ preferences-value-not-applied = Minecraft { $version } cannot store the configur
 preferences-language-unverified = The languages Minecraft { $version } offers could not be checked, so { $preference } was not applied.
 preferences-language-absent = Minecraft { $version } does not offer that language, so { $preference } was not applied.
 
+# $line is the 1-based line number in the text the user typed.
+preferences-raw-line-missing-separator = Line { $line } has no ":" between the key and the value, so it was not written.
+preferences-raw-line-empty-key = Line { $line } has no key before the ":", so it was not written.
+preferences-raw-line-control-character = Line { $line } contains a control character, so it was not written.
+preferences-raw-line-data-version = Line { $line } sets the data version. Ephervex writes that itself for the Minecraft release, so the line was not written.
+
 error-options-compatibility-invalid = The Minecraft settings compatibility data could not be used.
 .action = Ephervex is using the data it shipped with. No settings file was changed.
 
@@ -3055,6 +3061,15 @@ gui-minecraft-preserved-notice = { $count ->
 gui-minecraft-unusable-notice = { $count ->
     [one] 1 configured Minecraft default could not be read and is not applied.
    *[other] { $count } configured Minecraft defaults could not be read and are not applied.
+}
+gui-minecraft-raw-tab = Custom lines
+gui-minecraft-raw-detail = Raw options.txt lines, one key:value per line. Each is applied after the settings in the other tabs: a line whose key already exists replaces it, and any other line is added. Ephervex does not check them against any Minecraft version, so you are responsible for their being correct.
+gui-minecraft-raw-placeholder = key_key.modmenu.open:key.keyboard.m
+gui-minecraft-raw-label = Custom options.txt lines
+gui-minecraft-raw-problems = These lines will not be written:
+gui-minecraft-raw-problems-more = { $count ->
+    [one] ...and 1 more line that cannot be written.
+   *[other] ...and { $count } more lines that cannot be written.
 }
 gui-minecraft-defaults-saved = Saved the Minecraft defaults.
 gui-minecraft-defaults-discarded = Discarded the unsaved Minecraft defaults.

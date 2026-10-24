@@ -29,7 +29,7 @@ use ephervex_minecraft::LanguageCatalog;
 use ephervex_model::{AbsentModPolicy, InstanceId, ServerId};
 use ephervex_options::{
     GlobalMinecraftPreferences, LanguageAvailability, LoadedPreferences, OptionsCompatibility,
-    PreferenceApplication, PreferenceKey, PreferenceValue,
+    PreferenceApplication, PreferenceKey, PreferenceValue, RawOptionLines,
 };
 use ephervex_pack::{PackSide, SourceStore};
 use ephervex_storage::{
@@ -367,14 +367,26 @@ impl App {
                 "ignoring configured Minecraft preferences this build has no descriptor for"
             );
         }
-        Ok(ephervex_options::apply_managed_preferences(
-            &ephervex_storage::metadata::client_game_dir(&record.root),
+        let raw = RawOptionLines::parse(&self.config().minecraft_raw_options);
+        let plan = ephervex_options::plan_managed_preferences(
             &record.minecraft_version,
             &loaded.preferences,
             catalog,
             &context.compatibility,
             context.language,
-        )?)
+        )
+        .with_raw_lines(&raw);
+        let application = ephervex_options::apply_plan(
+            &ephervex_storage::metadata::client_game_dir(&record.root),
+            &plan,
+        )?;
+        if !application.raw_lines_rejected.is_empty() {
+            warn!(
+                count = application.raw_lines_rejected.len(),
+                "some raw Minecraft option lines were not written; they cannot be one options.txt line"
+            );
+        }
+        Ok(application)
     }
 }
 
