@@ -86,7 +86,15 @@ export component LiveLogViewer inherits Rectangle {
         Rectangle {
             height: Theme.control-height + 12px;
             background: Theme.surface;
-            HorizontalLayout {
+            // A pane too narrow for every control scrolls the row sideways
+            // rather than cutting it off.
+            ScrollView {
+                viewport-width: max(self.width, levels.min-width);
+                viewport-height: self.visible-height;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+            levels := HorizontalLayout {
+                height: parent.visible-height;
                 padding-left: 10px; padding-right: 10px; spacing: 6px; cross-axis-alignment: center;
                 all-levels := FilterChip { text: GuiI18n.text("gui-all"); accessible-name: GuiI18n.text("gui-filter-all-levels"); selected: root.trace-enabled && root.debug-enabled && root.info-enabled && root.warn-enabled && root.error-enabled && root.fatal-enabled && root.other-enabled; clicked => { root.set-level("all", !all-levels.selected); } }
                 FilterChip { text: "INFO"; accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
@@ -98,11 +106,18 @@ export component LiveLogViewer inherits Rectangle {
                 FilterChip { text: GuiI18n.text("gui-log-level-other"); accessible-name: GuiI18n.text("gui-filter-other"); selected: root.other-enabled; clicked => { root.set-level("other", !root.other-enabled); } }
                 Rectangle { horizontal-stretch: 1; }
             }
+            }
         }
         Rectangle {
             height: Theme.control-height + 12px;
             background: Theme.surface;
-            HorizontalLayout {
+            ScrollView {
+                viewport-width: max(self.width, actions.min-width);
+                viewport-height: self.visible-height;
+                vertical-scrollbar-policy: ScrollBarPolicy.always-off;
+                horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
+            actions := HorizontalLayout {
+                height: parent.visible-height;
                 padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
                 if root.searchable : HorizontalLayout {
                     spacing: 8px;
@@ -120,6 +135,7 @@ export component LiveLogViewer inherits Rectangle {
                 // Output that arrived below the view while it is not following. Pressing it
                 // resumes following, which takes the view to the newest output.
                 if root.pending-lines > 0 : AppButton { text: GuiI18n.count("gui-new-log-lines", root.pending-lines); tone: "primary"; clicked => { root.follow-changed(true); } }
+            }
             }
         }
         if root.status != "" || root.history-truncated : Rectangle {
