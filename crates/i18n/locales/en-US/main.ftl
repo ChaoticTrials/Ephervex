@@ -1166,6 +1166,10 @@ error-issue-link-not-an-address = An issue link must be a full web address start
 error-issue-link-unsupported-scheme = An issue link must start with http:// or https://.
 error-issue-link-missing-host = That issue link names no website. Include a host such as github.com.
 error-issue-link-credentials = An issue link cannot contain a user name or password.
+error-case-step-empty = A step needs some text.
+error-case-step-too-long = That step is too long. Use at most { $limit } characters.
+error-case-too-many-steps = This instance already has { $limit } steps. Remove one before adding another.
+error-case-note-too-long = That note is too long. Use at most { $limit } characters.
 
 error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
 .action = Choose a catalog in Settings, or name one for this command. The stored value is left alone.

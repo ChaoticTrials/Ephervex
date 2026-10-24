@@ -28,6 +28,7 @@
 //! looks like one.
 
 pub mod atomic;
+pub mod case_notes;
 pub mod clone;
 pub mod config;
 pub(crate) mod copy;
@@ -49,6 +50,9 @@ pub mod restore;
 mod test_support;
 
 pub use atomic::{AtomicWriteOptions, sync_parent, write_atomic, write_bytes_atomic};
+pub use case_notes::{
+    CaseNotes, CaseRefusal, CaseStep, MAX_CASE_NOTE_CHARS, MAX_CASE_STEP_CHARS, MAX_CASE_STEPS,
+};
 pub use clone::{CloneMethod, CloneReport, clone_file, clone_tree, clone_tree_with_check};
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,

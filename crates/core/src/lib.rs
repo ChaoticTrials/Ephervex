@@ -385,11 +385,12 @@ pub use ephervex_server::{
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
-    ApplicationTextScale, ApplicationTheme, CONFIG_SCHEMA_VERSION, ClientCommit,
-    ClientCommitWarning, ClientFolder, ClientRecord, ClientRootConflict, CloneMethod, Config,
-    CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind,
-    DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop, ImportSource,
-    JavaConfig, LaunchState, LockDisposition, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder,
+    ApplicationTextScale, ApplicationTheme, CONFIG_SCHEMA_VERSION, CaseNotes, CaseRefusal,
+    CaseStep, ClientCommit, ClientCommitWarning, ClientFolder, ClientRecord, ClientRootConflict,
+    CloneMethod, Config, CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError,
+    DiagnosticKind, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop,
+    ImportSource, JavaConfig, LaunchState, LockDisposition, MAX_CASE_NOTE_CHARS,
+    MAX_CASE_STEP_CHARS, MAX_CASE_STEPS, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder,
     NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
     ReconciliationReport, RecordRef, RunnerHost, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch,
     SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,

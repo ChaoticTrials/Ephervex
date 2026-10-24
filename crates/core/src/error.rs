@@ -29,6 +29,7 @@ use crate::isolation::IsolationError;
 use crate::issue_link::IssueLinkRefusal;
 use crate::snapshot::SnapshotError;
 use crate::verify::RepairRefusal;
+use ephervex_storage::CaseRefusal;
 
 /// An error together with everything that caused it, for one log line.
 ///
@@ -441,6 +442,10 @@ pub enum CoreError {
     #[error("that issue link cannot be used: {reason}")]
     IssueLinkInvalid { reason: IssueLinkRefusal },
 
+    /// A reproduction step or note the user typed cannot be stored as it stands.
+    #[error("that case entry cannot be used: {reason}")]
+    CaseRefused { reason: CaseRefusal },
+
     /// A group already has this name. Names compare without regard to case.
     #[error("a group named `{name}` already exists")]
     GroupNameTaken { name: String },
@@ -591,6 +596,17 @@ impl From<ephervex_java::MemoryRangeViolation> for CoreError {
     }
 }
 
+/// The limit a refused case entry names, for the sentence that explains it.
+fn case_refusal_args(reason: CaseRefusal) -> Vec<(&'static str, Arg<'static>)> {
+    let limit = match reason {
+        CaseRefusal::StepTooLong => ephervex_storage::MAX_CASE_STEP_CHARS,
+        CaseRefusal::TooManySteps => ephervex_storage::MAX_CASE_STEPS,
+        CaseRefusal::NoteTooLong => ephervex_storage::MAX_CASE_NOTE_CHARS,
+        _ => return Vec::new(),
+    };
+    vec![("limit", Arg::from(limit.to_string()))]
+}
+
 impl CoreError {
     /// The dependency this refuses because a jar already on the host provides
     /// it, when that is the refusal.
@@ -700,6 +716,12 @@ impl CoreError {
             Self::ModFileNotAdded { .. } => "error-mod-file-not-added",
             Self::EntityNameInvalid { reason } => reason.message_id(),
             Self::IssueLinkInvalid { reason } => reason.message_id(),
+            Self::CaseRefused { reason } => match reason {
+                CaseRefusal::StepEmpty => "error-case-step-empty",
+                CaseRefusal::StepTooLong => "error-case-step-too-long",
+                CaseRefusal::TooManySteps => "error-case-too-many-steps",
+                _ => "error-case-note-too-long",
+            },
             Self::GroupNameTaken { .. } => "error-group-name-taken",
             Self::GroupNotFound { .. } => "error-group-not-found",
             Self::IconRefused { reason, .. } => reason.message_id(),
@@ -801,6 +823,7 @@ impl CoreError {
                 "limit",
                 Arg::from(crate::issue_link::MAX_ISSUE_LINK_BYTES.to_string()),
             )],
+            Self::CaseRefused { reason } => case_refusal_args(*reason),
             Self::JavaSettingsInvalid {
                 minimum_mib,
                 maximum_mib,
@@ -1039,6 +1062,7 @@ impl CoreError {
             | Self::ModFileNotAdded { .. }
             | Self::EntityNameInvalid { .. }
             | Self::IssueLinkInvalid { .. }
+            | Self::CaseRefused { .. }
             | Self::GroupNameTaken { .. }
             | Self::GroupNotFound { .. }
             | Self::IconRefused { .. }
@@ -1151,6 +1175,7 @@ impl CoreError {
             | Self::SingleInstanceUnavailable { .. }
             | Self::EntityNameInvalid { .. }
             | Self::IssueLinkInvalid { .. }
+            | Self::CaseRefused { .. }
             | Self::GroupNameTaken { .. }
             | Self::GroupNotFound { .. }
             | Self::RepairRefused { .. }
