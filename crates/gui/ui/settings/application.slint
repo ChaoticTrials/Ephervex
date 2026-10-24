@@ -20,9 +20,9 @@ export component OverrideCard inherits Rectangle {
     callback reset();
     min-height: card.preferred-height;
     vertical-stretch: 1;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
     background: Theme.surface;
     card := VerticalLayout {
         padding: 16px;
@@ -103,8 +103,8 @@ export component DiskUsagePanel inherits VerticalLayout {
             BodyText { text: root.measured-at; color: Theme.text-muted; vertical-alignment: center; }
         }
         if root.incomplete : Rectangle {
-            border-radius: 7px;
-            border-width: 1px;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
             border-color: Theme.warning;
             background: Theme.surface;
             height: incomplete-body.preferred-height;
@@ -143,9 +143,9 @@ export component DiskUsagePanel inherits VerticalLayout {
         }
         Divider { }
         for category in root.categories : Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Theme.border;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
             background: Theme.surface;
             height: category-body.preferred-height;
             category-body := VerticalLayout {
@@ -194,9 +194,9 @@ export component DiskUsagePanel inherits VerticalLayout {
         AppButton { text: GuiI18n.text("gui-storage-stop"); clicked => { root.stop-maintenance(); } }
     }
     if root.maintenance-result.length > 0 : Rectangle {
-        border-radius: 7px;
-        border-width: 1px;
-        border-color: Theme.border;
+        border-radius: Theme.card-radius;
+        border-width: Theme.strong-border-width;
+        border-color: Theme.border-strong;
         background: Theme.surface;
         height: result-body.preferred-height;
         result-body := VerticalLayout {
@@ -212,9 +212,9 @@ export component DiskUsagePanel inherits VerticalLayout {
         BodyText { text: root.maintenance-hosts; color: Theme.text-muted; wrap: word-wrap; }
         if root.maintenance-incomplete : BodyText { text: GuiI18n.text("gui-storage-incomplete"); color: Theme.warning; wrap: word-wrap; }
         for group in root.maintenance-groups : Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Theme.border;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
             background: Theme.surface;
             height: group-body.preferred-height;
             group-body := VerticalLayout {

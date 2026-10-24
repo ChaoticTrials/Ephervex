@@ -1827,7 +1827,7 @@ export component AppWindow inherits Window {
                             return reject;
                         }
                         HorizontalLayout { spacing: 0px;
-                            Rectangle { width: 208px; background: Theme.surface; border-width: 1px; border-color: Theme.border; VerticalLayout { padding: 14px; spacing: 5px;
+                            Rectangle { width: 208px; background: Theme.surface; border-width: Theme.strong-border-width; border-color: Theme.border-strong; VerticalLayout { padding: 14px; spacing: 5px;
                             AppButton { text: GuiI18n.text("gui-settings-back"); compact: true; clicked => { root.settings-open = false; } }
                             Eyebrow { text: GuiI18n.text("gui-settings-heading"); }
                                 Rectangle { height: 5px; }
@@ -1841,9 +1841,6 @@ export component AppWindow inherits Window {
                                 // that shows the figure is opened rather than on every
                                 // refresh of everything else.
                                 SettingsNavItem { label: GuiI18n.text("gui-settings-storage"); selected: root.settings-tab == "Storage"; clicked => { root.open-settings("Storage"); } }
-                                // Measured when asked for, not on opening: a large
-                                // installation takes a while to walk.
-                                SettingsNavItem { label: GuiI18n.text("gui-settings-disk-usage"); selected: root.settings-tab == "Disk Usage"; clicked => { root.open-settings("Disk Usage"); } }
                                 // The launcher's logs change as the launcher runs, so the
                                 // offer is read again whenever the page is opened.
                                 SettingsNavItem { label: GuiI18n.text("gui-settings-diagnostics"); selected: root.settings-tab == "Diagnostics"; clicked => { root.open-settings("Diagnostics"); } }
@@ -1853,8 +1850,8 @@ export component AppWindow inherits Window {
                             } }
                             Rectangle { horizontal-stretch: 1; background: Theme.background; ScrollView { viewport-width: self.visible-width; VerticalLayout { x: max(0px, (parent.width - self.width) / 2); alignment: start; width: min(parent.width, root.settings-two-columns ? 1500px : 1100px); padding: 30px; spacing: 20px;
                                 PageIntro {
-                                    title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-settings-server-properties") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-settings-disk-usage") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-settings-diagnostics") : GuiI18n.text("gui-settings-about");
-                                    subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-server-defaults-intro") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Disk Usage" ? GuiI18n.text("gui-disk-usage-page-detail") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-launcher-diagnostics-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
+                                    title: root.settings-tab == "General" ? GuiI18n.text("gui-settings-general") : root.settings-tab == "Minecraft" ? GuiI18n.text("gui-settings-minecraft") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-settings-server-properties") : root.settings-tab == "Java" ? GuiI18n.text("gui-settings-java") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-settings-accounts") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-settings-providers") : root.settings-tab == "Storage" ? GuiI18n.text("gui-settings-storage") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-settings-diagnostics") : GuiI18n.text("gui-settings-about");
+                                    subtitle: root.settings-tab == "Minecraft" ? GuiI18n.text("gui-minecraft-defaults-detail") : root.settings-tab == "Server Properties" ? GuiI18n.text("gui-server-defaults-intro") : root.settings-tab == "Java" ? GuiI18n.text("gui-java-detail") : root.settings-tab == "Accounts" ? GuiI18n.text("gui-accounts-detail") : root.settings-tab == "Providers & APIs" ? GuiI18n.text("gui-provider-detail") : root.settings-tab == "Storage" ? GuiI18n.text("gui-storage-detail") : root.settings-tab == "Diagnostics" ? GuiI18n.text("gui-launcher-diagnostics-detail") : root.settings-tab == "About & Licenses" ? GuiI18n.text("gui-tagline") : GuiI18n.text("gui-settings-detail");
                                 }
                                 if root.settings-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
                                     // Side by side where the window is wide enough for two
@@ -1972,9 +1969,9 @@ export component AppWindow inherits Window {
                                     if root.trusted-pack-hosts.length == 0 : Rectangle {
                                         width: min(parent.width, 520px);
                                         height: max(46px, no-trusted-hosts.preferred-height + 22px);
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                                        border-radius: Theme.card-radius;
+                                        border-width: Theme.strong-border-width;
+                                        border-color: Theme.border-strong;
                                         background: Theme.surface;
                                         no-trusted-hosts := BodyText { x: 14px; width: parent.width - 28px; text: GuiI18n.text("gui-no-trusted-pack-hosts"); color: Theme.text-muted; wrap: word-wrap; }
                                     }
@@ -1984,9 +1981,9 @@ export component AppWindow inherits Window {
                                     for host in root.trusted-pack-hosts : Rectangle {
                                         width: min(parent.width, 520px);
                                         height: 48px;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                                        border-radius: Theme.card-radius;
+                                        border-width: Theme.strong-border-width;
+                                        border-color: Theme.border-strong;
                                         background: Theme.surface;
                                         HorizontalLayout {
                                             padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
@@ -1995,15 +1992,15 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     SectionTitle { title: GuiI18n.text("gui-favorite-versions"); detail: GuiI18n.text("gui-favorite-versions-detail"); }
-                                    if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    if root.favorite-minecraft-versions.length == 0 : Rectangle { height: max(46px, no-favorites.preferred-height + 22px); border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                                         no-favorites := BodyText { x: 12px; width: parent.width - 24px; text: GuiI18n.text("gui-no-favorite-versions"); color: Theme.text-muted; wrap: word-wrap; }
                                     }
                                     for version in root.favorite-minecraft-versions : Rectangle {
                                         width: min(parent.width, 520px);
                                         height: 48px;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                                        border-radius: Theme.card-radius;
+                                        border-width: Theme.strong-border-width;
+                                        border-color: Theme.border-strong;
                                         background: Theme.surface;
                                         HorizontalLayout {
                                             padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
@@ -2017,10 +2014,10 @@ export component AppWindow inherits Window {
                                 // Discard stay reachable however long the list is.
                                 if root.settings-tab == "Minecraft" : VerticalLayout { spacing: 12px;
                                     height: max(360px, root.height - 258px);
-                                    if root.minecraft-preserved-notice != "" : Rectangle { height: max(46px, preserved-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                    if root.minecraft-preserved-notice != "" : Rectangle { height: max(46px, preserved-text.preferred-height + 22px); border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                                         preserved-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-preserved-notice; color: Theme.text-muted; wrap: word-wrap; }
                                     }
-                                    if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
+                                    if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
                                         unusable-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-unusable-notice; color: Theme.warning; wrap: word-wrap; }
                                     }
                             // The stable catalog categories, one tab each.
@@ -2051,7 +2048,7 @@ export component AppWindow inherits Window {
                                     enabled: !root.minecraft-saving;
                                     edited(value) => { root.minecraft-edit-raw-options(value); }
                                 }
-                                if root.minecraft-raw-problems != "" : Rectangle { height: max(46px, raw-problems-text.preferred-height + 22px); vertical-stretch: 0; border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
+                                if root.minecraft-raw-problems != "" : Rectangle { height: max(46px, raw-problems-text.preferred-height + 22px); vertical-stretch: 0; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
                                     raw-problems-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-raw-problems; color: Theme.warning; wrap: word-wrap; }
                                 }
                             }
@@ -2178,7 +2175,7 @@ export component AppWindow inherits Window {
                                         VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-java-refresh"); clicked => { root.refresh-java(); } } }
                                     }
                                     if root.java-runtimes.length == 0 : EmptyState { title: GuiI18n.text("gui-java-no-runtimes"); message: GuiI18n.text("gui-java-no-runtimes-detail"); }
-                                    for java in root.java-runtimes : Rectangle { height: java.pinned-by == "" ? 75px : 97px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 10px; VerticalLayout { horizontal-stretch: 1; VerticalLayout { alignment: center; Heading { text: java.title; font-size: Theme.row-heading-size; } BodyText { text: java.path; overflow: elide; } if java.pinned-by != "" : BodyText { text: java.pinned-by; color: Theme.text-muted; overflow: elide; } } } VerticalLayout { alignment: center; Pill { text: java.origin; tone-color: java.origin == "managed" ? Theme.accent : java.origin == "system" || java.origin == "sdkman" ? Theme.text-secondary : Theme.accent-secondary; } }
+                                    for java in root.java-runtimes : Rectangle { height: java.pinned-by == "" ? 75px : 97px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; HorizontalLayout { padding: 12px; spacing: 10px; VerticalLayout { horizontal-stretch: 1; VerticalLayout { alignment: center; Heading { text: java.title; font-size: Theme.row-heading-size; } BodyText { text: java.path; overflow: elide; } if java.pinned-by != "" : BodyText { text: java.pinned-by; color: Theme.text-muted; overflow: elide; } } } VerticalLayout { alignment: center; Pill { text: java.origin; tone-color: java.origin == "managed" ? Theme.accent : java.origin == "system" || java.origin == "sdkman" ? Theme.text-secondary : Theme.accent-secondary; } }
                                         // Only what the launcher installed itself offers the
                                         // bin: a runtime found on the system belongs to
                                         // whoever put it there. The slot is kept either way,
@@ -2200,7 +2197,7 @@ export component AppWindow inherits Window {
                                 }
                                 if root.settings-tab == "Providers & APIs" : VerticalLayout { spacing: 14px;
                                     SectionTitle { title: GuiI18n.text("gui-preferred-mod-catalog"); detail: GuiI18n.text("gui-preferred-mod-catalog-detail"); }
-                                    Rectangle { height: 146px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
+                                    Rectangle { height: 146px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 8px;
                                         HorizontalLayout { Heading { text: GuiI18n.text("gui-preferred-mod-catalog-heading"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.default-mod-catalog-is-custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.default-mod-catalog-is-custom ? Theme.accent : Theme.text-secondary; } }
                                         // Applied the moment a chip is clicked, and the selection follows
                                         // the stored value rather than the click: a save that fails leaves
@@ -2235,7 +2232,7 @@ export component AppWindow inherits Window {
                                     }
                                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: root.microsoft-client-id-saving || root.user-agent-saving ? GuiI18n.text("gui-saving") : GuiI18n.text("gui-save-api-settings"); accessible-name: GuiI18n.text("gui-save-api-settings"); tone: "primary"; enabled: !root.microsoft-client-id-saving && !root.user-agent-saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.save-api-settings(root.microsoft-client-id, root.user-agent); } } }
                                     SectionTitle { title: GuiI18n.text("gui-curseforge"); detail: root.curseforge-build-key-available ? GuiI18n.text("gui-curseforge-detail-default") : GuiI18n.text("gui-curseforge-detail-required"); }
-                                    Rectangle { height: curseforge-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; curseforge-card := VerticalLayout { padding: 16px; spacing: 8px;
+                                    Rectangle { height: curseforge-card.preferred-height; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; curseforge-card := VerticalLayout { padding: 16px; spacing: 8px;
                                         HorizontalLayout { Heading { text: GuiI18n.text("gui-curseforge-api-key"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.curseforge-key-configured ? GuiI18n.text("gui-curseforge-key-configured") : root.curseforge-key-default-in-use ? GuiI18n.text("gui-curseforge-key-default-in-use") : GuiI18n.text("gui-curseforge-key-not-configured"); tone-color: root.curseforge-key-configured ? Theme.accent : root.curseforge-key-default-in-use ? Theme.text-secondary : Theme.danger; } }
                                         // Masked because it shows what the user is typing, never what is stored:
                                         // a saved key is not readable from here and the field is emptied on submit.
@@ -2249,27 +2246,6 @@ export component AppWindow inherits Window {
                                         if !root.curseforge-key-configured && !root.curseforge-key-default-in-use : BodyText { text: GuiI18n.text("gui-curseforge-key-missing-detail"); color: Theme.warning; wrap: word-wrap; }
                                         HorizontalLayout { AppButton { text: GuiI18n.text("gui-curseforge-key-help"); clicked => { root.open-curseforge-key-help(); } } Rectangle { horizontal-stretch: 1; } }
                                     } }
-                                }
-                                if root.settings-tab == "Disk Usage" : DiskUsagePanel {
-                                    state: root.disk-usage-state; progress: root.disk-usage-progress;
-                                    total: root.disk-usage-total; measured-at: root.disk-usage-measured-at;
-                                    retention: root.disk-usage-retention; categories: root.disk-usage-categories;
-                                    incomplete: root.disk-usage-incomplete; incomplete-text: root.disk-usage-incomplete-text; unreadable: root.disk-usage-unreadable;
-                                    stale: root.disk-usage-stale;
-                                    maintenance-busy: root.storage-maintenance-busy; maintenance-progress: root.storage-maintenance-progress;
-                                    maintenance-inspected: root.storage-inspected; maintenance-headline: root.storage-headline; maintenance-hosts: root.storage-hosts;
-                                    maintenance-incomplete: root.storage-incomplete; maintenance-groups: root.storage-groups;
-                                    maintenance-checked: root.storage-checked; maintenance-integrity: root.storage-integrity;
-                                    maintenance-faults: root.storage-faults; maintenance-unchecked: root.storage-unchecked;
-                                    maintenance-can-recover: root.storage-can-recover; maintenance-result: root.storage-result;
-                                    refresh => { root.measure-disk-usage(); }
-                                    stop => { root.stop-disk-usage(); }
-                                    inspect => { root.inspect-storage(); }
-                                    verify => { root.verify-storage(); }
-                                    recover => { root.recover-storage(); }
-                                    review => { root.review-storage-cleanup(); }
-                                    stop-maintenance => { root.stop-storage-maintenance(); }
-                                    open-location(category, index) => { root.open-storage-location(category, index); }
                                 }
                                 if root.settings-tab == "Diagnostics" : VerticalLayout { spacing: 14px;
                                     SectionTitle { title: GuiI18n.text("gui-launcher-bundle-title"); detail: GuiI18n.text("gui-launcher-bundle-detail"); }
@@ -2290,7 +2266,7 @@ export component AppWindow inherits Window {
                                 }
                                 if root.settings-tab == "Storage" : VerticalLayout { spacing: 14px;
                                     SectionTitle { title: GuiI18n.text("gui-persistent-storage"); detail: GuiI18n.text("gui-persistent-storage-detail"); }
-                                    Rectangle { height: 164px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 9px;
+                                    Rectangle { height: 164px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; VerticalLayout { padding: 16px; spacing: 9px;
                                         HorizontalLayout { Heading { text: GuiI18n.text("gui-storage-root"); font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.persistent-root-is-custom ? GuiI18n.text("gui-custom-location") : GuiI18n.text("gui-default-location"); tone-color: root.persistent-root-is-custom ? Theme.accent : Theme.text-secondary; } }
                                         HorizontalLayout { spacing: 8px; TextField { text <=> root.persistent-root; placeholder: GuiI18n.text("gui-no-override"); horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-choose-folder"); clicked => { root.choose-storage-root(); } } }
                                         BodyText { text: GuiI18n.value("gui-effective-location", root.storage-root); color: Theme.text-secondary; overflow: elide; }
@@ -2307,18 +2283,18 @@ export component AppWindow inherits Window {
                                     if root.watched-download-folders.length == 0 : Rectangle {
                                         width: min(parent.width, 520px);
                                         height: max(46px, no-watched-folders.preferred-height + 22px);
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                                        border-radius: Theme.card-radius;
+                                        border-width: Theme.strong-border-width;
+                                        border-color: Theme.border-strong;
                                         background: Theme.surface;
                                         no-watched-folders := BodyText { x: 14px; width: parent.width - 28px; text: GuiI18n.text("gui-watched-download-folders-empty"); color: Theme.text-muted; wrap: word-wrap; }
                                     }
                                     for folder in root.watched-download-folders : Rectangle {
                                         width: min(parent.width, 520px);
                                         height: 48px;
-                                        border-radius: 6px;
-                                        border-width: 1px;
-                                        border-color: Theme.border;
+                                        border-radius: Theme.card-radius;
+                                        border-width: Theme.strong-border-width;
+                                        border-color: Theme.border-strong;
                                         background: Theme.surface;
                                         HorizontalLayout {
                                             padding-left: 14px; padding-right: 8px; padding-top: 6px; padding-bottom: 6px; spacing: 10px;
@@ -2333,7 +2309,7 @@ export component AppWindow inherits Window {
                                     // a bare Rectangle reports no preferred height of
                                     // its own, and the scroll view needs a real one or
                                     // the row below this card cannot be reached.
-                                    Rectangle { height: cache-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; cache-card := VerticalLayout { padding: 16px; spacing: 12px;
+                                    Rectangle { height: cache-card.preferred-height; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; cache-card := VerticalLayout { padding: 16px; spacing: 12px;
                                         HorizontalLayout { spacing: 10px;
                                             Heading { text: root.artifact-cache-usage-known ? (root.artifact-cache-usage-exact ? GuiI18n.values("gui-artifact-cache-usage", root.artifact-cache-used, root.artifact-cache-total) : GuiI18n.values("gui-artifact-cache-usage-approximate", root.artifact-cache-used, root.artifact-cache-total)) : GuiI18n.text("gui-artifact-cache-measuring"); font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
                                             if root.artifact-cache-over-budget : Pill { text: GuiI18n.text("gui-artifact-cache-over-budget"); tone-color: Theme.warning; }
@@ -2376,6 +2352,29 @@ export component AppWindow inherits Window {
                                         AppButton { text: GuiI18n.text("gui-review-storage-cleanup"); enabled: root.storage-maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.review-storage-cleanup(); } }
                                         Rectangle { horizontal-stretch: 1; }
                                     }
+                                    Divider { }
+                                    SectionTitle { title: GuiI18n.text("gui-settings-disk-usage"); detail: GuiI18n.text("gui-disk-usage-page-detail"); }
+                                    DiskUsagePanel {
+                                        state: root.disk-usage-state; progress: root.disk-usage-progress;
+                                        total: root.disk-usage-total; measured-at: root.disk-usage-measured-at;
+                                        retention: root.disk-usage-retention; categories: root.disk-usage-categories;
+                                        incomplete: root.disk-usage-incomplete; incomplete-text: root.disk-usage-incomplete-text; unreadable: root.disk-usage-unreadable;
+                                        stale: root.disk-usage-stale;
+                                        maintenance-busy: root.storage-maintenance-busy; maintenance-progress: root.storage-maintenance-progress;
+                                        maintenance-inspected: root.storage-inspected; maintenance-headline: root.storage-headline; maintenance-hosts: root.storage-hosts;
+                                        maintenance-incomplete: root.storage-incomplete; maintenance-groups: root.storage-groups;
+                                        maintenance-checked: root.storage-checked; maintenance-integrity: root.storage-integrity;
+                                        maintenance-faults: root.storage-faults; maintenance-unchecked: root.storage-unchecked;
+                                        maintenance-can-recover: root.storage-can-recover; maintenance-result: root.storage-result;
+                                        refresh => { root.measure-disk-usage(); }
+                                        stop => { root.stop-disk-usage(); }
+                                        inspect => { root.inspect-storage(); }
+                                        verify => { root.verify-storage(); }
+                                        recover => { root.recover-storage(); }
+                                        review => { root.review-storage-cleanup(); }
+                                        stop-maintenance => { root.stop-storage-maintenance(); }
+                                        open-location(category, index) => { root.open-storage-location(category, index); }
+                                    }
                                 }
                                 if root.settings-tab == "About & Licenses" : VerticalLayout { alignment: start; spacing: 14px;
                                     Image { source: root.logo; width: 92px; height: 92px; image-fit: contain; accessible-label: GuiI18n.text("gui-logo-accessible"); }
@@ -2385,7 +2384,7 @@ export component AppWindow inherits Window {
                                     HorizontalLayout { AppButton { text: GuiI18n.text("gui-view-ephervex-license"); clicked => { root.modal = "license"; } } Rectangle { horizontal-stretch: 1; } }
                                     Divider { }
                                     Heading { text: GuiI18n.text("gui-built-with-slint"); }
-                                    Rectangle { width: 290px; height: 105px; border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface; AboutSlint { } }
+                                    Rectangle { width: 290px; height: 105px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface; AboutSlint { } }
                                     Divider { }
                                     Heading { text: GuiI18n.text("gui-third-party-software"); }
                                     BodyText { text: GuiI18n.text("gui-third-party-detail"); }
@@ -2699,9 +2698,9 @@ export component AppWindow inherits Window {
                                 spacing: 6px;
                                 for item in root.import-blocked-items : Rectangle {
                                     height: 58px;
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: Theme.border;
+                                    border-radius: Theme.card-radius;
+                                    border-width: Theme.strong-border-width;
+                                    border-color: Theme.border-strong;
                                     background: Theme.surface;
                                     HorizontalLayout {
                                         padding: 8px;
@@ -2739,9 +2738,9 @@ export component AppWindow inherits Window {
                                             + kept-text.preferred-height
                                             + reason-text.preferred-height
                                             + 22px);
-                                    border-radius: 6px;
-                                    border-width: 1px;
-                                    border-color: Theme.border;
+                                    border-radius: Theme.card-radius;
+                                    border-width: Theme.strong-border-width;
+                                    border-color: Theme.border-strong;
                                     background: Theme.surface;
                                     VerticalLayout {
                                         padding: 8px;
@@ -2809,7 +2808,7 @@ export component AppWindow inherits Window {
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-server"); tone: "primary"; enabled: (root.create-server-name != "" || root.create-server-name-suggestion != "") && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))) && root.create-server-pack-conflict == ""; hint: root.create-server-name == "" && root.create-server-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : root.create-server-pack-conflict != "" ? root.create-server-pack-conflict : root.create-server-client-id == "" && root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-server-client-id == "" && root.create-server-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : GuiI18n.text("gui-hint-choose-loader-version"); clicked => { root.submit-create-server(root.create-server-name != "" ? root.create-server-name : root.create-server-name-suggestion, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-automatic-port, root.create-server-port, root.create-server-pack); } } }
                 }
-                if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: Theme.section-size; } BodyText { text: root.mod-plan-kind == "server" ? GuiI18n.text("gui-server-mod-plan-compatible") : GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; }
+                if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: Theme.section-size; } BodyText { text: root.mod-plan-kind == "server" ? GuiI18n.text("gui-server-mod-plan-compatible") : GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; }
                     if root.mod-plan-unstated.length > 0 : VerticalLayout { spacing: 4px;
                         BodyText { text: GuiI18n.text("gui-server-mod-plan-unstated"); color: Theme.warning; wrap: word-wrap; }
                         for name in root.mod-plan-unstated : BodyText { text: "- " + name; }
@@ -2896,7 +2895,7 @@ export component AppWindow inherits Window {
                     if !root.mod-action-loading && root.mod-versions.length == 0 && root.mod-action-notice == "" : BodyText { text: GuiI18n.text("gui-mod-no-compatible-versions"); color: Theme.text-muted; wrap: word-wrap; }
                     if root.mod-versions.length > 0 : Text { text: GuiI18n.text("gui-mod-compatible-versions"); color: Theme.text-secondary; font-size: Theme.label-size; }
                     if root.mod-versions.length > 0 : Rectangle {
-                        vertical-stretch: 1; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                        vertical-stretch: 1; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
                         ScrollView { viewport-width: self.width; VerticalLayout { padding: 6px; spacing: 4px;
                             for entry in root.mod-versions : Rectangle {
                                 height: 46px; border-radius: 5px;
@@ -2978,10 +2977,10 @@ export component AppWindow inherits Window {
                     BodyText { text: GuiI18n.value("gui-mod-acquire-detail", root.mod-acquisition-name); wrap: word-wrap; }
                     BodyText { text: GuiI18n.text("gui-mod-acquire-watching"); color: Theme.text-muted; wrap: word-wrap; }
                     Rectangle {
-                        vertical-stretch: 1; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                        vertical-stretch: 1; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
                         ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 6px; spacing: 6px;
                             for item in root.mod-acquisition-items : Rectangle {
-                                height: 58px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                height: 58px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                                 HorizontalLayout { padding: 8px; spacing: 8px;
                                     VerticalLayout { alignment: center; horizontal-stretch: 1;
                                         BodyText { text: item.project-line; overflow: elide; }
@@ -3004,7 +3003,7 @@ export component AppWindow inherits Window {
                     if root.mod-removal-dependencies.length > 0 : Rectangle {
                         // Sized to its own content so that the linked-server
                         // list beside it is not squeezed by an empty box.
-                        vertical-stretch: 1; max-height: root.mod-removal-dependencies.length * 24px + 18px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background;
+                        vertical-stretch: 1; max-height: root.mod-removal-dependencies.length * 24px + 18px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
                         ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 9px; spacing: 4px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; height: 20px; overflow: elide; } } }
                     }
                     if root.mod-removal-dependencies.length == 0 && !root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-no-dependencies"); color: Theme.text-muted; wrap: word-wrap; }
@@ -3060,7 +3059,7 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             alignment: start; spacing: 8px;
                             for group in root.instance-groups : Rectangle {
-                                height: 56px; border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+                                height: 56px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                                 HorizontalLayout {
                                     padding: 8px; padding-left: 12px; spacing: 8px;
                                     VerticalLayout { alignment: center; Rectangle { width: 10px; height: 10px; border-radius: 5px; background: Theme.group-tone(group.tone); } }
@@ -3150,9 +3149,9 @@ export component AppWindow inherits Window {
                             Heading { text: root.storage-plan-summary; font-size: Theme.row-heading-size; wrap: word-wrap; }
                             if root.storage-plan-empty : BodyText { text: GuiI18n.text("gui-storage-cleanup-empty"); wrap: word-wrap; }
                             for item in root.storage-plan-items : Rectangle {
-                                border-radius: 8px;
-                                border-width: 1px;
-                                border-color: Theme.border;
+                                border-radius: Theme.card-radius;
+                                border-width: Theme.strong-border-width;
+                                border-color: Theme.border-strong;
                                 background: Theme.surface;
                                 height: plan-item-body.preferred-height;
                                 plan-item-body := VerticalLayout {
@@ -3211,7 +3210,7 @@ export component AppWindow inherits Window {
                     BodyText { text: root.pack-link-downloading ? GuiI18n.text("gui-downloading-pack") : root.pack-link-redirected ? GuiI18n.text("gui-open-pack-link-redirected-detail") : GuiI18n.text("gui-open-pack-link-detail"); wrap: word-wrap; }
                     // The address itself, on its own line and selectable by
                     // eye: this is the thing being agreed to.
-                    Rectangle { border-radius: 6px; border-width: 1px; border-color: Theme.border; background: Theme.background; VerticalLayout { padding: 12px; BodyText { text: root.pack-link-display; font-family: Theme.mono-family; wrap: word-wrap; } } }
+                    Rectangle { border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background; VerticalLayout { padding: 12px; BodyText { text: root.pack-link-display; font-family: Theme.mono-family; wrap: word-wrap; } } }
                     if !root.pack-link-downloading : HorizontalLayout { spacing: 8px; VerticalLayout { alignment: center; Toggle { checked: root.pack-link-remember; accessible-name: GuiI18n.text("gui-open-pack-link-remember"); toggled(on) => { root.pack-link-remember = on; } } } BodyText { text: GuiI18n.text("gui-open-pack-link-remember"); vertical-alignment: center; } }
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.cancel-pack-link(); root.modal = ""; root.modal-error = ""; } } if !root.pack-link-downloading : AppButton { text: GuiI18n.text("gui-open-pack-link-confirm"); tone: "primary"; clicked => { root.open-pack-link(root.pack-link-url, root.pack-link-host, root.pack-link-remember); } } }

@@ -19,8 +19,8 @@ export component CompatibilityBadge inherits Rectangle {
     width: root.text == "" ? 0px : label.preferred-width + 18px;
     height: 24px;
     horizontal-stretch: 0;
-    border-radius: 5px;
-    border-width: 1px;
+    border-radius: Theme.chip-radius;
+    border-width: Theme.chip-border-width;
     border-color: root.tone.with-alpha(0.55);
     background: root.tone.with-alpha(0.12);
     accessible-role: AccessibleRole.text;
@@ -190,8 +190,8 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     Rectangle {
         y: root.heading-height;
         height: parent.height - root.heading-height;
-        border-radius: 8px;
-        border-width: 1px;
+        border-radius: Theme.card-radius;
+        border-width: Theme.strong-border-width;
         border-color: root.item.dirty ? Theme.accent.with-alpha(0.65) : Theme.border;
         background: Theme.surface;
         names := VerticalLayout {
