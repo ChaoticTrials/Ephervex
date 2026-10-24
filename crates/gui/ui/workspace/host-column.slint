@@ -1,0 +1,173 @@
+// The cards in the column beside a host page: the servers linked to an
+// instance, and where a host keeps its files.
+
+import { AppButton, IconButton, InlineToggle, Pill, StatePill } from "../components/controls.slint";
+import { PopupMenu } from "../components/menus.slint";
+import { BodyText, DisplayHeading, Heading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { PendingEntityRow, ServerRow } from "../models.slint";
+import { SideCard } from "../home/side-card.slint";
+import { Theme } from "../theme.slint";
+
+// One linked server: its name, state and address, and the few things done to
+// it often. The rest are in its menu.
+component LinkedServerRow inherits VerticalLayout {
+    in property <ServerRow> server;
+    in property <bool> paired;
+    callback open();
+    callback start-requested();
+    callback stop-requested();
+    callback connect();
+    callback activated(string);
+    spacing: 6px;
+    HorizontalLayout {
+        spacing: 8px;
+        Heading { text: root.server.name; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
+        if root.paired : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        VerticalLayout { alignment: center; StatePill { state: root.server.state; state-kind: root.server.state-kind; restarting: root.server.restart-stage != ""; } }
+        BodyText { text: root.server.address; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+    }
+    if root.server.needs-attention : BodyText { text: GuiI18n.text("gui-linked-server-attention"); color: Theme.warning; overflow: elide; }
+    // The buttons raise a hard shadow to the right and below.
+    HorizontalLayout {
+        spacing: 8px;
+        padding-right: Theme.shadow-room;
+        alignment: start;
+        if root.server.can-start || root.server.can-stop : AppButton {
+            compact: true;
+            text: root.server.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop");
+            accessible-name: GuiI18n.value(root.server.can-start ? "gui-linked-server-start" : "gui-home-stop-host", root.server.name);
+            tone: root.server.can-start ? "primary" : "danger";
+            clicked => { if root.server.can-start { root.start-requested(); } else { root.stop-requested(); } }
+        }
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-open");
+            accessible-name: GuiI18n.value("gui-home-open-host", root.server.name);
+            icon: @image-url("../../../../assets/icons/chevron-right.svg");
+            clicked => { root.open(); }
+        }
+        IconButton {
+            width: Theme.button-height-small;
+            height: Theme.button-height-small;
+            icon: @image-url("../../../../assets/icons/more.svg");
+            accessible-name: GuiI18n.value("gui-home-more-host", root.server.name);
+            clicked => { more.show({ x: 0px, y: self.height + 4px }); }
+            more := PopupMenu {
+                entries: [
+                    { id: "pair", label: root.paired ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-this-server") },
+                    { id: "folder", label: GuiI18n.text("gui-open-folder") },
+                    { id: "repair", label: GuiI18n.text("gui-repair-server"), hidden: root.server.state-kind != "needs-recovery" },
+                    { id: "rule", separator: true },
+                    { id: "delete", label: GuiI18n.text("gui-delete-server") },
+                ];
+                activated(id) => { root.activated(id); }
+            }
+        }
+    }
+    // The buttons raise a hard shadow to the right and below.
+    HorizontalLayout {
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-launch-client-connect");
+            horizontal-stretch: 1;
+            enabled: root.server.can-connect;
+            hint: root.server.connect-reason;
+            clicked => { root.connect(); }
+        }
+    }
+}
+
+// The servers linked to the instance on the page, those being built, and the
+// way to add one.
+export component LinkedServersCard inherits SideCard {
+    in property <[ServerRow]> servers;
+    in property <[PendingEntityRow]> pending;
+    // The linked server that Launch and Connect uses; empty when none is.
+    in property <string> paired-id;
+    in property <bool> start-together;
+    callback open(string);
+    callback start(string);
+    callback stop(string);
+    callback connect(string);
+    callback pair(string);
+    callback unpair();
+    callback set-start-together(bool);
+    callback open-folder(string);
+    callback repair(string);
+    callback delete(ServerRow);
+    callback create();
+    DisplayHeading { text: GuiI18n.text("gui-linked-servers-title"); font-size: Theme.item-title-size; }
+    if root.servers.length == 0 && root.pending.length == 0 : BodyText {
+        text: GuiI18n.text("gui-no-linked-server-detail");
+        color: Theme.text-muted;
+        wrap: word-wrap;
+    }
+    for entry in root.pending : BodyText {
+        text: entry.detail != "" ? entry.name + " - " + entry.detail : entry.name;
+        color: Theme.text-secondary;
+        overflow: elide;
+    }
+    for server in root.servers : LinkedServerRow {
+        server: server;
+        paired: root.paired-id == server.id;
+        open => { root.open(server.id); }
+        start-requested => { root.start(server.id); }
+        stop-requested => { root.stop(server.id); }
+        connect => { root.connect(server.id); }
+        activated(id) => {
+            if id == "pair" { if root.paired-id == server.id { root.unpair(); } else { root.pair(server.id); } }
+            else if id == "folder" { root.open-folder(server.id); }
+            else if id == "repair" { root.repair(server.id); }
+            else { root.delete(server); }
+        }
+    }
+    if root.paired-id != "" : InlineToggle {
+        label: GuiI18n.text("gui-pair-start-together");
+        checked: root.start-together;
+        toggled(value) => { root.set-start-together(value); }
+    }
+    // The button raises a hard shadow to the right and below.
+    HorizontalLayout {
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        AppButton {
+            text: GuiI18n.text("gui-create-linked-server");
+            icon: @image-url("../../../../assets/icons/add.svg");
+            horizontal-stretch: 1;
+            enabled: root.pending.length == 0;
+            hint: GuiI18n.text("gui-linked-server-being-built");
+            clicked => { root.create(); }
+        }
+    }
+}
+
+// Where a host keeps its files, and the way to open the folder.
+export component HostStorageCard inherits SideCard {
+    // "temporary" or "persistent", and how it reads to the user.
+    in property <string> storage;
+    in property <string> lifecycle;
+    in property <string> path;
+    callback open-folder();
+    DisplayHeading { text: GuiI18n.text("gui-storage"); font-size: Theme.item-title-size; }
+    BodyText { text: root.storage; color: Theme.text; font-weight: 700; overflow: elide; }
+    if root.lifecycle != "" : BodyText { text: root.lifecycle; font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
+    BodyText { text: root.path; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
+    // The button raises a hard shadow to the right and below.
+    HorizontalLayout {
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        alignment: start;
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-open-folder");
+            icon: @image-url("../../../../assets/icons/folder.svg");
+            clicked => { root.open-folder(); }
+        }
+    }
+}

@@ -20608,8 +20608,8 @@ mod tests {
             source
                 .matches("root.pending-snapshot-deletion-note = ")
                 .count(),
-            6,
-            "every Delete, including the ones a narrow overview moves to a row of their own"
+            7,
+            "every Delete, including the ones a narrow overview moves to a row of their own and the one in the host column"
         );
         assert!(source.contains("text: root.pending-snapshot-deletion-note"));
     }

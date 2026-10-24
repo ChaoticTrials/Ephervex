@@ -85,6 +85,11 @@ workspace. `AppShell` exposes the geometry: a window narrower than
 `shell-side-inline-width` does the same for the right column. A drawer leaves
 the row, a button on a rail beside the page opens it over a scrim, and choosing
 a host, pressing the scrim, or resizing the window past the width closes it.
+A host page that is not split has a column of its own beside it from
+`shell-host-side-inline-width`: the servers linked to an instance with their
+actions, and where the host keeps its files. Narrower, a button in the page's
+header opens the same column as a drawer. A split keeps each pane's own page and
+has no column.
 The page is the settings when `settings-open` is set, otherwise the host panes
 when Rust has opened a workspace, otherwise Home. `settings-open` and the
 workspace are independent, so Back from the settings returns to the host that

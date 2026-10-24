@@ -55,6 +55,7 @@ import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint"
 import { HomePage } from "home/home-page.slint";
 import { CaseSurface } from "workspace/case.slint";
 import { StorageCard } from "home/storage-card.slint";
+import { HostStorageCard, LinkedServersCard } from "workspace/host-column.slint";
 import { TipsCard } from "home/tips-card.slint";
 import { PendingCard } from "host-list/host-card.slint";
 import { HostList } from "host-list/host-list.slint";
@@ -155,6 +156,13 @@ export component AppWindow inherits Window {
     in-out property <bool> settings-open: false;
     // Whether Home is the page: neither the settings nor a host is open.
     out property <bool> shows-home: !root.workspace-open && !root.settings-open;
+    // The one pane whose host has a column of cards beside it. A split has
+    // none: each pane keeps what it shows on its own page.
+    private property <WorkspacePaneRow> column-pane: root.workspace-panes[0];
+    private property <HostView> column-host: root.host-views[root.column-pane.host];
+    // Which host the column is about, so its drawer can close when that changes.
+    private property <string> column-host-key: root.column-host.kind + ":" + root.column-host.id;
+    out property <bool> shows-host-column: root.workspace-open && !root.settings-open && root.workspace-panes.length == 1 && root.column-host.available;
     // The artifact cache is measured the first time Home appears and not on
     // every visit, because measuring walks the cache.
     private property <bool> artifact-cache-requested: false;
@@ -1093,6 +1101,8 @@ export component AppWindow inherits Window {
         if (self.shows-home) { self.home-appeared(); }
         shell.side-open = false;
     }
+    changed shows-host-column => { shell.side-open = false; }
+    changed column-host-key => { shell.side-open = false; }
     // Whatever opens a page from the list leaves the list's drawer behind.
     changed workspace-open => { shell.list-open = false; }
     changed create-minecraft => {
@@ -1182,7 +1192,9 @@ export component AppWindow inherits Window {
         preferred-height: 900px;
         shell := AppShell {
             vertical-stretch: 1;
-            has-side: root.shows-home;
+            has-side: root.shows-home || root.shows-host-column;
+            side-rail: root.shows-home;
+            side-inline-from: root.shows-home ? Theme.shell-side-inline-width : Theme.shell-host-side-inline-width;
             list-button-label: GuiI18n.text("gui-shell-show-list");
             side-button-label: GuiI18n.text("gui-shell-show-side");
             list-hide-label: GuiI18n.text("gui-shell-hide-list");
@@ -1359,6 +1371,9 @@ export component AppWindow inherits Window {
                                 width: pane-area.column-width;
                                 height: pane.stacked ? pane-area.stacked-height : pane-area.area-height;
                                 compact: split;
+                                show-column-button: !shell.side-inline && root.shows-host-column;
+                                column-button-label: self.is-client ? GuiI18n.text("gui-workspace-show-column") : GuiI18n.text("gui-workspace-show-storage");
+                                show-column => { shell.open-side(); }
                                 pane-label: pane.label;
                                 host-kind-label: self.is-client ? GuiI18n.text("gui-client") : GuiI18n.text("gui-server");
                                 folder-label: self.is-client ? GuiI18n.text("gui-open-instance-folder") : GuiI18n.text("gui-open-server-folder");
@@ -2345,9 +2360,10 @@ export component AppWindow inherits Window {
                 }
             }
 
-            // Beside Home only. The other pages take this width, so the page
-            // grows by the column and its gap when it is left.
-            if root.shows-home : Rectangle {
+            // Beside Home, and beside a host page that is not split. The other
+            // pages take this width, so the page grows by the column and its
+            // gap when it is left.
+            if root.shows-home || root.shows-host-column : Rectangle {
                 z: 10;
                 width: Theme.shell-padding + Theme.side-column-width + Theme.shell-padding;
                 x: shell.side-inline || shell.side-open ? shell.width - self.width : shell.width;
@@ -2365,7 +2381,30 @@ export component AppWindow inherits Window {
                 x: Theme.shell-padding;
                 y: Theme.shell-padding + shell.side-top;
                 height: shell.content-height - shell.side-top;
-                StorageCard {
+                if root.shows-host-column && root.column-host.kind == "client" : LinkedServersCard {
+                    servers: root.column-host.linked-servers;
+                    pending: root.column-host.pending-servers;
+                    paired-id: root.column-host.client.paired-server-id;
+                    start-together: root.column-host.client.pair-start-together;
+                    open(id) => { root.follow-host(root.column-pane.id, "server", id, "Overview"); }
+                    start(id) => { root.server-start(id); }
+                    stop(id) => { root.server-stop(id); }
+                    connect(id) => { root.launch-and-connect(root.column-host.id, id); }
+                    pair(id) => { root.set-linked-pair(root.column-host.id, id, false); }
+                    unpair => { root.clear-linked-pair(root.column-host.id); }
+                    set-start-together(value) => { root.set-linked-pair(root.column-host.id, root.column-host.client.paired-server-id, value); }
+                    open-folder(id) => { root.open-server-folder(id); }
+                    repair(id) => { root.repair-server(id); }
+                    delete(row) => { root.pending-action-id = row.id; root.pending-action-name = row.name; root.pending-snapshot-deletion-note = row.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; }
+                    create => { root.open-create-linked-server(root.column-host.id, root.column-host.client.name); }
+                }
+                if root.shows-host-column : HostStorageCard {
+                    storage: root.column-host.kind == "client" ? root.column-host.client.storage : root.column-host.server.storage;
+                    lifecycle: root.column-host.kind != "client" ? "" : root.column-host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle");
+                    path: root.column-host.kind == "client" ? root.column-host.client.path : root.column-host.server.path;
+                    open-folder => { if root.column-host.kind == "client" { root.open-client-folder(root.column-host.id); } else { root.open-server-folder(root.column-host.id); } }
+                }
+                if root.shows-home : StorageCard {
                     temporary: root.home-temporary-count;
                     persistent: root.home-persistent-count;
                     servers: root.home-server-count;
@@ -2378,7 +2417,7 @@ export component AppWindow inherits Window {
                     cache-unlimited: root.artifact-cache-unlimited;
                     cache-fill: root.artifact-cache-fill;
                 }
-                TipsCard { }
+                if root.shows-home : TipsCard { }
             }
             }
         }

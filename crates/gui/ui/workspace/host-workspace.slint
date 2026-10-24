@@ -342,6 +342,11 @@ export component HostWorkspace inherits Rectangle {
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
+    // Whether a button opens the column of cards that does not fit beside the
+    // page, which it offers on a page that has one.
+    in property <bool> show-column-button;
+    in property <string> column-button-label;
+    callback show-column();
     callback choose-host();
     callback split-beside();
     callback split-below();
@@ -375,6 +380,7 @@ export component HostWorkspace inherits Rectangle {
                         Rectangle { horizontal-stretch: 1; }
                         HorizontalLayout {
                             spacing: 12px;
+                            if root.show-column-button : IconButton { icon: @image-url("../../../../assets/icons/server.svg"); accessible-name: root.column-button-label; clicked => { root.show-column(); } }
                             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
                             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
                             if root.show-launch-as : LaunchAsButton {

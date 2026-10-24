@@ -11,6 +11,11 @@ import { Theme } from "../theme.slint";
 export component AppShell inherits Rectangle {
     // Whether the page has a side column to place.
     in property <bool> has-side: false;
+    // Whether a rail button opens the side column's drawer, rather than a
+    // button on the page.
+    in property <bool> side-rail: true;
+    // The window width from which the side column sits beside the page.
+    in property <length> side-inline-from: Theme.shell-side-inline-width;
     in property <string> list-button-label;
     in property <string> side-button-label;
     // What the rail buttons say while their drawer is open.
@@ -19,14 +24,22 @@ export component AppShell inherits Rectangle {
     in-out property <bool> list-open: false;
     in-out property <bool> side-open: false;
     out property <bool> list-inline: root.width >= Theme.shell-list-inline-width;
-    out property <bool> side-inline: root.width >= Theme.shell-side-inline-width;
+    out property <bool> side-inline: root.width >= root.side-inline-from;
+    // Whether the side column takes room: beside the page, or as a rail.
+    private property <bool> side-reserved: root.has-side && (root.side-inline || root.side-rail);
     out property <length> content-height: max(0px, root.height - 2 * Theme.shell-padding);
     // How far a column's content starts below the shell's padding: under the
     // button that opened it when the column is a drawer.
     out property <length> list-top: root.list-inline ? 0px : Theme.control-height + 14px;
-    out property <length> side-top: root.side-inline ? 0px : Theme.control-height + 14px;
+    out property <length> side-top: root.side-inline || !root.side-rail ? 0px : Theme.control-height + 14px;
     out property <length> page-x: Theme.shell-padding + (root.list-inline ? Theme.list-column-width : Theme.shell-rail-width) + Theme.shell-gap;
-    out property <length> page-width: max(0px, root.width - root.page-x - Theme.shell-padding - (root.has-side ? (root.side-inline ? Theme.side-column-width : Theme.shell-rail-width) + Theme.shell-gap : 0px));
+    out property <length> page-width: max(0px, root.width - root.page-x - Theme.shell-padding - (root.side-reserved ? (root.side-inline ? Theme.side-column-width : Theme.shell-rail-width) + Theme.shell-gap : 0px));
+    // Opens the side column's drawer.
+    public function open-side() {
+        root.list-open = false;
+        root.side-open = true;
+        scope.focus();
+    }
     background: Theme.background;
     changed list-inline => { root.list-open = false; }
     changed side-inline => { root.side-open = false; }
@@ -61,7 +74,7 @@ export component AppShell inherits Rectangle {
                 if root.list-open { scope.focus(); }
             }
         }
-        if root.has-side && !root.side-inline : IconButton {
+        if root.has-side && root.side-rail && !root.side-inline : IconButton {
             z: 12;
             x: root.width - Theme.shell-padding - self.width;
             y: Theme.shell-padding;
