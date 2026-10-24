@@ -796,7 +796,11 @@ fn a_servers_mod_list_is_laid_out_like_a_clients() {
     mod_browser(&ui, Vec::new());
     settle(&ui);
     let client = shown_text(&ui, "gui-managed-mods-detail");
-    let (client_y, client_width) = (client.absolute_position().y, client.size().width);
+    // Measured from the panel's title: a client's header carries its issue
+    // link, which a server's has no row for.
+    let client_y =
+        client.absolute_position().y - shown_text(&ui, "gui-managed-mods").absolute_position().y;
+    let client_width = client.size().width;
 
     server_browser(&ui, modded_server(), Vec::new());
     shown_text(&ui, "gui-managed-mods");
@@ -805,13 +809,14 @@ fn a_servers_mod_list_is_laid_out_like_a_clients() {
     let browser = shown_text(&ui, "gui-server-catalog-compatibility");
 
     let top = server.absolute_position().y;
+    let top_in_panel = top - shown_text(&ui, "gui-managed-mods").absolute_position().y;
     assert!(
         top >= filter.absolute_position().y + filter.size().height,
         "the description sits under the toolbar"
     );
     assert!(
-        (top - client_y).abs() < 0.5,
-        "it starts at {top}, a client's at {client_y}"
+        (top_in_panel - client_y).abs() < 0.5,
+        "it starts {top_in_panel} under its title, a client's {client_y}"
     );
     assert!(
         (server.size().width - client_width).abs() < 0.5,

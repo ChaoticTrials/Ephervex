@@ -90,6 +90,12 @@ A host page that is not split has a column of its own beside it from
 actions, and where the host keeps its files. Narrower, a button in the page's
 header opens the same column as a drawer. A split keeps each pane's own page and
 has no column.
+
+An instance's header shows its issue link: pressing it opens the address in the
+browser, and Add or Edit changes it in place (Enter saves, Escape leaves). The
+link is stored and validated by `ephervex-core` as host metadata, and a stored
+link that it would refuse is not shown.
+
 The page is the settings when `settings-open` is set, otherwise the host panes
 when Rust has opened a workspace, otherwise Home. `settings-open` and the
 workspace are independent, so Back from the settings returns to the host that

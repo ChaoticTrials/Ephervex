@@ -203,6 +203,8 @@ pub struct InstancePresentation {
     pub snapshot_deletion_note: String,
     /// Filled in from the organization, which a record knows nothing about.
     pub case: ephervex_core::CaseNotes,
+    /// The issue or bug report the instance reproduces, empty when none is set.
+    pub issue_link: String,
     pub id: String,
     pub name: String,
     pub minecraft: String,
@@ -307,6 +309,14 @@ impl InstancePresentation {
         Self {
             snapshot_deletion_note: String::new(),
             case: ephervex_core::CaseNotes::default(),
+            // A link edited by hand into the metadata that the core would
+            // refuse is not shown, so credentials or hidden marks in it
+            // never reach the screen; Add replaces it.
+            issue_link: record
+                .issue_link
+                .as_deref()
+                .and_then(|link| ephervex_core::validated_issue_link(link).ok().flatten())
+                .unwrap_or_default(),
             id: record.id.to_string(),
             name: record.name.clone(),
             minecraft: record.minecraft_version.clone(),

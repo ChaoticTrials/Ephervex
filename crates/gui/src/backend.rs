@@ -114,6 +114,11 @@ pub enum Command {
         client: InstanceId,
         change: CaseChange,
     },
+    /// Sets or clears the issue link of an instance; an empty link clears it.
+    SetIssueLink {
+        client: InstanceId,
+        link: String,
+    },
     /// Marks or unmarks a host as a favorite.
     SetFavorite {
         host: InstalledHost,
@@ -5708,6 +5713,12 @@ fn run_worker(
                 };
                 match result {
                     Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetIssueLink { client, link } => {
+                match app.set_client_issue_link(client, Some(&link)) {
+                    Ok(_) => send_snapshot(&mut app, &events),
                     Err(error) => send_error(&events, &error),
                 }
             }

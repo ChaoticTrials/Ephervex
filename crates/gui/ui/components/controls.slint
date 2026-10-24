@@ -345,6 +345,9 @@ export component TextField inherits Rectangle {
     in property <image> icon;
     // The hard shadow the field keeps while it is not focused.
     in property <length> rest-lift: 0px;
+    // Takes the keyboard focus when the field appears, for one that opens
+    // on a press to be typed in.
+    in property <bool> focus-when-shown: false;
     callback accepted();
     callback edited(string);
     callback focus-lost();
@@ -355,6 +358,14 @@ export component TextField inherits Rectangle {
     accessible-role: text-input;
     accessible-label: accessible-name;
     accessible-enabled: enabled;
+    accessible-value: input.text;
+    accessible-action-set-value(value) => {
+        input.text = value;
+        root.edited(value);
+    }
+    init => {
+        if root.focus-when-shown { input.focus(); }
+    }
     // The shadow grows while the field has focus, which is how focus shows.
     Plate {
         width: root.width;

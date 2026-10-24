@@ -3813,6 +3813,7 @@ fn register_instance_list(
     });
 
     register_case_changes(ui, commands);
+    register_issue_link(ui, commands);
 
     let sender = commands.clone();
     ui.on_set_favorite(move |kind, id, favorite| {
@@ -4236,6 +4237,29 @@ fn register_case_changes(ui: &AppWindow, commands: &Sender<Command>) {
     let sender = commands.clone();
     ui.on_case_reset_reproduced(move |client| {
         change(&sender, &client, backend::CaseChange::ResetReproduced);
+    });
+}
+
+/// Setting an instance's issue link, and opening it in the browser.
+fn register_issue_link(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_set_issue_link(move |client, link| {
+        if let Ok(client) = client.parse() {
+            send(
+                &sender,
+                Command::SetIssueLink {
+                    client,
+                    link: link.to_string(),
+                },
+            );
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_open_issue_link(move |link| {
+        let opened = matches!(ephervex_core::open_issue_link(&link), Ok(true));
+        if !opened && let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(lookup("gui-issue-link-open-failed").into(), true);
+        }
     });
 }
 
@@ -9953,6 +9977,7 @@ fn listed_instance(
         ),
         case_done: to_i32(item.case.steps.iter().filter(|step| step.done).count()),
         case_note: item.case.note.as_str().into(),
+        issue_link: item.issue_link.as_str().into(),
         case_reproduced: i32::try_from(item.case.reproduced).unwrap_or(i32::MAX),
         group_id: group.map_or_else(SharedString::default, |group| group.id.to_string().into()),
         group_name: group.map_or_else(SharedString::default, |group| group.name.as_str().into()),
@@ -17085,6 +17110,41 @@ mod tests {
         }]));
         stamp_host_lifecycle(&ui, &lifecycle.borrow());
         assert!(can_restart(&ui), "stamped again after a refresh");
+    }
+
+    #[test]
+    fn an_instances_row_carries_its_issue_link() {
+        let mut record = crate::presentation::samples::client_record(
+            ephervex_model::StorageClass::Temporary,
+            ephervex_model::LoaderSelection::vanilla(),
+        );
+        record.issue_link = Some("https://example.com/issues/7".to_owned());
+        let item = crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, []);
+
+        let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+        assert_eq!(row.issue_link, "https://example.com/issues/7");
+    }
+
+    #[test]
+    fn a_stored_issue_link_the_core_would_refuse_is_not_shown() {
+        for link in [
+            "https://user:token@example.com/issues/7",
+            "https://example.com/is\u{202E}sues",
+            "javascript:alert(1)",
+        ] {
+            let mut record = crate::presentation::samples::client_record(
+                ephervex_model::StorageClass::Temporary,
+                ephervex_model::LoaderSelection::vanilla(),
+            );
+            record.issue_link = Some(link.to_owned());
+            let item =
+                crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, []);
+
+            let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+            assert_eq!(row.issue_link, "", "{link}");
+        }
     }
 
     #[test]

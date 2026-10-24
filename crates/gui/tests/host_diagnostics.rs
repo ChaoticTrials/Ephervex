@@ -1053,7 +1053,7 @@ fn window() -> AppWindow {
     // Tall enough that the whole surface is on screen: the testing backend
     // finds only what is within the window, and the bundle choice sits below
     // the findings.
-    ui.window().set_size(PhysicalSize::new(2000, 1400));
+    ui.window().set_size(PhysicalSize::new(2000, 1600));
     ui.show().expect("show");
     ui
 }

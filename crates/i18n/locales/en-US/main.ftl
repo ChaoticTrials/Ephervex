@@ -4014,3 +4014,11 @@ gui-linked-server-attention = Needs attention
 gui-linked-servers-title = Linked servers
 gui-linked-server-start = Start { $value }
 gui-linked-server-being-built = A linked server is being built. Wait until it is ready.
+
+gui-issue-link = Issue link
+gui-issue-link-add = Add issue link
+gui-issue-link-edit = Edit
+gui-issue-link-save = Save
+gui-issue-link-placeholder = https://github.com/owner/repo/issues/42
+gui-issue-link-open = Open the issue link { $value }
+gui-issue-link-open-failed = The issue link could not be opened in the browser.

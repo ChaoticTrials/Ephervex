@@ -741,6 +741,10 @@ export component AppWindow inherits Window {
     callback case-save-note(string, string);
     callback case-count-reproduced(string);
     callback case-reset-reproduced(string);
+    // An instance's issue link: its id and the link to store (empty clears),
+    // and a link to open in the browser.
+    callback set-issue-link(string, string);
+    callback open-issue-link(string);
     callback set-client-group(string, string);
     callback delete-group(string);
     callback pick-host-icon(string, string);
@@ -1371,6 +1375,11 @@ export component AppWindow inherits Window {
                                 width: pane-area.column-width;
                                 height: pane.stacked ? pane-area.stacked-height : pane-area.area-height;
                                 compact: split;
+                                host-id: host.id;
+                                has-issue-link: self.is-client;
+                                issue-link: self.is-client ? host.client.issue-link : "";
+                                set-issue-link(link) => { root.set-issue-link(host.id, link); }
+                                open-issue-link => { root.open-issue-link(host.client.issue-link); }
                                 show-column-button: !shell.side-inline && root.shows-host-column;
                                 column-button-label: self.is-client ? GuiI18n.text("gui-workspace-show-column") : GuiI18n.text("gui-workspace-show-storage");
                                 show-column => { shell.open-side(); }

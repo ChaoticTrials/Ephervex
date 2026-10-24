@@ -11,6 +11,7 @@ import {
     WorkspaceSurfaceRow
 } from "../models.slint";
 import { Panel, Plate } from "../components/surface.slint";
+import { IssueLinkRow } from "issue-link.slint";
 import { Theme } from "../theme.slint";
 
 // A host's Java at a glance: the runtime it would run with, in a tone that
@@ -342,6 +343,15 @@ export component HostWorkspace inherits Rectangle {
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
+    // Which host the pane shows, so state kept for one does not carry over to
+    // another when the pane is pointed elsewhere.
+    in property <string> host-id;
+    // The instance's issue link and whether this host has one to show: only
+    // instances do.
+    in property <string> issue-link;
+    in property <bool> has-issue-link;
+    callback set-issue-link(string);
+    callback open-issue-link();
     // Whether a button opens the column of cards that does not fit beside the
     // page, which it offers on a page that has one.
     in property <bool> show-column-button;
@@ -395,6 +405,12 @@ export component HostWorkspace inherits Rectangle {
                             if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
                             AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
                         }
+                    }
+                    if root.has-issue-link : IssueLinkRow {
+                        host-id: root.host-id;
+                        link: root.issue-link;
+                        save(link) => { root.set-issue-link(link); }
+                        open => { root.open-issue-link(); }
                     }
                     Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
                     HorizontalLayout {
