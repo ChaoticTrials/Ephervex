@@ -589,6 +589,9 @@ export component AppWindow inherits Window {
     in-out property <string> create-issue-link;
     in-out property <bool> create-linked-server: false;
     in-out property <string> create-linked-server-name;
+    // Published server files for that server, as a path and the name shown.
+    in-out property <string> create-instance-server-pack;
+    in-out property <string> create-instance-server-pack-name;
     in-out property <string> import-path;
     in-out property <string> import-name;
     // Whether the import should also leave a server behind. Off by
@@ -886,7 +889,7 @@ export component AppWindow inherits Window {
     in-out property <string> pending-reveal-instance;
     callback install-mod(string, string, string, string);
     callback install-server-mod(string, string, string, string, [string]);
-    callback submit-create-instance(string, string, string, string, bool, string, bool, string);
+    callback submit-create-instance(string, string, string, string, bool, string, bool, string, string);
     callback open-create-instance-modal();
     callback recompute-create-name();
     callback recompute-create-server-name();
@@ -910,6 +913,8 @@ export component AppWindow inherits Window {
     callback submit-create-server(string, string, string, string, string, bool, bool, string, string);
     callback choose-server-pack();
     callback clear-server-pack();
+    callback choose-instance-server-pack();
+    callback clear-instance-server-pack();
     callback choose-import-server-pack();
     callback clear-import-server-pack();
     callback server-start(string);
@@ -2512,7 +2517,7 @@ export component AppWindow inherits Window {
         TouchArea { clicked => { } }
         Plate {
             width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "license" || root.modal == "third-party" || root.modal == "create-instance" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
+            height: root.modal == "create-instance" ? min(860px, parent.height - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             radius: Theme.dialog-radius;
@@ -2585,6 +2590,15 @@ export component AppWindow inherits Window {
                             placeholder: NameRules.linked-server-name(root.create-name != "" ? root.create-name : root.create-name-suggestion);
                             accessible-name: GuiI18n.text("gui-linked-server-name");
                         }
+                        if root.create-linked-server : FieldLabel { text: GuiI18n.text("gui-server-pack"); }
+                        if root.create-linked-server : BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                        if root.create-linked-server : HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-instance-server-pack(); } }
+                            if root.create-instance-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-instance-server-pack(); } }
+                            if root.create-instance-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.create-instance-server-pack-name; overflow: elide; } }
+                        }
                     }
                     }
                     // Outside the form, so a refusal is seen however far it is scrolled.
@@ -2598,7 +2612,7 @@ export component AppWindow inherits Window {
                                 enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != "");
                                 hint: root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : root.create-name == "" && root.create-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : GuiI18n.text("gui-hint-choose-loader-version");
                                 clicked => {
-                                    root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent, root.create-issue-link, root.create-linked-server, root.create-linked-server-name);
+                                    root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent, root.create-issue-link, root.create-linked-server, root.create-linked-server-name, root.create-instance-server-pack);
                                 }
                             }
                     }

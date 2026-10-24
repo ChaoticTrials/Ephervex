@@ -184,7 +184,7 @@ fn a_disabled_button_is_skipped_by_tab_and_ignores_the_keyboard() {
     let ui = window();
     let submitted: Rc<RefCell<usize>> = Rc::default();
     let count = Rc::clone(&submitted);
-    ui.on_submit_create_instance(move |_, _, _, _, _, _, _, _| *count.borrow_mut() += 1);
+    ui.on_submit_create_instance(move |_, _, _, _, _, _, _, _, _| *count.borrow_mut() += 1);
     open_create_instance(&ui);
     // A loader with no version chosen leaves Create unavailable.
     ui.set_create_loader("Fabric".into());

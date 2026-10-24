@@ -95,6 +95,7 @@ enum CreationKey {
         persistent: bool,
         issue_link: String,
         linked_server: String,
+        server_pack: Option<PathBuf>,
     },
     Server {
         name: String,
@@ -2436,6 +2437,10 @@ enum DropIntent {
 fn drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> DropIntent {
     match ui.get_modal().as_str() {
         "create-server" => DropIntent::ServerPack(ServerPackTarget::NewServer),
+        // Once a server is wanted a drop there names its files.
+        "create-instance" if ui.get_create_linked_server() => {
+            DropIntent::ServerPack(ServerPackTarget::NewInstance)
+        }
         // The import dialog asks for two archives once a server is wanted, and
         // the pack itself is already chosen by the time that toggle can be
         // reached. So a drop there names the server files.
@@ -2937,6 +2942,23 @@ fn register_server_pack_choice(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
+    ui.on_choose_instance_server_pack(move || {
+        send(
+            &sender,
+            Command::PickServerPack {
+                target: ServerPackTarget::NewInstance,
+            },
+        );
+    });
+
+    let weak = ui.as_weak();
+    ui.on_clear_instance_server_pack(move || {
+        if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::NewInstance, None);
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_choose_import_server_pack(move || {
         send(
             &sender,
@@ -3100,6 +3122,10 @@ fn set_server_pack(ui: &AppWindow, target: ServerPackTarget, path: Option<&Path>
         ServerPackTarget::Import => {
             ui.set_import_server_pack(full);
             ui.set_import_server_pack_name(name);
+        }
+        ServerPackTarget::NewInstance => {
+            ui.set_create_instance_server_pack(full);
+            ui.set_create_instance_server_pack_name(name);
         }
     }
 }
@@ -3651,6 +3677,7 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
         ui.set_create_issue_link(SharedString::default());
         ui.set_create_linked_server(false);
         ui.set_create_linked_server_name(SharedString::default());
+        set_server_pack(&ui, ServerPackTarget::NewInstance, None);
         ui.set_modal_error(SharedString::default());
         send(&sender, Command::LoadMinecraftReleases);
         if !ui.get_create_minecraft().is_empty() {
@@ -3881,7 +3908,8 @@ fn register_create_instance(
               persistent,
               issue_link,
               with_server,
-              server_name| {
+              server_name,
+              server_pack| {
             // Refused here, with the dialog still open, so a mistyped address is
             // fixed where it was typed rather than reported after the dialog is gone.
             if let Err(error) = ephervex_core::validated_issue_link(&issue_link) {
@@ -3898,6 +3926,9 @@ fn register_create_instance(
             } else {
                 server_name.trim().to_owned()
             };
+            // Files only mean something to a server that is wanted.
+            let server_pack = (with_server && !server_pack.is_empty())
+                .then(|| PathBuf::from(server_pack.as_str()));
             let key = CreationKey::Client {
                 name: name.trim().to_owned(),
                 minecraft: minecraft.as_str().to_owned(),
@@ -3906,6 +3937,7 @@ fn register_create_instance(
                 persistent,
                 issue_link: issue_link.trim().to_owned(),
                 linked_server: linked_server.clone(),
+                server_pack: server_pack.clone(),
             };
             let pending = pending_creation(&key, false);
             let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
@@ -3930,6 +3962,7 @@ fn register_create_instance(
                     persistent,
                     issue_link: issue_link.trim().into(),
                     linked_server,
+                    server_pack,
                 },
             );
         },
@@ -11396,11 +11429,27 @@ mod tests {
             "ftp://example.com/issue".into(),
             false,
             "".into(),
+            "".into(),
         );
 
         assert_eq!(ui.get_modal(), "create-instance");
         assert!(!ui.get_modal_error().is_empty());
         assert!(receiver.try_recv().is_err(), "nothing was started");
+    }
+
+    /// Files let go on the New Instance dialog name its server's files once a
+    /// server is wanted, and mean nothing before.
+    #[test]
+    fn a_drop_on_the_new_instance_dialog_names_its_server_files_only_when_one_is_wanted() {
+        let ui = test_window();
+        let workspace = WorkspaceState::default();
+        ui.set_modal("create-instance".into());
+        assert_eq!(drop_intent(&ui, &workspace), DropIntent::Ignored);
+        ui.set_create_linked_server(true);
+        assert_eq!(
+            drop_intent(&ui, &workspace),
+            DropIntent::ServerPack(ServerPackTarget::NewInstance)
+        );
     }
 
     /// Wanting a server without naming it takes the name the dialog suggests.
@@ -11419,6 +11468,7 @@ mod tests {
             false,
             "https://example.com/issues/7".into(),
             true,
+            "".into(),
             "".into(),
         );
 
@@ -16235,6 +16285,7 @@ mod tests {
             persistent: false,
             issue_link: String::new(),
             linked_server: String::new(),
+            server_pack: None,
         };
         let mut tracker = CreationTracker::default();
         let request = tracker.accept(key.clone(), pending_creation(&key, false));

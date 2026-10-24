@@ -80,6 +80,8 @@ pub enum ServerPackTarget {
     NewServer,
     /// The server an import builds alongside its client.
     Import,
+    /// The server a new instance is created with.
+    NewInstance,
 }
 
 /// One change to an instance's case.
@@ -251,6 +253,9 @@ pub enum Command {
         /// The name of a server to create linked to the new instance; empty
         /// when none is wanted.
         linked_server: String,
+        /// Published server files to build that server from, rather than from
+        /// the instance's own recipe.
+        server_pack: Option<PathBuf>,
     },
     ImportPack {
         archive: PathBuf,
@@ -3464,6 +3469,7 @@ fn run_worker(
                 persistent,
                 issue_link,
                 linked_server,
+                server_pack,
             } => match loader_selection(&loader, &loader_version) {
                 Ok(loader) => {
                     let paths = app.paths().clone();
@@ -3510,7 +3516,9 @@ fn run_worker(
                                 .with_storage(created.record.storage);
                             let options = ServerCreateOptions {
                                 install_java_if_missing: true,
-                                content: ServerContentSource::Recipe,
+                                content: server_pack.map_or(ServerContentSource::Recipe, |path| {
+                                    ServerContentSource::Archive { path }
+                                }),
                                 reporter: Some(reporter),
                                 ..ServerCreateOptions::default()
                             };
