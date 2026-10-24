@@ -3600,6 +3600,9 @@ gui-import-duplicate-matches-version = Matches this pack's Minecraft version; th
 gui-import-duplicate-newer = Neither file names this pack's Minecraft version, so the more recently published one was kept.
 gui-created-entity = Created "{ $value }".
 gui-imported-pack = Imported "{ $value }".
+gui-created-with-server = Created "{ $value }" and its linked server.
+gui-created-server-failed = Created "{ $first }", but its linked server could not be created: { $second }
+gui-created-server-canceled = Created "{ $value }". Creating its linked server was canceled.
 gui-imported-pack-server-failed = Imported "{ $first }", but its linked server could not be created: { $second }
 gui-imported-pack-server-canceled = Imported "{ $value }". Creating its linked server was canceled.
 gui-folder-unavailable = Folder unavailable.
@@ -4030,3 +4033,7 @@ gui-report-title = Report
 gui-report-detail = Exactly this text is copied. Paste it into the bug report.
 gui-report-copy = Copy summary
 gui-report-bundle = Diagnostic bundle...
+
+gui-issue-link-optional = Issue link (optional)
+gui-create-with-server = Also create a linked server
+gui-linked-server-name = Linked server name

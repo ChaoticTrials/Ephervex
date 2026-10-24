@@ -162,7 +162,7 @@ fn enter_presses_the_focused_icon_button_and_text_button() {
 fn space_flips_the_focused_switch() {
     let ui = window();
     open_create_instance(&ui);
-    let before = ui.get_create_persistent();
+    let before = ui.get_create_linked_server();
     // The dialog is drawn after the page behind it, so its switch is the last
     // checkbox: the page has filter chips of its own.
     let switch = ElementQuery::from_root(&ui)
@@ -176,7 +176,7 @@ fn space_flips_the_focused_switch() {
     assert!(tab_to(&ui, &switch), "Tab never reached the switch");
     press_text(&ui, " ");
 
-    assert_ne!(ui.get_create_persistent(), before);
+    assert_ne!(ui.get_create_linked_server(), before);
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn a_disabled_button_is_skipped_by_tab_and_ignores_the_keyboard() {
     let ui = window();
     let submitted: Rc<RefCell<usize>> = Rc::default();
     let count = Rc::clone(&submitted);
-    ui.on_submit_create_instance(move |_, _, _, _, _| *count.borrow_mut() += 1);
+    ui.on_submit_create_instance(move |_, _, _, _, _, _, _, _| *count.borrow_mut() += 1);
     open_create_instance(&ui);
     // A loader with no version chosen leaves Create unavailable.
     ui.set_create_loader("Fabric".into());

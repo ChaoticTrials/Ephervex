@@ -93,6 +93,8 @@ enum CreationKey {
         loader: String,
         loader_version: String,
         persistent: bool,
+        issue_link: String,
+        linked_server: String,
     },
     Server {
         name: String,
@@ -3646,6 +3648,9 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
         // The field starts empty, so the suggestion beside it is what an
         // untouched dialog means.
         ui.set_create_name(SharedString::default());
+        ui.set_create_issue_link(SharedString::default());
+        ui.set_create_linked_server(false);
+        ui.set_create_linked_server_name(SharedString::default());
         ui.set_modal_error(SharedString::default());
         send(&sender, Command::LoadMinecraftReleases);
         if !ui.get_create_minecraft().is_empty() {
@@ -3859,6 +3864,78 @@ fn register_instance_list(
     });
 }
 
+/// Submitting the New Instance dialog.
+fn register_create_instance(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: &Rc<RefCell<CreationTracker>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let submit_creations = Rc::clone(creations);
+    ui.on_submit_create_instance(
+        move |name,
+              minecraft,
+              loader,
+              loader_version,
+              persistent,
+              issue_link,
+              with_server,
+              server_name| {
+            // Refused here, with the dialog still open, so a mistyped address is
+            // fixed where it was typed rather than reported after the dialog is gone.
+            if let Err(error) = ephervex_core::validated_issue_link(&issue_link) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_modal_error(backend::localized_error(&error).into());
+                }
+                return;
+            }
+            // An empty name takes the suggestion the dialog shows.
+            let linked_server = if !with_server {
+                String::new()
+            } else if server_name.trim().is_empty() {
+                backend::suggested_server_name(name.trim())
+            } else {
+                server_name.trim().to_owned()
+            };
+            let key = CreationKey::Client {
+                name: name.trim().to_owned(),
+                minecraft: minecraft.as_str().to_owned(),
+                loader: loader.as_str().to_owned(),
+                loader_version: loader_version.as_str().to_owned(),
+                persistent,
+                issue_link: issue_link.trim().to_owned(),
+                linked_server: linked_server.clone(),
+            };
+            let pending = pending_creation(&key, false);
+            let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
+                }
+                return;
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.set_modal(SharedString::default());
+                ui.set_modal_error(SharedString::default());
+                apply_pending_creations(&ui, &submit_creations.borrow());
+            }
+            send(
+                &sender,
+                Command::CreateClient {
+                    request_id,
+                    name: name.into(),
+                    minecraft: minecraft.into(),
+                    loader: loader.into(),
+                    loader_version: loader_version.into(),
+                    persistent,
+                    issue_link: issue_link.trim().into(),
+                    linked_server,
+                },
+            );
+        },
+    );
+}
+
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -3866,41 +3943,7 @@ fn register_client_actions(
 ) {
     register_promotion_actions(ui, commands);
     register_pack_link_actions(ui, commands);
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let submit_creations = Rc::clone(creations);
-    ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
-        let key = CreationKey::Client {
-            name: name.trim().to_owned(),
-            minecraft: minecraft.as_str().to_owned(),
-            loader: loader.as_str().to_owned(),
-            loader_version: loader_version.as_str().to_owned(),
-            persistent,
-        };
-        let pending = pending_creation(&key, false);
-        let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
-            }
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.set_modal(SharedString::default());
-            ui.set_modal_error(SharedString::default());
-            apply_pending_creations(&ui, &submit_creations.borrow());
-        }
-        send(
-            &sender,
-            Command::CreateClient {
-                request_id,
-                name: name.into(),
-                minecraft: minecraft.into(),
-                loader: loader.into(),
-                loader_version: loader_version.into(),
-                persistent,
-            },
-        );
-    });
+    register_create_instance(ui, commands, creations);
 
     let sender = commands.clone();
     ui.on_kill_instance(move |id, launch| {
@@ -8368,7 +8411,7 @@ fn apply_event(
                 .progressed(&request_id, detail, progress, indeterminate);
             apply_pending_creations(ui, &creations.borrow());
         }
-        Event::ImportLinkedServerStarted {
+        Event::LinkedServerStarted {
             request_id,
             instance,
             server_name,
@@ -11331,6 +11374,63 @@ mod tests {
                 },
             )));
         AppWindow::new().expect("window")
+    }
+
+    /// The dialog stays open with the reason when the link it was given is one
+    /// the core would refuse, and sends nothing.
+    #[test]
+    fn a_refused_issue_link_keeps_the_new_instance_dialog_open() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+        ui.set_modal("create-instance".into());
+
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "ftp://example.com/issue".into(),
+            false,
+            "".into(),
+        );
+
+        assert_eq!(ui.get_modal(), "create-instance");
+        assert!(!ui.get_modal_error().is_empty());
+        assert!(receiver.try_recv().is_err(), "nothing was started");
+    }
+
+    /// Wanting a server without naming it takes the name the dialog suggests.
+    #[test]
+    fn a_new_instance_with_a_server_and_no_name_takes_the_suggested_name() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "https://example.com/issues/7".into(),
+            true,
+            "".into(),
+        );
+
+        let Ok(Command::CreateClient {
+            issue_link,
+            linked_server,
+            ..
+        }) = receiver.try_recv()
+        else {
+            panic!("a creation was started");
+        };
+        assert_eq!(issue_link, "https://example.com/issues/7");
+        assert_eq!(linked_server, "Repro Server");
     }
 
     #[test]
@@ -16132,6 +16232,8 @@ mod tests {
             loader: "Forge".to_owned(),
             loader_version: "47.3.0".to_owned(),
             persistent: false,
+            issue_link: String::new(),
+            linked_server: String::new(),
         };
         let mut tracker = CreationTracker::default();
         let request = tracker.accept(key.clone(), pending_creation(&key, false));

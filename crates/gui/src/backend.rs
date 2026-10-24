@@ -246,6 +246,11 @@ pub enum Command {
         loader: String,
         loader_version: String,
         persistent: bool,
+        /// The issue the instance reproduces; empty when none is given.
+        issue_link: String,
+        /// The name of a server to create linked to the new instance; empty
+        /// when none is wanted.
+        linked_server: String,
     },
     ImportPack {
         archive: PathBuf,
@@ -1826,10 +1831,10 @@ pub enum Event {
     },
     /// An install for a host ended, whichever way.
     HostJavaInstallSettled(InstalledHost),
-    /// An import committed its instance and is now creating that instance's
-    /// linked server. The pending card stops standing in for a second instance
+    /// An import or a creation committed its instance and is now creating that
+    /// instance's linked server. The pending card stops standing in for a second instance
     /// and its progress moves onto the instance's own row.
-    ImportLinkedServerStarted {
+    LinkedServerStarted {
         request_id: String,
         instance: String,
         server_name: String,
@@ -3454,11 +3459,14 @@ fn run_worker(
                 loader,
                 loader_version,
                 persistent,
+                issue_link,
+                linked_server,
             } => match loader_selection(&loader, &loader_version) {
                 Ok(loader) => {
                     let paths = app.paths().clone();
                     let entity = name.clone();
                     let reports = events.clone();
+                    let creation_id = request_id.clone();
                     spawn_creation_operation(
                         paths,
                         &events,
@@ -3467,22 +3475,61 @@ fn run_worker(
                             id: request_id,
                             title: "operation-creating-instance",
                             entity,
-                            report_progress: false,
+                            // The server's progress is the card the user watches.
+                            report_progress: !linked_server.is_empty(),
                         },
-                        move |app, _reporter, _cancel| async move {
-                            app.create_client_reporting(
-                                NewClient::new(name, minecraft, loader)
-                                    .with_storage(storage_class(persistent)),
-                            )
-                            .await
-                            .map(|created| {
-                                let _ = reports.send(Event::ClientCreated {
-                                    instance: created.record.id.to_string(),
-                                });
-                                CreationOutcome::Created(localized_value(
+                        move |mut app, reporter, cancel| async move {
+                            let mut request = NewClient::new(name, minecraft, loader)
+                                .with_storage(storage_class(persistent));
+                            if !issue_link.is_empty() {
+                                request = request.with_issue_link(issue_link);
+                            }
+                            let created = app.create_client_reporting(request).await?;
+                            let _ = reports.send(Event::ClientCreated {
+                                instance: created.record.id.to_string(),
+                            });
+                            if linked_server.is_empty() {
+                                return Ok(CreationOutcome::Created(localized_value(
                                     "gui-created-entity",
                                     &created.record.name,
-                                ))
+                                )));
+                            }
+                            // The instance exists whatever happens next, so a
+                            // server that fails is reported beside it, not
+                            // as the instance failing.
+                            send_snapshot(&mut app, &reports);
+                            let _ = reports.send(Event::LinkedServerStarted {
+                                request_id: creation_id,
+                                instance: created.record.id.to_string(),
+                                server_name: linked_server.clone(),
+                            });
+                            let server = NewServer::linked(linked_server, created.record.id)
+                                .with_storage(created.record.storage);
+                            let options = ServerCreateOptions {
+                                install_java_if_missing: true,
+                                content: ServerContentSource::Recipe,
+                                reporter: Some(reporter),
+                                ..ServerCreateOptions::default()
+                            };
+                            let name = created.record.name;
+                            Ok(match app.create_server(server, &options, &cancel).await {
+                                Ok(_) => CreationOutcome::Created(localized_value(
+                                    "gui-created-with-server",
+                                    &name,
+                                )),
+                                Err(error) if error.is_cancellation() => {
+                                    CreationOutcome::CreatedWithProblem(localized_value(
+                                        "gui-created-server-canceled",
+                                        &name,
+                                    ))
+                                }
+                                Err(error) => {
+                                    CreationOutcome::CreatedWithProblem(localized_values(
+                                        "gui-created-server-failed",
+                                        &name,
+                                        &localized_error(&error),
+                                    ))
+                                }
                             })
                         },
                     );
@@ -10789,6 +10836,9 @@ enum OperationReport {
 /// How a pending client or server creation reached its terminal state.
 enum CreationOutcome {
     Created(String),
+    /// Created, with something left undone that the user needs to hear about
+    /// as a problem, such as a linked server that failed.
+    CreatedWithProblem(String),
     /// The user left a manual artifact-acquisition prompt. The staged server
     /// was already discarded, so there is no error and no success to report.
     Abandoned,
@@ -10946,6 +10996,13 @@ fn spawn_creation_operation<F, Fut>(
                     let _ = events.send(Event::Toast {
                         message,
                         error: false,
+                    });
+                }
+                Ok(CreationOutcome::CreatedWithProblem(message)) => {
+                    reporter.finish(OperationStatus::Completed);
+                    let _ = events.send(Event::Toast {
+                        message,
+                        error: true,
                     });
                 }
                 Ok(CreationOutcome::Abandoned) => {
@@ -12679,7 +12736,7 @@ fn create_imported_pack_server(
 ) -> Result<(), String> {
     let server_name = suggested_server_name(&pack.record.name);
     send_snapshot(app, run.events);
-    let _ = run.events.send(Event::ImportLinkedServerStarted {
+    let _ = run.events.send(Event::LinkedServerStarted {
         request_id: run.request_id.to_owned(),
         instance: pack.record.id.to_string(),
         server_name: server_name.clone(),
