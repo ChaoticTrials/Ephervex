@@ -13,7 +13,7 @@ import "fonts/IBMPlexMono-Medium.ttf";
 import "fonts/IBMPlexMono-SemiBold.ttf";
 import { ChoiceBox, IndexComboBox, ValueComboBox } from "components/selection.slint";
 import { HostIcon } from "components/artwork.slint";
-import { Panel, Plate } from "components/surface.slint";
+import { Outlined, Panel, Plate } from "components/surface.slint";
 import {
     AppButton,
     BusySpinner,
@@ -1206,24 +1206,27 @@ export component AppWindow inherits Window {
             // Every instance and server, beside whatever the page shows, or
             // over it as a drawer in a narrow window.
             Rectangle {
+                // Beside the page the column sits on the floor; as a drawer
+                // it is a plate over the page, under its button.
+                property <length> inset: shell.list-inline ? Theme.shell-padding : Theme.shell-drawer-padding;
                 z: 10;
-                x: shell.list-inline || shell.list-open ? 0px : -self.width;
-                y: 0px;
-                width: Theme.shell-padding + Theme.list-column-width + Theme.shell-padding;
-                height: shell.height;
+                x: shell.list-inline ? 0px : shell.list-open ? Theme.shell-padding : -self.width - Theme.shell-padding;
+                y: shell.list-inline ? 0px : Theme.shell-padding + shell.list-top;
+                width: self.inset + Theme.list-column-width + self.inset;
+                height: shell.list-inline ? shell.height : shell.content-height - shell.list-top;
                 visible: shell.list-inline || shell.list-open;
-                background: shell.list-inline ? transparent : Theme.background;
-                if !shell.list-inline : TouchArea { }
-                if !shell.list-inline : Rectangle {
-                    x: parent.width - Theme.strong-border-width;
-                    width: Theme.strong-border-width;
-                    background: Theme.border-strong;
+                if !shell.list-inline : Plate {
+                    width: parent.width;
+                    height: parent.height;
+                    radius: Theme.dialog-radius;
+                    fill: Theme.background;
+                    TouchArea { }
                 }
             VerticalLayout {
-                x: Theme.shell-padding;
-                y: Theme.shell-padding + shell.list-top;
+                x: parent.inset;
+                y: parent.inset;
                 width: Theme.list-column-width;
-                height: shell.content-height - shell.list-top;
+                height: parent.height - 2 * parent.inset;
                 spacing: 14px;
                 BrandBar {
                     logo: root.logo;
@@ -1481,8 +1484,10 @@ export component AppWindow inherits Window {
                                         property <bool> narrow: self.width < 620px;
                                         Heading { text: GuiI18n.text("gui-reproduction-environment"); overflow: elide; }
                                         BodyText { text: GuiI18n.text("gui-reproduction-environment-detail"); wrap: word-wrap; }
-                                        Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
-                                            HorizontalLayout { padding: 18px; spacing: 18px; HostIcon { slot: host.client.icon-slot; kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
+                                        Outlined { radius: Theme.card-radius;
+                                            // The face holds its children in a box of its own, so the height comes from them.
+                                            height: environment-row.preferred-height;
+                                            environment-row := HorizontalLayout { padding: 18px; spacing: 18px; HostIcon { slot: host.client.icon-slot; kind: host.client.loader-kind; } VerticalLayout { horizontal-stretch: 1; Heading { text: host.client.name; overflow: elide; } BodyText { text: GuiI18n.values("gui-target-summary", host.client.minecraft, host.client.loader); overflow: elide; } BodyText { text: host.client.storage + " | " + host.client.source; overflow: elide; } BodyText { text: host.client.path; color: Theme.text-muted; overflow: elide; } if host.client.paired-server-id != "" : BodyText { text: GuiI18n.value("gui-paired-with-host", host.client.paired-server-name); color: Theme.accent; overflow: elide; } } if host.client.paired-server-id != "" && !host.pair-shown : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "server", host.client.paired-server-id); } } } }
                                         }
                                         if !client-overview.narrow : HorizontalLayout { spacing: 10px;
                                             if host.client.loader-kind != "vanilla" : BodyText { text: GuiI18n.value("gui-loader-change-summary", host.client.loader); color: Theme.text-secondary; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
@@ -1496,11 +1501,17 @@ export component AppWindow inherits Window {
                                             if host.client.loader-kind != "vanilla" : AppButton { text: GuiI18n.text("gui-loader-change-open"); clicked => { root.open-loader-change(host.id); } }
                                         }
                                         BodyText { text: host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle"); color: Theme.text-muted; wrap: word-wrap; }
-                                        Divider { }
-                                        HorizontalLayout { spacing: 10px; Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if host.linked-servers.length == 0 && host.pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.open-create-linked-server(host.id, host.client.name); } } }
-                                        if host.linked-servers.length == 0 && host.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
-                                        for pending in host.pending-servers : PendingCard { item: pending; }
-                                        for server in host.linked-servers : Rectangle { border-radius: 8px; border-width: 1px; border-color: server.needs-attention ? Theme.warning : Theme.border; background: Theme.surface; card := VerticalLayout { padding: 14px; spacing: 8px;
+                                        // A pane of a split has no column beside it, so its Overview
+                                        // keeps the linked servers; otherwise the column holds them.
+                                        property <[ServerRow]> no-servers;
+                                        property <[PendingEntityRow]> no-pending;
+                                        property <[ServerRow]> listed-servers: split ? host.linked-servers : self.no-servers;
+                                        property <[PendingEntityRow]> listed-pending: split ? host.pending-servers : self.no-pending;
+                                        if split : Divider { }
+                                        if split : HorizontalLayout { spacing: 10px; Heading { text: GuiI18n.text("gui-linked-server"); font-size: Theme.section-size; overflow: elide; horizontal-stretch: 1; } if host.linked-servers.length == 0 && host.pending-servers.length == 0 : AppButton { text: GuiI18n.text("gui-create-linked-server"); clicked => { root.open-create-linked-server(host.id, host.client.name); } } }
+                                        if split && host.linked-servers.length == 0 && host.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-no-linked-server-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                                        for pending in self.listed-pending : PendingCard { item: pending; }
+                                        for server in self.listed-servers : Rectangle { border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: server.needs-attention ? Theme.warning : Theme.border-strong; background: Theme.surface; card := VerticalLayout { padding: 14px; spacing: 8px;
                                             // Every action on one row needs about this much room.
                                             property <bool> narrow: self.width < 840px;
                                             property <bool> paired: host.client.paired-server-id == server.id;
@@ -2373,23 +2384,24 @@ export component AppWindow inherits Window {
             // pages take this width, so the page grows by the column and its
             // gap when it is left.
             if root.shows-home || root.shows-host-column : Rectangle {
+                property <length> inset: shell.side-inline ? Theme.shell-padding : Theme.shell-drawer-padding;
                 z: 10;
-                width: Theme.shell-padding + Theme.side-column-width + Theme.shell-padding;
-                x: shell.side-inline || shell.side-open ? shell.width - self.width : shell.width;
-                y: 0px;
-                height: shell.height;
+                width: self.inset + Theme.side-column-width + self.inset;
+                x: shell.side-inline ? shell.width - self.width : shell.side-open ? shell.width - Theme.shell-padding - self.width : shell.width;
+                y: shell.side-inline ? 0px : Theme.shell-padding + shell.side-top;
+                height: shell.side-inline ? shell.height : shell.content-height - shell.side-top;
                 visible: shell.side-inline || shell.side-open;
-                background: shell.side-inline ? transparent : Theme.background;
-                if !shell.side-inline : TouchArea { }
-                if !shell.side-inline : Rectangle {
-                    x: 0px;
-                    width: Theme.strong-border-width;
-                    background: Theme.border-strong;
+                if !shell.side-inline : Plate {
+                    width: parent.width;
+                    height: parent.height;
+                    radius: Theme.dialog-radius;
+                    fill: Theme.background;
+                    TouchArea { }
                 }
             RightColumn {
-                x: Theme.shell-padding;
-                y: Theme.shell-padding + shell.side-top;
-                height: shell.content-height - shell.side-top;
+                x: parent.inset;
+                y: parent.inset;
+                height: parent.height - 2 * parent.inset;
                 if root.shows-host-column && root.column-host.kind == "client" : LinkedServersCard {
                     servers: root.column-host.linked-servers;
                     pending: root.column-host.pending-servers;

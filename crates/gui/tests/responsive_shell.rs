@@ -116,8 +116,9 @@ fn the_narrowest_window_moves_the_list_into_a_drawer_too() {
     );
 
     press_rail_button(&ui, "gui-shell-show-list");
-    let padding = ui.global::<Theme>().get_shell_padding();
-    assert!((left_edge(&ui, "HostList") - padding).abs() < 1.0);
+    let theme = ui.global::<Theme>();
+    let inside = theme.get_shell_padding() + theme.get_shell_drawer_padding();
+    assert!((left_edge(&ui, "HostList") - inside).abs() < 1.0);
     assert!(right_edge(&ui, "HostList") > left_edge(&ui, "HomePage"));
 }
 

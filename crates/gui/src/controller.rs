@@ -21392,11 +21392,14 @@ mod tests {
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
         let source = ui_markup();
-        assert!(source.contains("for server in host.linked-servers"));
+        assert!(source.contains("listed-servers: split ? host.linked-servers"));
+        assert!(source.contains("for server in self.listed-servers"));
+        assert!(source.contains("for server in root.servers : LinkedServerRow"));
         assert!(source.contains("root.follow-host(pane.id, \"server\", server.id, \"Overview\")"));
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
-        assert!(source.contains("for pending in host.pending-servers"));
+        assert!(source.contains("listed-pending: split ? host.pending-servers"));
+        assert!(source.contains("for pending in self.listed-pending"));
         assert!(source.contains("NameRules.linked-server-name(client-name)"));
     }
 

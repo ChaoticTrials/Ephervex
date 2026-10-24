@@ -214,3 +214,50 @@ fn the_report_card_leads_to_the_diagnostic_bundle() {
         Some(&(1, "Diagnostics".to_owned()))
     );
 }
+
+fn text_shown(ui: &AppWindow, label: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, label).any(|element| element.size().width > 0.0)
+}
+
+#[test]
+fn an_overview_beside_the_column_leaves_the_linked_servers_to_it() {
+    let ui = window(1300, client_with_server());
+    assert!(!text_shown(&ui, &lookup("gui-linked-server")));
+    assert!(text_shown(&ui, &lookup("gui-reproduction-environment")));
+}
+
+#[test]
+fn an_overview_in_a_split_keeps_its_linked_servers() {
+    let ui = support::test_window();
+    ui.window().set_size(PhysicalSize::new(1600, 900));
+    support::show(
+        &ui,
+        vec![client_with_server(), support::server_view(linked_server())],
+        vec![
+            support::pane(1, 0, "Overview"),
+            support::pane(2, 1, "Overview"),
+        ],
+    );
+    settle(&ui);
+    assert!(text_shown(&ui, &lookup("gui-linked-server")));
+}
+
+#[test]
+fn the_overview_card_holds_the_text_that_follows_it_apart_from_its_own() {
+    let ui = window(1300, client_with_server());
+    let below = |label: &str| {
+        let element = ElementHandle::find_by_accessible_label(&ui, label)
+            .find(|element| element.size().width > 0.0)
+            .expect("the text is shown");
+        element.absolute_position().y
+    };
+    let path = ElementHandle::find_by_accessible_label(&ui, "/tmp/ephervex/instances/client")
+        .find(|element| element.size().width > 0.0)
+        .expect("the card shows the instance's folder");
+    let card_bottom = path.absolute_position().y + path.size().height;
+    assert!(
+        below(&lookup("gui-temporary-lifecycle")) >= card_bottom,
+        "the lifecycle note starts at {}, inside the card that ends at {card_bottom}",
+        below(&lookup("gui-temporary-lifecycle"))
+    );
+}

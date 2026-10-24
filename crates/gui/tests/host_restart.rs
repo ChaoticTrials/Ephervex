@@ -334,6 +334,8 @@ fn a_disabled_force_kill_says_why() {
 #[test]
 fn a_disabled_connect_shows_the_reason_its_server_row_carries() {
     let ui = window();
+    // Wide enough for the column that lists the linked servers.
+    ui.window().set_size(PhysicalSize::new(1700, 900));
     let mut row = server(true);
     row.linked_client_id = "host".into();
     row.can_connect = false;
