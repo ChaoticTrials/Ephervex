@@ -111,15 +111,14 @@ fn one_global_preference_reaches_two_minecraft_versions_without_copying_a_file()
 
     // Each file is marked with its own release's data version, which is what
     // tells the game how much of its own history to apply to the rest of the
-    // file. Neither was copied from the other: the markers differ, and 1.12.2
-    // has none to give because its client jar never carried one.
+    // file. Neither was copied from the other: the markers differ.
     assert!(
         modern_options.contains("version:3465"),
         "1.20.1 marks its own file: {modern_options}"
     );
     assert!(
-        !legacy_options.contains("version:"),
-        "1.12.2 has no data version to claim: {legacy_options}"
+        legacy_options.contains("version:1343"),
+        "1.12.2 marks its own file: {legacy_options}"
     );
 
     // Each release resolves to its own schema family, and the report says

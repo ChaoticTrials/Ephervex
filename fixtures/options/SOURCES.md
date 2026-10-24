@@ -24,6 +24,9 @@ game emits them.
   another release's;
 * no key from a neighboring era leaks in - no `overrideWidth` in a modern
   file, no `simulationDistance` in a 1.12.2 one.
+* every key the release's dataset schema writes holds a value its codec
+  accepts (for example `chatVisibility` is an integer id in every release), and
+  no key the schema proves the release does not write appears at all.
 
 ## About the `version:` values
 
@@ -42,6 +45,9 @@ These files are hand-authored, so a value in one is only as good as the
 evidence behind it. Where a claim here has been checked against a release's own
 bytecode or against a file the game itself wrote, it says so:
 
+* the graphics settings in `options-26.1.txt` are `graphicsPreset` and
+  `improvedTransparency`, which replaced `graphicsMode` in 1.21.11, so the
+  fixture carries the keys of the era it documents;
 * the field of view reads `fov:0.0` in every era because every release stores
   `(degrees - 70) / 40`, so the seventy-degree default is zero rather than
   `70.0` - confirmed against real files from 26.1.2 and 26.2, which store

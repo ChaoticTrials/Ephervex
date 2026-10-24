@@ -32,9 +32,12 @@ field.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
+
+import dataset
 
 # Bumped only when the document's own shape changes.
 FORMAT_VERSION = 1
@@ -74,6 +77,19 @@ EXPECTED_VALUE_TYPES = {
     "key_binding": {"key_binding"},
     "text": {"string"},
     "window_size": {"integer", "number"},
+}
+
+# Presentation kind -> the codec kinds the canonical release may store it with.
+# A kind the codec disagrees with would offer a control the game cannot persist.
+EXPECTED_CODEC_KINDS = {
+    "toggle": {"boolean"},
+    "integer": {"integer"},
+    "decimal": {"decimal", "scaled_decimal"},
+    "enum": {"enum_id", "enum_token"},
+    "language": {"language_code"},
+    "key_binding": {"key_name_glfw", "key_code_lwjgl2"},
+    "text": {"text"},
+    "window_size": {"integer"},
 }
 
 KNOWN_TIERS = {"standard", "advanced"}
@@ -117,6 +133,12 @@ EXCLUSIONS = {
     "startedCleanly": "the clean-startup marker is client-owned crash-recovery state",
     "tutorialStep": "tutorial progress is client-owned state, not a portable global preference",
 }
+
+# Why a manageable current setting is left out when the canonical release has no
+# codec for it: a row for it could never be applied.
+UNPROVEN_CODEC_REASON = (
+    "the canonical release's persisted form of this setting is not established, so it cannot be written safely"
+)
 
 # Keybinding categories the research recovered that this catalog treats as
 # advanced/developer-facing rather than a typical settings-screen row.
@@ -172,6 +194,46 @@ def _enum_value_in_codec(technical: str, codec: dict[str, Any]) -> bool | None:
     if kind == "enum_token":
         return technical in codec.get("tokens", [])
     return None
+
+
+def _missing_enum_values(offered: list[str], codec: dict[str, Any]) -> list[str]:
+    """The codec's proven values that `offered` leaves out, in codec order."""
+    if codec.get("kind") == "enum_id":
+        covered = {int(technical) for technical in offered if _INTEGER_TEXT.fullmatch(technical)}
+        return [str(value) for value in codec.get("values", []) if value not in covered]
+    covered_tokens = set(offered)
+    return [token for token in codec.get("tokens", []) if token not in covered_tokens]
+
+
+def _fits_numeric_kind(kind: str, number: Any) -> bool:
+    """Whether the application can read `number` in a `kind` presentation (`i64` or finite `f64`)."""
+    if isinstance(number, bool) or not isinstance(number, (int, float)):
+        return False
+    if kind == "integer":
+        return isinstance(number, int)
+    return math.isfinite(number)
+
+
+def _validate_default_type(did: str, kind: str, default: Any) -> None:
+    """Refuses a default whose type the application could not read for `kind`."""
+    if default is None:
+        return
+    if kind == "toggle":
+        ok = isinstance(default, bool)
+    elif kind in ("integer", "decimal"):
+        ok = _fits_numeric_kind(kind, default)
+    elif kind in ("enum", "language", "text"):
+        ok = isinstance(default, str)
+    elif kind == "key_binding":
+        ok = (
+            isinstance(default, dict)
+            and isinstance(default.get("unbound"), bool)
+            and isinstance(default.get("serialized"), (str, type(None)))
+        )
+    else:
+        ok = False  # `window_size` has no default to carry.
+    if not ok:
+        raise PreferenceCatalogError(f"`{did}` default `{default}` is not a valid `{kind}` default")
 
 
 def _canonical_schema(dataset_document: dict[str, Any]) -> dict[str, Any]:
@@ -231,6 +293,13 @@ def _numeric_kind(value_type: str, codec: dict[str, Any] | None) -> str:
     return "integer" if value_type == "integer" else "decimal"
 
 
+def _whole(value: Any) -> Any:
+    """A whole-valued float as an `int`, since the application reads `integer` as `i64` and refuses `1.0`."""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
 def _numeric_default(rich: dict[str, Any] | None, kind: str) -> int | float | None:
     if rich is None or rich.get("default_confidence") != "high":
         return None
@@ -240,8 +309,27 @@ def _numeric_default(rich: dict[str, Any] | None, kind: str) -> int | float | No
     if kind == "integer":
         # A genuinely fractional default has no honest integer presentation;
         # dropping it is safer than rounding a value nobody proved.
+        default = _whole(default)
         return default if isinstance(default, int) else None
     return float(default)
+
+
+def _step_fits(step: int | float, minimum: int | float, maximum: int | float,
+               default: int | float | None) -> bool:
+    """Whether a control moving `step` at a time reaches both ends and the default.
+
+    Stepping from the minimum must land on the maximum and on the default, or
+    the control cannot offer a value the game itself persists.
+    """
+    if step <= 0:
+        return False
+    for point in (maximum, default):
+        if point is None:
+            continue
+        steps = (point - minimum) / step
+        if abs(steps - round(steps)) > 1e-6:
+            return False
+    return True
 
 
 def _numeric_presentation(kind: str, codec: dict[str, Any] | None, rich: dict[str, Any] | None) -> dict[str, Any]:
@@ -250,6 +338,9 @@ def _numeric_presentation(kind: str, codec: dict[str, Any] | None, rich: dict[st
     if kind == "decimal":
         minimum = None if minimum is None else float(minimum)
         maximum = None if maximum is None else float(maximum)
+    else:
+        # A fractional bound stays so `validate` refuses it by name.
+        minimum, maximum = _whole(minimum), _whole(maximum)
     default = _numeric_default(rich, kind)
     step = None
     if rich is not None and minimum is not None and maximum is not None:
@@ -265,8 +356,11 @@ def _numeric_presentation(kind: str, codec: dict[str, Any] | None, rich: dict[st
             and float(proven_min) == minimum
             and float(proven_max) == maximum
         )
-        if agrees and numeric.get("step") is not None:
-            step = numeric["step"] if kind == "integer" else float(numeric["step"])
+        proven_step = numeric.get("step")
+        if agrees and proven_step is not None and _step_fits(proven_step, minimum, maximum, default):
+            step = float(proven_step) if kind == "decimal" else _whole(proven_step)
+            if kind == "integer" and not isinstance(step, int):
+                step = None  # A fractional step has no integer presentation.
     return {"kind": kind, "default": default, "min": minimum, "max": maximum, "step": step}
 
 
@@ -299,14 +393,19 @@ def _enum_values(codec: dict[str, Any] | None, rich: dict[str, Any] | None) -> l
                 "ordinal": entry.get("ordinal"),
             }
         )
-    if not out and proven:
-        # No enrichment available (or none survived corroboration): the bare
-        # proven values are still real product information, just unlabeled.
-        out = [
-            {"technical_value": value, "enum_constant": None, "translation_key": None, "ordinal": None}
-            for value in sorted(proven)
-        ]
-    out.sort(key=lambda value: (value["ordinal"] if value["ordinal"] is not None else 1 << 30, value["technical_value"]))
+    # Unlabeled proven values are still offered, so a partly labeled enum loses none.
+    for value in sorted(proven or ()):
+        if value not in seen:
+            out.append({"technical_value": value, "enum_constant": None, "translation_key": None, "ordinal": None})
+
+    by_id = codec.get("kind") == "enum_id"
+
+    def order(value: dict[str, Any]) -> tuple[int, int, str]:
+        position = value["ordinal"] if value["ordinal"] is not None else 1 << 30
+        # Ids order numerically ("2" before "10"), tokens alphabetically.
+        return (position, int(value["technical_value"]) if by_id else 0, value["technical_value"])
+
+    out.sort(key=order)
     return out
 
 
@@ -408,6 +507,9 @@ def build(dataset_document: dict[str, Any], rich_settings: dict[str, dict[str, A
     numeric/enum domain is) comes from `dataset_document` alone, so an absent
     or partial `rich_settings` only narrows presentation enrichment (proven
     defaults, enum labels, keybinding grouping), never the accounting.
+
+    A manageable current setting the canonical release has no codec for is
+    excluded with `UNPROVEN_CODEC_REASON` instead of exposed.
     """
     registry = {entry["id"]: entry for entry in dataset_document["setting_registry"]}
     current_ids = set(dataset_document["current_canonical_setting_ids"])
@@ -434,11 +536,16 @@ def build(dataset_document: dict[str, Any], rich_settings: dict[str, dict[str, A
 
     manageable_current = {cid for cid in current_ids if registry[cid]["manageable"]}
     for cid in sorted(manageable_current - claimed):
+        if cid not in codec_by_id:
+            exclusions.append({"canonical_id": cid, "reason": UNPROVEN_CODEC_REASON})
+            claimed.add(cid)
+            continue
         entry = registry[cid]
-        descriptors.append(_simple_descriptor(cid, entry, codec_by_id.get(cid), rich_settings.get(cid)))
+        descriptors.append(_simple_descriptor(cid, entry, codec_by_id[cid], rich_settings.get(cid)))
         claimed.add(cid)
 
     descriptors.sort(key=lambda descriptor: descriptor["id"])
+    exclusions.sort(key=lambda exclusion: exclusion["canonical_id"])
     return {
         "format_version": FORMAT_VERSION,
         "canonical_minecraft_version": dataset_document["canonical_minecraft_version"],
@@ -502,33 +609,45 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
                 raise PreferenceCatalogError(
                     f"`{did}` presentation `{kind}` does not fit canonical type `{registry[cid]['type']}` of `{cid}`"
                 )
+            # No proven codec means nothing to tie the presentation to.
+            codec = codecs.get(cid)
+            if codec is not None and codec.get("kind") not in EXPECTED_CODEC_KINDS[kind]:
+                raise PreferenceCatalogError(
+                    f"`{did}` presentation `{kind}` does not fit the `{codec.get('kind')}` codec of `{cid}`"
+                )
+
+        presentation = descriptor["presentation"]
+        _validate_default_type(did, kind, presentation.get("default"))
+        codec = codecs.get(descriptor["fields"][0]["canonical_id"])
 
         if kind == "enum":
-            values = descriptor["presentation"]["values"]
+            values = presentation["values"]
             technical_values = [value["technical_value"] for value in values]
-            codec = codecs.get(descriptor["fields"][0]["canonical_id"])
             for technical in technical_values:
                 if codec is None:
                     break
-                member = _enum_value_in_codec(technical, codec)
-                if member is None:
-                    raise PreferenceCatalogError(
-                        f"`{did}` is an enum but its canonical setting is stored as `{codec.get('kind')}`"
-                    )
-                if not member:
+                if not _enum_value_in_codec(technical, codec):
                     raise PreferenceCatalogError(
                         f"`{did}` offers enum value `{technical}`, which the canonical release's "
                         f"`{codec['kind']}` codec does not accept"
                     )
             if len(set(technical_values)) != len(technical_values):
                 raise PreferenceCatalogError(f"`{did}` has two enum values with the same technical value")
-            default = descriptor["presentation"].get("default")
+            missing = [] if codec is None else _missing_enum_values(technical_values, codec)
+            if missing:
+                raise PreferenceCatalogError(
+                    f"`{did}` omits value(s) the canonical release's `{codec['kind']}` codec accepts: "
+                    f"{', '.join(missing)}"
+                )
+            default = presentation.get("default")
             if default is not None and default not in technical_values:
                 raise PreferenceCatalogError(f"`{did}` default is not one of its own enum values")
 
         if kind in ("integer", "decimal"):
-            presentation = descriptor["presentation"]
             minimum, maximum, step = presentation.get("min"), presentation.get("max"), presentation.get("step")
+            for name, number in (("minimum", minimum), ("maximum", maximum), ("step", step)):
+                if number is not None and not _fits_numeric_kind(kind, number):
+                    raise PreferenceCatalogError(f"`{did}` numeric {name} `{number}` is not a valid {kind} value")
             if minimum is not None and maximum is not None and minimum > maximum:
                 raise PreferenceCatalogError(f"`{did}` numeric domain is inverted")
             if step is not None and step <= 0:
@@ -539,6 +658,11 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
                 above = maximum is not None and default > maximum
                 if below or above:
                     raise PreferenceCatalogError(f"`{did}` default is outside its own numeric domain")
+            if codec is not None and (minimum, maximum) != (codec.get("min"), codec.get("max")):
+                raise PreferenceCatalogError(
+                    f"`{did}` numeric range {minimum}..{maximum} differs from the canonical release's "
+                    f"{codec.get('min')}..{codec.get('max')}"
+                )
 
     exclusion_ids: set[str] = set()
     for exclusion in document["exclusions"]:
@@ -573,18 +697,69 @@ def dumps(document: dict[str, Any]) -> str:
 # --------------------------------------------------------------- maintainer CLI
 
 
-def _load_normalized_record(analysis_dir: Path, canonical_version: str) -> dict[str, Any] | None:
-    directory = analysis_dir / "normalized"
-    if not directory.is_dir():
-        return None
-    for path in sorted(directory.glob("*.json")):
-        record = json.loads(path.read_text(encoding="utf-8"))
-        if record.get("minecraft_version") == canonical_version:
-            return record
-    return None
+def _load_normalized_record(analysis_dir: Path, dataset_document: dict[str, Any]) -> dict[str, Any]:
+    """The complete analysis of the canonical release under `analysis_dir`.
+
+    Searches `<dir>/mc-<version>/normalized`, then `<dir>/normalized`. The
+    record's expanded schema must be the one the dataset recorded for the
+    release: output left by an earlier analyzer run names the same release and
+    JAR but extracts different facts. No such record is an error, never an
+    empty enrichment.
+    """
+    version = dataset_document["canonical_minecraft_version"]
+    wanted_schema = _canonical_schema(dataset_document)["id"]
+    registry = dataset_document["setting_registry"]
+
+    stages = {"records": 0, "release": 0, "complete": 0}
+    matches: list[dict[str, Any]] = []
+    for directory in (analysis_dir / f"mc-{version}" / "normalized", analysis_dir / "normalized"):
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as error:
+                raise PreferenceCatalogError(f"cannot read analyzer output {path}: {error}") from error
+            if not isinstance(record, dict):
+                raise PreferenceCatalogError(f"cannot read analyzer output {path}: not a JSON object")
+            stages["records"] += 1
+            if record.get("minecraft_version") != version:
+                continue
+            stages["release"] += 1
+            if not record.get("extraction_complete"):
+                continue
+            stages["complete"] += 1
+            try:
+                schema_id = dataset.fingerprint(dataset.schema_for(record, registry))
+            except (KeyError, TypeError):
+                continue  # Not an analyzer record of the shape this dataset was built from.
+            if schema_id == wanted_schema:
+                matches.append(record)
+
+    if matches:
+        if len({record.get("jar_sha256") for record in matches}) > 1:
+            raise PreferenceCatalogError(f"{analysis_dir} holds more than one distinct analysis of {version}")
+        if any(record != matches[0] for record in matches):
+            raise PreferenceCatalogError(
+                f"release {version} has different analyzer records under {analysis_dir}; "
+                "run the analyzer again so the output holds only the current JAR's analysis"
+            )
+        return matches[0]
+
+    where = f"under {analysis_dir}"
+    if not stages["records"]:
+        raise PreferenceCatalogError(
+            f"no analyzer output {where}: expected `mc-{version}/normalized` or `normalized` there"
+        )
+    if not stages["release"]:
+        raise PreferenceCatalogError(f"the analyzer output {where} has no record for {version}")
+    if not stages["complete"]:
+        raise PreferenceCatalogError(f"the analysis of {version} {where} did not extract completely")
+    raise PreferenceCatalogError(
+        f"the analysis of {version} {where} does not match the compatibility dataset's schema for it; "
+        "it is stale or from another JAR, so rerun the analysis"
+    )
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     import argparse
     import sys
 
@@ -599,7 +774,8 @@ def main() -> int:
         "--from-analysis",
         type=Path,
         help="an analyzer output directory (see tools/minecraft-options/update.py) to enrich "
-        "presentation with the canonical release's proven defaults, enum labels and keybinding groups",
+        "presentation with the canonical release's proven defaults, enum labels and keybinding groups; "
+        "it must hold a complete analysis of the canonical release that matches the compatibility dataset",
     )
     parser.add_argument("--out", type=Path, default=default_out, help="where to write the catalog")
     parser.add_argument(
@@ -607,37 +783,39 @@ def main() -> int:
         action="store_true",
         help="verify the existing catalog at --out matches what these inputs regenerate, and write nothing",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     dataset_document = json.loads(args.dataset.read_text(encoding="utf-8"))
     rich_settings: dict[str, dict[str, Any]] = {}
-    if args.from_analysis:
-        record = _load_normalized_record(args.from_analysis, dataset_document["canonical_minecraft_version"])
-        if record is None:
-            print(
-                f"[preferences] no analysis for {dataset_document['canonical_minecraft_version']} "
-                f"under {args.from_analysis}; continuing without enrichment",
-                file=sys.stderr,
-            )
-        else:
-            rich_settings = rich_settings_by_canonical_id(record)
-
     try:
+        if args.from_analysis:
+            rich_settings = rich_settings_by_canonical_id(
+                _load_normalized_record(args.from_analysis, dataset_document)
+            )
         document = build(dataset_document, rich_settings)
         validate(document, dataset_document)
     except PreferenceCatalogError as error:
         print(f"[preferences] {error}", file=sys.stderr)
         return 1
 
+    unenriched = (
+        "" if args.from_analysis
+        else " (no --from-analysis was given, so it has no proven defaults, enum labels or keybinding groups)"
+    )
     text = dumps(document)
     if args.check:
         current = args.out.read_text(encoding="utf-8") if args.out.exists() else ""
         if current != text:
-            print("[preferences] the bundled catalog does not match what these inputs regenerate", file=sys.stderr)
+            print(
+                f"[preferences] the bundled catalog does not match what these inputs regenerate{unenriched}",
+                file=sys.stderr,
+            )
             return 1
         print("[preferences] bundled catalog is exactly what these inputs regenerate")
         return 0
 
+    if unenriched:
+        print(f"[preferences] writing a catalog without enrichment{unenriched}", file=sys.stderr)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(text, encoding="utf-8")
     exposed = sum(len(descriptor["fields"]) for descriptor in document["descriptors"])

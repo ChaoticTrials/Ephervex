@@ -6,14 +6,19 @@ This is the one maintainer workflow for this subsystem.
     python3 tools/minecraft-options/update.py --latest
     python3 tools/minecraft-options/update.py --version 26.2
     python3 tools/minecraft-options/update.py --from-analysis <dir> --offline
-    python3 tools/minecraft-options/update.py --check
+    python3 tools/minecraft-options/update.py --check --version 26.2
+    python3 tools/minecraft-options/update.py --check --from-analysis <dir>
 
 It reads Mojang's published version manifest, selects a release (never a
 snapshot), fetches and hash-verifies that release's official client JAR into an
-untracked development cache, analyzes it statically without ever executing
-Minecraft, refreshes the release's official language catalog, folds the result
+untracked development cache, refreshes the release's official language catalog,
+analyzes the JAR statically without ever executing Minecraft, folds the result
 into the committed dataset, and writes the exact JSON to publish to the remote
 options feed.
+
+Exactly one of --latest, --version and --from-analysis selects the input.
+--check writes nothing and never uses the network: it reads the cached manifest
+and the release's existing analysis in the cache.
 
 Nothing here needs GitHub credentials and nothing here publishes anything. The
 generated feed file is written locally and its path is printed.
@@ -27,21 +32,21 @@ import json
 import subprocess
 import sys
 import urllib.error
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 import dataset
+import fetch_language_catalogs
+import official_sources
 import preferences
+from official_sources import SourceError
+from release_identity import is_release
 
 TOOL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOL_DIR.parent.parent
 BUNDLED_DATASET = REPO_ROOT / "crates" / "options" / "data" / "minecraft-options.json"
 BUNDLED_PREFERENCE_CATALOG = REPO_ROOT / "crates" / "options" / "data" / "minecraft-preferences.json"
-DEFAULT_CACHE = TOOL_DIR / ".cache"
-
-MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-USER_AGENT = "ephervex-minecraft-options/1 (static options.txt analysis)"
+DEFAULT_CACHE = official_sources.DEFAULT_CACHE
 
 # Matches the launcher's own floor. Below it Ephervex neither installs nor
 # launches, so compatibility data for those releases would describe something
@@ -54,22 +59,6 @@ class WorkflowError(Exception):
 
 
 # ------------------------------------------------------------------- fetching
-
-
-def fetch(url: str, timeout: int = 120) -> bytes:
-    if not url.startswith("https://"):
-        raise WorkflowError(f"refusing to fetch over a non-https url: {url}")
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read()
-
-
-def manifest(cache: Path, refresh: bool) -> dict[str, Any]:
-    path = cache / "version_manifest_v2.json"
-    if refresh or not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(fetch(MANIFEST_URL))
-    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def select_release(document: dict[str, Any], wanted: str | None) -> dict[str, Any]:
@@ -89,36 +78,45 @@ def select_release(document: dict[str, Any], wanted: str | None) -> dict[str, An
         raise WorkflowError(f"`{target}` is not in Mojang's version manifest")
     if dataset.version_key(target) < dataset.version_key(MINIMUM_SUPPORTED_VERSION):
         raise WorkflowError(f"`{target}` predates the supported floor {MINIMUM_SUPPORTED_VERSION}")
+    official_sources.require_version_id(entry["id"])
     return entry
 
 
 def client_jar(entry: dict[str, Any], cache: Path) -> Path:
-    """The official client JAR, verified against Mojang's published SHA-1."""
+    """The official client JAR, verified against Mojang's published SHA-1.
+
+    Cached version metadata is reused only while it still matches the SHA-1 in
+    the current manifest entry, so a refreshed manifest also refreshes it.
+    """
+    version = official_sources.require_version_id(entry.get("id"))
     jars = cache / "jars"
     jars.mkdir(parents=True, exist_ok=True)
-    target = jars / f"mc-{entry['id']}.jar"
+    target = jars / f"mc-{version}.jar"
 
-    metadata_path = cache / "versions" / f"{entry['id']}.json"
+    metadata_label = f"version metadata for {version}"
+    metadata_sha1 = official_sources.require_sha1(entry.get("sha1"), metadata_label)
+    metadata_path = cache / "versions" / f"{version}.json"
     metadata_path.parent.mkdir(parents=True, exist_ok=True)
-    if not metadata_path.exists():
-        body = fetch(entry["url"])
-        digest = hashlib.sha1(body).hexdigest()  # noqa: S324 - Mojang publishes sha1
-        if entry.get("sha1") and digest != entry["sha1"]:
-            raise WorkflowError(f"version metadata for {entry['id']} failed its sha1 check")
+    body = None
+    if metadata_path.exists():
+        cached = metadata_path.read_bytes()
+        if hashlib.sha1(cached).hexdigest() == metadata_sha1:  # noqa: S324 - Mojang publishes sha1
+            body = cached
+    if body is None:
+        body = official_sources.fetch_verified(entry.get("url"), metadata_sha1, metadata_label)
         metadata_path.write_bytes(body)
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = official_sources.json_object(body, metadata_label)
 
     download = (metadata.get("downloads") or {}).get("client")
-    if not download:
-        raise WorkflowError(f"{entry['id']} publishes no client download")
-    if target.exists() and hashlib.sha1(target.read_bytes()).hexdigest() == download["sha1"]:  # noqa: S324
+    if not isinstance(download, dict):
+        raise WorkflowError(f"{version} publishes no client download")
+    jar_label = f"client jar for {version}"
+    jar_sha1 = official_sources.require_sha1(download.get("sha1"), jar_label)
+    jar_url = official_sources.require_https_url(download.get("url"), jar_label)
+    if target.exists() and hashlib.sha1(target.read_bytes()).hexdigest() == jar_sha1:  # noqa: S324
         return target
 
-    body = fetch(download["url"])
-    digest = hashlib.sha1(body).hexdigest()  # noqa: S324
-    if digest != download["sha1"]:
-        raise WorkflowError(f"client jar for {entry['id']} failed its sha1 check")
-    target.write_bytes(body)
+    target.write_bytes(official_sources.fetch_verified(jar_url, jar_sha1, jar_label))
     return target
 
 
@@ -154,43 +152,57 @@ def run_analyzer(cache: Path, jar: Path) -> Path:
     return output
 
 
-def refresh_language_catalog(cache: Path, version: str) -> dict[str, Any]:
-    """Refreshes one release's official language catalog in the dev cache."""
-    completed = subprocess.run(  # noqa: S603
-        [
-            sys.executable,
-            str(TOOL_DIR / "fetch_language_catalogs.py"),
-            "--cache",
-            str(cache / "assets-cache"),
-            "--versions",
-            version,
-        ],
-        check=False,
+def refresh_language_catalogs(
+    cache: Path, versions: list[str], refresh_manifest: bool = False
+) -> dict[str, dict[str, Any]]:
+    """Brings each release's official language catalog in the cache up to date.
+
+    Uses the workflow's one version manifest, fetching it again when it does not
+    list a requested release. Raises unless every release has a verified catalog.
+    """
+    document = official_sources.load_manifest(
+        cache / official_sources.MANIFEST_NAME,
+        online=True,
+        refresh=refresh_manifest,
+        needs=versions,
     )
-    if completed.returncode != 0:
-        raise WorkflowError("the language catalog fetch failed; see its output above")
-    path = cache / "assets-cache" / "language" / f"{version}.json"
-    if not path.exists():
-        return {"status": "missing"}
-    return json.loads(path.read_text(encoding="utf-8"))
+    records, failures = fetch_language_catalogs.refresh(cache / "assets-cache", document, versions)
+    if failures:
+        detail = "; ".join(f"{version}: {reason}" for version, reason in sorted(failures.items()))
+        raise WorkflowError(f"the language catalog could not be produced ({detail})")
+    return records
 
 
 def normalized_records(analysis: Path, only: set[str] | None) -> list[dict[str, Any]]:
-    """Every analyzed release inside the supported range, newest last."""
+    """Every analyzed release inside the supported range, newest last.
+
+    A release analyzed from two different JARs is refused: which one is current
+    is not something file names can say.
+    """
     directory = analysis / "normalized"
     if not directory.is_dir():
         raise WorkflowError(f"no normalized analyzer output under {directory}")
-    records = []
+    by_version: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
     for path in sorted(directory.glob("*.json")):
         record = json.loads(path.read_text(encoding="utf-8"))
         version = record.get("minecraft_version")
-        if not version or not record.get("extraction_complete"):
+        if not is_release(version):
             continue
         if dataset.version_key(version) < dataset.version_key(MINIMUM_SUPPORTED_VERSION):
             continue
         if only is not None and version not in only:
             continue
-        records.append(record)
+        by_version.setdefault(version, []).append((path, record))
+    records = []
+    for version, found in by_version.items():
+        if any(record != found[0][1] for _, record in found):
+            names = ", ".join(path.name for path, _ in found)
+            raise WorkflowError(
+                f"release {version} has different analyzer records in {directory} ({names}); "
+                "run the analyzer again so the output holds only the current JAR's analysis"
+            )
+        if found[0][1].get("extraction_complete"):
+            records.append(found[0][1])
     if not records:
         raise WorkflowError("the analyzer produced no usable supported release")
     return records
@@ -241,7 +253,7 @@ def summarize(
     previous: dict[str, Any] | None,
     changes: list[dict[str, str]],
     records: list[dict[str, Any]],
-    catalog: dict[str, Any] | None,
+    catalogs: dict[str, dict[str, Any]] | None,
     preference_catalog: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
@@ -302,30 +314,47 @@ def summarize(
             "preferences.py before they can appear on a settings screen"
         )
 
-    if catalog is not None:
-        count = catalog.get("language_count")
-        lines.append(
-            f"language catalog refreshed: {count} codes"
-            if count is not None
-            else f"language catalog: {catalog.get('status')}"
-        )
+    if catalogs:
+        newest = max(catalogs, key=dataset.version_key)
+        scope = newest if len(catalogs) == 1 else f"{len(catalogs)} releases, newest {newest}"
+        lines.append(f"language catalog refreshed ({scope}): {catalogs[newest].get('language_count')} codes")
 
     review = application_review_reasons(records, document)
-    remapped = [change for change in changes if change["kind"] != "release-unchanged"]
+    changed = previous is not None and previous["revision"] != document["revision"]
     if previous is None:
         lines.append("bundled dataset created")
-    elif not remapped and settings_now == settings_before:
+    elif not changed:
         lines.append("bundled dataset unchanged")
     else:
         lines.append(
             f"bundled dataset revision {previous['revision']} -> {document['revision']}"
         )
+    redefined = redefined_settings(previous, document)
+    if redefined:
+        lines.append(
+            f"{len(redefined)} existing setting definition(s) changed: {', '.join(redefined[:8])}"
+        )
     if review:
         lines.append("Ephervex application review/update required:")
         lines.extend(f"  {setting_id}: {reason}" for setting_id, reason in review)
-    elif previous is not None:
+    elif changed and not redefined:
         lines.append("no Ephervex application update required for a mapping-only change")
     return lines
+
+
+def redefined_settings(previous: dict[str, Any] | None, document: dict[str, Any]) -> list[str]:
+    """Ids whose registry definition differs from the previous dataset's."""
+    if previous is None:
+        return []
+    before = {
+        entry["id"]: entry
+        for entry in previous.get("setting_registry", previous.get("settings", []))
+    }
+    return sorted(
+        entry["id"]
+        for entry in document["setting_registry"]
+        if entry["id"] in before and before[entry["id"]] != entry
+    )
 
 
 def schema_for_extras(record: dict[str, Any], document: dict[str, Any]) -> list[str]:
@@ -337,33 +366,52 @@ def schema_for_extras(record: dict[str, Any], document: dict[str, Any]) -> list[
 def application_review_reasons(
     records: list[dict[str, Any]], document: dict[str, Any]
 ) -> list[tuple[str, str]]:
-    """Managed canonical ids the selected release cannot safely encode."""
+    """Required canonical ids the canonical release cannot safely encode.
+
+    Only the canonical release is judged: a setting a historical release does
+    not have is not a problem with the dataset, and the codec decision is the
+    one the dataset itself makes, so a reason is reported exactly when the
+    setting would end up unwritable.
+    """
+    canonical = next(
+        (
+            record
+            for record in records
+            if record["minecraft_version"] == document["canonical_minecraft_version"]
+        ),
+        None,
+    )
+    if canonical is None:
+        return []
     registry = {entry["key"]: entry["id"] for entry in document["setting_registry"]}
+    code_space = canonical.get("keybinding_code_space")
+    by_id = {
+        registry[setting["persisted_key"]]: setting
+        for setting in canonical["settings"]
+        if setting["persisted_key"] in registry
+    }
     reasons: list[tuple[str, str]] = []
-    for record in records:
-        code_space = record.get("keybinding_code_space")
-        by_id = {
-            registry[setting["persisted_key"]]: setting
-            for setting in record["settings"]
-            if setting["persisted_key"] in registry
-        }
-        for setting_id in dataset.REQUIRED_CANONICAL_IDS:
-            setting = by_id.get(setting_id)
-            if setting is None:
-                reasons.append((setting_id, "the analyzer did not recover the setting"))
-                continue
-            issue = dataset.representation_issue(setting, code_space)
-            if issue is not None:
-                reasons.append((setting_id, issue))
+    for setting_id in dataset.REQUIRED_CANONICAL_IDS:
+        setting = by_id.get(setting_id)
+        if setting is None:
+            reasons.append((setting_id, "the analyzer did not recover the setting"))
+        elif dataset.codec_for(setting, code_space) is None:
+            reasons.append(
+                (
+                    setting_id,
+                    dataset.representation_issue(setting, code_space)
+                    or "no codec could be derived from what the analyzer recovered",
+                )
+            )
     return sorted(set(reasons))
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    selection = parser.add_mutually_exclusive_group()
+    selection = parser.add_mutually_exclusive_group(required=True)
     selection.add_argument("--latest", action="store_true", help="analyze Mojang's newest release")
     selection.add_argument("--version", help="analyze one specific Minecraft release")
-    parser.add_argument(
+    selection.add_argument(
         "--from-analysis",
         type=Path,
         help="fold an existing analyzer output directory in instead of running the analyzer",
@@ -373,38 +421,56 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="verify the committed dataset matches what the inputs regenerate, and write nothing",
+        help="verify the committed dataset matches what the inputs regenerate, and write nothing; "
+        "never uses the network",
     )
     parser.add_argument("--refresh-manifest", action="store_true", help="re-read the version manifest")
     args = parser.parse_args()
 
+    if args.refresh_manifest and (args.check or args.offline):
+        parser.error("--refresh-manifest needs the network, which --check and --offline never use")
+    if args.offline and not args.check and not args.from_analysis:
+        parser.error("analyzing a release needs the network; use --from-analysis")
+    online = not (args.check or args.offline)
+
     cache: Path = args.cache.resolve()
     previous = read_bundled()
-    catalog: dict[str, Any] | None = None
+    catalogs: dict[str, dict[str, Any]] | None = None
 
     try:
         if args.from_analysis:
             analysis = args.from_analysis.resolve()
             records = normalized_records(analysis, None)
-            if not args.offline:
-                for record in records:
-                    catalog = refresh_language_catalog(cache, record["minecraft_version"])
-        elif args.check:
-            raise WorkflowError("--check needs --from-analysis or a release selection")
+            if online:
+                catalogs = refresh_language_catalogs(
+                    cache, [record["minecraft_version"] for record in records], args.refresh_manifest
+                )
         else:
-            if args.offline:
-                raise WorkflowError("analyzing a release needs the network; use --from-analysis")
-            document = manifest(cache, args.refresh_manifest or bool(args.latest))
+            document = official_sources.load_manifest(
+                cache / official_sources.MANIFEST_NAME,
+                online=online,
+                refresh=online and (args.latest or args.refresh_manifest),
+                needs=[args.version] if args.version else [],
+            )
             entry = select_release(document, args.version)
-            print(f"[update] selected release {entry['id']}", flush=True)
-            jar = client_jar(entry, cache)
-            analysis = run_analyzer(cache, jar)
-            catalog = refresh_language_catalog(cache, entry["id"])
+            if args.check:
+                # The analyzer writes into the cache, so a check reads the analysis a
+                # previous run left there.
+                analysis = cache / "analysis" / f"mc-{entry['id']}"
+                if not analysis.is_dir():
+                    raise WorkflowError(
+                        f"no analysis of {entry['id']} in the cache; run without --check or pass --from-analysis"
+                    )
+            else:
+                print(f"[update] selected release {entry['id']}", flush=True)
+                jar = client_jar(entry, cache)
+                catalogs = refresh_language_catalogs(cache, [entry["id"]])
+                analysis = run_analyzer(cache, jar)
             records = normalized_records(analysis, {entry["id"]})
 
         merged, changes = dataset.merge(previous, records)
         dataset.validate(merged)
-    except (WorkflowError, dataset.DatasetError) as error:
+    except (WorkflowError, SourceError, dataset.DatasetError) as error:
         print(f"[update] {error}", file=sys.stderr)
         return 1
     except (urllib.error.URLError, OSError) as error:
@@ -427,7 +493,7 @@ def main() -> int:
     feed.parent.mkdir(parents=True, exist_ok=True)
     feed.write_text(text, encoding="utf-8")
 
-    for line in summarize(merged, previous, changes, records, catalog, read_bundled_preferences()):
+    for line in summarize(merged, previous, changes, records, catalogs, read_bundled_preferences()):
         print(line)
     print(f"bundled dataset: {BUNDLED_DATASET}")
     print(f"remote feed to publish: {feed}")

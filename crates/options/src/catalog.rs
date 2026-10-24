@@ -239,14 +239,42 @@ impl PreferencePresentation {
         }
     }
 
+    /// Whether the codec the canonical release proved for a field can back
+    /// this presentation, so a descriptor never offers a control the game
+    /// could not persist.
+    fn accepts_codec(&self, codec: &OptionCodec) -> bool {
+        matches!(
+            (self, codec),
+            (Self::Toggle { .. }, OptionCodec::Boolean)
+                | (
+                    Self::Integer { .. } | Self::WindowSize,
+                    OptionCodec::Integer { .. }
+                )
+                | (
+                    Self::Decimal { .. },
+                    OptionCodec::Decimal { .. } | OptionCodec::ScaledDecimal { .. }
+                )
+                | (
+                    Self::Enum { .. },
+                    OptionCodec::EnumId { .. } | OptionCodec::EnumToken { .. }
+                )
+                | (Self::Language { .. }, OptionCodec::LanguageCode)
+                | (
+                    Self::KeyBinding { .. },
+                    OptionCodec::KeyNameGlfw | OptionCodec::KeyCodeLwjgl2
+                )
+                | (Self::Text { .. }, OptionCodec::Text)
+        )
+    }
+
     /// The compatibility dataset registry types this presentation may cover.
     ///
     /// `Integer`, `Decimal` and `WindowSize` all accept either registry
     /// numeric type: the registry's `type` is the JVM field's own
     /// classification, which can legitimately disagree with the proven
     /// codec a descriptor's presentation kind is actually built from (a JVM
-    /// `int` field can still persist a decimal value, as
-    /// `entityDistanceScaling` does). The codec, not the field type, decided
+    /// `int` field can still persist a decimal value, as `fov` does). The
+    /// codec, not the field type, decided
     /// the presentation kind at generation time, so both registry types are
     /// accepted here.
     fn expected_value_types(&self) -> &'static [&'static str] {
@@ -460,7 +488,8 @@ impl MinecraftPreferenceCatalog {
 
     /// Checks the catalog against the compatibility dataset it claims to be
     /// paired with: the accounting invariant, field ownership, and that every
-    /// presentation kind fits the canonical type it describes.
+    /// presentation kind fits the canonical type and codec it describes, with
+    /// the codec's numeric range and complete enum domain.
     pub fn validate_against(&self, dataset: &OptionsDataset) -> Result<(), CatalogError> {
         let inconsistent = |detail: String| CatalogError::Inconsistent { detail };
 
@@ -527,15 +556,14 @@ impl MinecraftPreferenceCatalog {
                         entry.value_type
                     )));
                 }
-                if let PreferencePresentation::Enum { values, .. } = &descriptor.presentation {
-                    let codec = canonical_schema
-                        .and_then(|schema| dataset.representation(schema, cid))
-                        .map(|representation| &representation.codec);
-                    if let Some(codec) = codec {
-                        validate_enum_values_against_codec(values, codec).map_err(|detail| {
-                            inconsistent(format!("`{}` {detail}", descriptor.id))
-                        })?;
-                    }
+                // A setting with no proven codec in the canonical release has
+                // nothing to tie its presentation to.
+                let codec = canonical_schema
+                    .and_then(|schema| dataset.representation(schema, cid))
+                    .map(|representation| &representation.codec);
+                if let Some(codec) = codec {
+                    validate_presentation_against_codec(&descriptor.presentation, cid, codec)
+                        .map_err(|detail| inconsistent(format!("`{}` {detail}", descriptor.id)))?;
                 }
             }
         }
@@ -592,6 +620,25 @@ fn validate_field_roles(descriptor: &MinecraftPreferenceDescriptor) -> Result<()
     }
 }
 
+/// Ties a presentation to the codec the canonical release proved for `cid`:
+/// the kind, the numeric range and the enum domain.
+fn validate_presentation_against_codec(
+    presentation: &PreferencePresentation,
+    cid: &str,
+    codec: &OptionCodec,
+) -> Result<(), String> {
+    if !presentation.accepts_codec(codec) {
+        return Err(format!(
+            "presentation `{}` does not fit the `{codec}` codec of `{cid}`",
+            presentation.as_str()
+        ));
+    }
+    if let PreferencePresentation::Enum { values, .. } = presentation {
+        validate_enum_values_against_codec(values, codec)?;
+    }
+    validate_numeric_range_against_codec(presentation, codec)
+}
+
 /// Checks every technical value an enum descriptor exposes is one the paired
 /// codec of the canonical release accepts, so the settings screen never offers
 /// a choice that writing the options file would refuse.
@@ -622,7 +669,73 @@ fn validate_enum_values_against_codec(
             ));
         }
     }
-    Ok(())
+    let missing: Vec<String> = match codec {
+        OptionCodec::EnumId { values: ids } => ids
+            .iter()
+            .filter(|id| {
+                !values
+                    .iter()
+                    .any(|value| value.technical_value.parse::<i64>().ok() == Some(**id))
+            })
+            .map(ToString::to_string)
+            .collect(),
+        OptionCodec::EnumToken { tokens, .. } => tokens
+            .iter()
+            .filter(|token| !values.iter().any(|value| &value.technical_value == *token))
+            .cloned()
+            .collect(),
+        _ => Vec::new(),
+    };
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "omits value(s) the canonical release's `{codec}` codec accepts: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+/// Checks a numeric presentation spans exactly the range the canonical
+/// release's codec proved, so the settings screen neither offers values the
+/// game would refuse nor hides ones it accepts.
+fn validate_numeric_range_against_codec(
+    presentation: &PreferencePresentation,
+    codec: &OptionCodec,
+) -> Result<(), String> {
+    let differs = |shown: String, proven: String| {
+        Err(format!(
+            "numeric range {shown} differs from the canonical release's {proven}"
+        ))
+    };
+    match (presentation, codec) {
+        (
+            PreferencePresentation::Integer { min, max, .. },
+            OptionCodec::Integer {
+                min: proven_min,
+                max: proven_max,
+            },
+        ) if (min, max) != (proven_min, proven_max) => differs(
+            format!("{min:?}..{max:?}"),
+            format!("{proven_min:?}..{proven_max:?}"),
+        ),
+        (
+            PreferencePresentation::Decimal { min, max, .. },
+            OptionCodec::Decimal {
+                min: proven_min,
+                max: proven_max,
+            }
+            | OptionCodec::ScaledDecimal {
+                min: proven_min,
+                max: proven_max,
+                ..
+            },
+        ) if (min, max) != (proven_min, proven_max) => differs(
+            format!("{min:?}..{max:?}"),
+            format!("{proven_min:?}..{proven_max:?}"),
+        ),
+        _ => Ok(()),
+    }
 }
 
 fn validate_presentation_shape(descriptor: &MinecraftPreferenceDescriptor) -> Result<(), String> {
@@ -724,7 +837,7 @@ mod tests {
           ],
           "current_canonical_setting_ids": ["fov", "cloudStatus", "overrideWidth", "overrideHeight", "resourcePacks"],
           "representations": [
-            {"key":"fov","codec":{"kind":"decimal","min":30,"max":110}},
+            {"key":"fov","codec":{"kind":"integer","min":30,"max":110}},
             {"key":"renderClouds","codec":{"kind":"enum_token","tokens":["false","true","fast"],"quoted":true}}
           ],
           "schemas": [{"id":"aaaaaaaaaaaaaaaa","supported":{"fov":0,"cloudStatus":1},"unsupported":[]}],
@@ -749,6 +862,7 @@ mod tests {
                   "fields":[{{"role":"value","canonical_id":"cloudStatus"}}],
                   "presentation":{{"kind":"enum","default":"true",
                     "values":[{{"technical_value":"false","enum_constant":"OFF","translation_key":"options.off","ordinal":0}},
+                              {{"technical_value":"fast","enum_constant":"FAST","translation_key":"options.clouds.fast","ordinal":1}},
                               {{"technical_value":"true","enum_constant":"FANCY","translation_key":"options.clouds.fancy","ordinal":2}}]}}}},
                 {{"id":"window_size","category":"video","section":null,"tier":"standard","translation_key":null,"help_translation_key":null,
                   "fields":[{{"role":"width","canonical_id":"overrideWidth"}},{{"role":"height","canonical_id":"overrideHeight"}}],
@@ -891,7 +1005,7 @@ mod tests {
             panic!("expected an enum presentation");
         };
         assert_eq!(default.as_deref(), Some("true"));
-        assert_eq!(values.len(), 2);
+        assert_eq!(values.len(), 3);
         assert_eq!(values[0].enum_constant.as_deref(), Some("OFF"));
     }
 
@@ -1089,10 +1203,16 @@ mod tests {
 
     #[test]
     fn an_enum_value_inside_the_canonical_codec_domain_is_accepted() {
-        let in_domain = document("").replace(
-            r#"{"technical_value":"false","enum_constant":"OFF""#,
-            r#"{"technical_value":"fast","enum_constant":"OFF""#,
-        );
+        let in_domain = document("")
+            .replace(
+                r#""technical_value":"false""#,
+                r#""technical_value":"swap""#,
+            )
+            .replace(
+                r#""technical_value":"fast""#,
+                r#""technical_value":"false""#,
+            )
+            .replace(r#""technical_value":"swap""#, r#""technical_value":"fast""#);
         MinecraftPreferenceCatalog::parse(&in_domain)
             .expect("structurally valid")
             .validate_against(&dataset())
@@ -1107,6 +1227,7 @@ mod tests {
         );
         let catalog_json = document("")
             .replace(r#""technical_value":"false""#, r#""technical_value":"0""#)
+            .replace(r#""technical_value":"fast""#, r#""technical_value":"1""#)
             .replace(r#""technical_value":"true""#, r#""technical_value":"2""#)
             .replace("\"default\":\"true\"", "\"default\":\"2\"");
         let compat = OptionsDataset::parse(&dataset_json).expect("valid");
@@ -1129,6 +1250,119 @@ mod tests {
                 "`{outside}` is not one of the ids the release stores"
             );
         }
+    }
+
+    /// Validates `catalog_json` against `dataset_json` and returns why it was
+    /// refused, failing the test if it was accepted.
+    fn refusal(catalog_json: &str, dataset_json: &str) -> String {
+        let compat = OptionsDataset::parse(dataset_json).expect("valid");
+        MinecraftPreferenceCatalog::parse(catalog_json)
+            .expect("structurally valid")
+            .validate_against(&compat)
+            .expect_err("must be refused")
+            .to_string()
+    }
+
+    #[test]
+    fn a_presentation_kind_that_disagrees_with_its_codec_is_refused() {
+        let fov_codec = r#"{"kind":"integer","min":30,"max":110}"#;
+        for stored_as in [
+            r#"{"kind":"decimal","min":30,"max":110}"#,
+            r#"{"kind":"boolean"}"#,
+            r#"{"kind":"text"}"#,
+        ] {
+            let dataset_json = dataset_document().replace(fov_codec, stored_as);
+            let reason = refusal(&document(""), &dataset_json);
+            assert!(
+                reason.contains("does not fit the") && reason.contains("codec of `fov`"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_decimal_presentation_fits_both_decimal_and_scaled_decimal_codecs() {
+        let decimal_catalog = document("").replace(
+            r#""presentation":{"kind":"integer","default":70,"min":30,"max":110,"step":1}"#,
+            r#""presentation":{"kind":"decimal","default":70.0,"min":30.0,"max":110.0,"step":1.0}"#,
+        );
+        for codec in [
+            r#"{"kind":"decimal","min":30,"max":110}"#,
+            r#"{"kind":"scaled_decimal","offset":70,"scale":40,"min":30,"max":110}"#,
+        ] {
+            let dataset_json =
+                dataset_document().replace(r#"{"kind":"integer","min":30,"max":110}"#, codec);
+            MinecraftPreferenceCatalog::parse(&decimal_catalog)
+                .expect("structurally valid")
+                .validate_against(&OptionsDataset::parse(&dataset_json).expect("valid"))
+                .expect("a decimal presentation fits the codec");
+        }
+    }
+
+    #[test]
+    fn a_numeric_range_that_differs_from_the_codec_range_is_refused() {
+        let cases = [
+            (r#""min":30,"max":110"#, r#""min":-50,"max":500"#),
+            (r#""min":30,"max":110"#, r#""min":null,"max":110"#),
+            (r#""min":30,"max":110"#, r#""min":30,"max":null"#),
+        ];
+        for (shown, tampered) in cases {
+            let reason = refusal(&document("").replace(shown, tampered), &dataset_document());
+            assert!(
+                reason.contains("differs from the canonical release's"),
+                "{reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_default_or_step_of_a_type_the_presentation_cannot_hold_is_refused_when_parsing() {
+        let cases = [
+            (r#""default":70,"#, r#""default":"yes","#),
+            (r#""default":70,"#, r#""default":true,"#),
+            (r#""default":70,"#, r#""default":70.5,"#),
+            (r#""step":1}"#, r#""step":1.0}"#),
+        ];
+        for (shown, tampered) in cases {
+            assert!(
+                matches!(
+                    MinecraftPreferenceCatalog::parse(&document("").replace(shown, tampered)),
+                    Err(CatalogError::Malformed { .. })
+                ),
+                "{tampered} must not parse as an integer presentation"
+            );
+        }
+    }
+
+    #[test]
+    fn an_enum_that_omits_a_value_its_codec_accepts_is_refused() {
+        let omitting_fast = document("").replace(
+            r#"{"technical_value":"fast","enum_constant":"FAST","translation_key":"options.clouds.fast","ordinal":1},"#,
+            "",
+        );
+        let reason = refusal(&omitting_fast, &dataset_document());
+        assert!(
+            reason.contains("omits") && reason.contains("fast"),
+            "{reason}"
+        );
+
+        let id_dataset = dataset_document().replace(
+            r#"{"kind":"enum_token","tokens":["false","true","fast"],"quoted":true}"#,
+            r#"{"kind":"enum_id","values":[0,1,2]}"#,
+        );
+        let id_catalog = document("")
+            .replace(
+                r#"{"technical_value":"fast","enum_constant":"FAST","translation_key":"options.clouds.fast","ordinal":1},"#,
+                "",
+            )
+            .replace(r#""technical_value":"false""#, r#""technical_value":"0""#)
+            .replace(r#""technical_value":"true""#, r#""technical_value":"2""#)
+            .replace("\"default\":\"true\"", "\"default\":\"2\"");
+        let reason = refusal(&id_catalog, &id_dataset);
+        assert!(
+            reason.contains("omits") && reason.ends_with(": 1"),
+            "{reason}"
+        );
     }
 
     #[test]

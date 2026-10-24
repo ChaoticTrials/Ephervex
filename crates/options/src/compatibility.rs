@@ -467,6 +467,33 @@ mod tests {
     }
 
     #[test]
+    fn the_cloud_status_is_written_as_the_token_each_release_stores() {
+        // Until 1.20.2 the game stores `true`, `fast` or `false` unquoted; a
+        // boolean codec would drop `fast` and refuse the others.
+        let catalog = crate::catalog::MinecraftPreferenceCatalog::bundled_shared().unwrap();
+        let descriptor = catalog.descriptor("cloud_status").unwrap();
+        let dataset = compatibility();
+        for version in ["1.12.2", "1.13.2", "1.14", "1.16.5"] {
+            let support = dataset.descriptor_support(descriptor, version);
+            let PreferenceSupport::Authoritative(fields) = &support else {
+                panic!("{version} proves how the cloud status is stored");
+            };
+            let codec = codec_of(&fields[0]);
+            for token in ["true", "fast", "false"] {
+                assert_eq!(
+                    codec.encode(&SettingValue::Text(token.to_owned())).unwrap(),
+                    token,
+                    "{version} writes `{token}` raw"
+                );
+            }
+            assert!(
+                codec.encode(&SettingValue::Boolean(true)).is_err(),
+                "{version} stores more than a boolean"
+            );
+        }
+    }
+
+    #[test]
     fn key_bindings_keep_their_two_encodings_across_the_1_13_boundary() {
         // Not an Ephervex preference, but the dataset has to carry the fact:
         // 1.12.2 stores LWJGL2 codes and 1.13 onward stores GLFW names.

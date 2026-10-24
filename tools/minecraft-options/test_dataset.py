@@ -28,6 +28,7 @@ def setting(
     encoding: str | None = None,
     default: int | float | None = None,
     default_confidence: str = "unknown",
+    quoting: str | None = None,
 ) -> dict:
     written = {
         "boolean": "lowercase true/false",
@@ -37,7 +38,7 @@ def setting(
         "key_binding": "InputConstants key name string (for example key.keyboard.w)",
         "enum": "enum id integer",
     }
-    return {
+    record = {
         "file_encoding": encoding or written.get(kind, ""),
         "persisted_key": key,
         "logical_id": logical_id or key,
@@ -54,6 +55,9 @@ def setting(
         "default": default,
         "default_confidence": default_confidence,
     }
+    if quoting is not None:
+        record["file_quoting"] = quoting
+    return record
 
 
 REQUIRED = [
@@ -86,7 +90,7 @@ class CodecDerivation(unittest.TestCase):
         cases = [
             (setting("a"), "glfw", {"kind": "boolean"}),
             (setting("lang", kind="string"), "glfw", {"kind": "language_code"}),
-            (setting("soundDevice", kind="string"), "glfw", {"kind": "text"}),
+            (setting("soundDevice", kind="string", quoting="raw"), "glfw", {"kind": "text"}),
             (setting("key_key.attack", kind="key_binding"), "glfw", {"kind": "key_name_glfw"}),
             (setting("key_key.attack", kind="key_binding"), "lwjgl2", {"kind": "key_code_lwjgl2"}),
             (
@@ -110,6 +114,15 @@ class CodecDerivation(unittest.TestCase):
         self.assertEqual(
             codec, {"kind": "scaled_decimal", "offset": 70, "scale": 40, "min": None, "max": None}
         )
+
+    def test_a_transform_on_an_integer_the_game_writes_whole_leaves_the_setting_unknown(self):
+        # `scaled_decimal` is always written with a decimal point, so a
+        # transformed integer would be written as `2.0` where the game writes `2`.
+        for expression in ["(value - 1)", "((value - 70) / 40)"]:
+            self.assertIsNone(
+                dataset.codec_for(setting("level", kind="integer", transform=expression), "glfw"),
+                expression,
+            )
 
     def test_a_transform_the_analyzer_could_not_read_is_not_no_transform(self):
         # A codec that changes the value on its way to the file, through
@@ -179,6 +192,36 @@ class CodecDerivation(unittest.TestCase):
             dataset.codec_for(quoted, "glfw"),
             {"kind": "enum_token", "tokens": ["left", "right"], "quoted": True},
         )
+
+    def test_a_string_the_release_writes_as_a_json_string_is_not_the_raw_text_codec(self):
+        raw = setting("soundDevice", kind="string", quoting="raw")
+        quoted = setting("soundDevice", kind="string", quoting="json_string")
+        self.assertEqual(dataset.codec_for(raw, "glfw"), {"kind": "text"})
+        self.assertIsNone(dataset.codec_for(quoted, "glfw"))
+        self.assertIn("JSON string", dataset.representation_issue(quoted, "glfw"))
+
+    def test_a_gson_array_line_typed_as_a_string_is_never_free_text(self):
+        for key in ("resourcePacks", "incompatibleResourcePacks"):
+            extracted = setting(
+                key,
+                kind="string",
+                quoting="raw",
+                encoding="JSON array of pack identifiers written on one line by Gson",
+            )
+            self.assertIsNone(dataset.codec_for(extracted, "glfw"), key)
+
+    def test_a_release_whose_quoting_differs_is_a_different_family_from_a_raw_one(self):
+        # Only the raw release keeps a representation; the quoted one is unknown
+        # rather than sharing it.
+        registry = [{"id": "soundDevice", "key": "soundDevice", "type": "string"}]
+        families = []
+        for quoting in ("raw", "json_string"):
+            record = release("1.19", [setting("soundDevice", kind="string", quoting=quoting)])
+            schema = dataset.schema_for(record, registry)
+            families.append((schema["supported"], dataset.fingerprint(schema)))
+        self.assertEqual(families[0][0], {"soundDevice": {"key": "soundDevice", "codec": {"kind": "text"}}})
+        self.assertEqual(families[1][0], {})
+        self.assertNotEqual(families[0][1], families[1][1])
 
     def test_a_low_confidence_extraction_is_never_promoted_to_a_representation(self):
         self.assertIsNone(dataset.codec_for(setting("a", confidence="medium"), "glfw"))
@@ -397,6 +440,181 @@ class Validation(unittest.TestCase):
         broken["canonical_minecraft_version"] = "27.0"
         with self.assertRaises(dataset.DatasetError):
             dataset.validate(broken)
+
+
+class CanonicalReleaseGate(unittest.TestCase):
+    """`validate` is the only gate before the bundled file and the feed are
+    written, so a canonical release that cannot encode a required setting must
+    stop here."""
+
+    def canonical(self, settings: list[dict]) -> dict:
+        document, _ = dataset.merge(None, [release("26.2", settings)])
+        return document
+
+    def test_a_required_setting_with_an_unrecognized_transform_is_refused(self):
+        settings = copy.deepcopy(REQUIRED)
+        settings[5] = setting("fov", kind="number", transform="pow(value, 2)")
+        with self.assertRaisesRegex(dataset.DatasetError, "fov \\(not established\\)"):
+            dataset.validate(self.canonical(settings))
+
+    def test_a_canonical_release_that_supports_none_of_the_required_settings_is_refused(self):
+        special = [
+            setting(entry["persisted_key"], entry["logical_id"], kind="special") for entry in REQUIRED
+        ]
+        document = self.canonical(special)
+        self.assertEqual(document["schemas"][0]["supported"], {})
+        with self.assertRaisesRegex(dataset.DatasetError, "cannot encode required settings"):
+            dataset.validate(document)
+
+    def test_a_required_setting_the_canonical_release_lacks_is_refused(self):
+        settings = [entry for entry in REQUIRED if entry["persisted_key"] != "simulationDistance"]
+        document, _ = dataset.merge(
+            None, [release("1.17.1", REQUIRED), release("26.2", settings)]
+        )
+        with self.assertRaisesRegex(dataset.DatasetError, "simulationDistance"):
+            dataset.validate(document)
+
+    def test_a_required_setting_listed_unsupported_for_the_canonical_release_is_refused(self):
+        document = self.canonical(REQUIRED)
+        schema = document["schemas"][0]
+        del schema["supported"]["simulationDistance"]
+        schema["unsupported"] = ["simulationDistance"]
+        schema["id"] = dataset.fingerprint(
+            {
+                "supported": {
+                    setting_id: document["representations"][position]
+                    for setting_id, position in schema["supported"].items()
+                },
+                "unsupported": schema["unsupported"],
+            }
+        )
+        document["releases"][0]["schema"] = schema["id"]
+        with self.assertRaisesRegex(dataset.DatasetError, "simulationDistance \\(absent from the release\\)"):
+            dataset.validate(document)
+
+    def test_a_historical_release_without_a_required_setting_is_accepted(self):
+        before = [entry for entry in REQUIRED if entry["persisted_key"] != "simulationDistance"]
+        document, _ = dataset.merge(
+            None, [release("1.17.1", before), release("26.2", REQUIRED)]
+        )
+        dataset.validate(document)
+
+
+class ApplicationLoadParity(unittest.TestCase):
+    """What the application's loader refuses must not pass the generator."""
+
+    reseal = Validation.reseal
+
+    def build(self) -> dict:
+        document, _ = dataset.merge(None, [release("26.2", REQUIRED)])
+        return document
+
+    def representation(self, document: dict, setting_id: str) -> dict:
+        return document["representations"][document["schemas"][0]["supported"][setting_id]]
+
+    def assert_refused(self, document: dict, pattern: str = "") -> None:
+        with self.assertRaisesRegex(dataset.DatasetError, pattern):
+            dataset.validate(document)
+
+    def test_an_integer_codec_with_its_minimum_above_its_maximum_is_refused(self):
+        broken = self.build()
+        self.representation(broken, "guiScale")["codec"].update(min=10, max=2)
+        self.reseal(broken)
+        self.assert_refused(broken, "minimum above its maximum")
+
+    def test_a_decimal_codec_with_a_non_finite_bound_is_refused(self):
+        broken = self.build()
+        self.representation(broken, "renderDistance")["codec"] = {
+            "kind": "decimal", "min": 0, "max": float("inf")}
+        self.reseal(broken)
+        self.assert_refused(broken, "finite number")
+
+    def test_a_scaled_decimal_codec_with_a_zero_scale_is_refused(self):
+        broken = self.build()
+        self.representation(broken, "fov")["codec"] = {
+            "kind": "scaled_decimal", "offset": 70, "scale": 0, "min": None, "max": None}
+        self.reseal(broken)
+        self.assert_refused(broken, "zero scale")
+
+    def test_enum_codecs_without_values_or_with_unwritable_tokens_are_refused(self):
+        for codec, pattern in (
+            ({"kind": "enum_id", "values": []}, "no values"),
+            ({"kind": "enum_token", "tokens": []}, "no tokens"),
+            ({"kind": "enum_token", "tokens": ["a\nb"], "quoted": False}, "token"),
+        ):
+            with self.subTest(codec=codec):
+                broken = self.build()
+                self.representation(broken, "fullscreen")["codec"] = codec
+                self.reseal(broken)
+                self.assert_refused(broken, pattern)
+
+    def test_a_codec_kind_the_application_does_not_implement_is_refused(self):
+        broken = self.build()
+        self.representation(broken, "fullscreen")["codec"] = {"kind": "expression", "text": "x"}
+        self.reseal(broken)
+        self.assert_refused(broken, "unknown kind")
+
+    def test_a_representation_key_the_options_file_cannot_hold_is_refused(self):
+        for key in ("", "we:ird", "tab\tkey", "line\nbreak"):
+            with self.subTest(key=key):
+                broken = self.build()
+                self.representation(broken, "fullscreen")["key"] = key
+                self.reseal(broken)
+                self.assert_refused(broken, "not usable as an options.txt key")
+
+    def test_an_unsupported_id_missing_from_the_registry_is_refused(self):
+        broken = self.build()
+        broken["schemas"][0]["unsupported"] = ["notInTheRegistry"]
+        self.reseal(broken)
+        self.assert_refused(broken, "unknown unsupported setting")
+
+    def test_a_setting_listed_twice_as_unsupported_is_refused(self):
+        broken = self.build()
+        broken["setting_registry"].append(
+            {"id": "gone", "key": "gone", "type": "boolean", "manageable": False})
+        broken["schemas"][0]["unsupported"] = ["gone", "gone"]
+        self.reseal(broken)
+        self.assert_refused(broken, "twice")
+
+    def test_a_schema_declared_twice_is_refused(self):
+        broken = self.build()
+        broken["schemas"].append(copy.deepcopy(broken["schemas"][0]))
+        self.assert_refused(broken, "declared twice")
+
+    def test_a_malformed_representation_position_is_refused_without_crashing(self):
+        for position in (10_000, -1, True, "0", 1.0, None):
+            with self.subTest(position=position):
+                broken = self.build()
+                broken["schemas"][0]["supported"]["fullscreen"] = position
+                self.assert_refused(broken, "out-of-range representation")
+
+    def test_a_data_version_that_is_not_an_integer_is_refused(self):
+        for value in ("1", True, 1.5, 2**63):
+            with self.subTest(value=value):
+                broken = self.build()
+                broken["releases"][0]["data_version"] = value
+                self.assert_refused(broken, "data version")
+
+    def test_a_revision_beyond_what_the_application_can_read_is_refused(self):
+        for value in (0, -1, True, 2**32, "3"):
+            with self.subTest(value=value):
+                broken = self.build()
+                broken["revision"] = value
+                self.assert_refused(broken, "revision")
+
+    def test_a_malformed_transform_constant_leaves_the_setting_unknown(self):
+        for transform in ("((value - 1.2.3) / 40)", "(value - .)", "((value - 70) / 4.0.)"):
+            with self.subTest(transform=transform):
+                unreadable = setting("fov", kind="number", transform=transform)
+                self.assertIsNone(dataset.codec_for(unreadable, "glfw"))
+                self.assertEqual(
+                    dataset.representation_issue(unreadable, "glfw"),
+                    "unrecognized storage transform",
+                )
+
+    def test_a_number_that_does_not_parse_is_a_dataset_error(self):
+        with self.assertRaises(dataset.DatasetError):
+            dataset._number("1.2.3")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,6 @@ resourcePacks:[]
 incompatibleResourcePacks:[]
 lastServer:
 lang:en_us
-soundDevice:""
 chatVisibility:0
 chatOpacity:1.0
 mainHand:right

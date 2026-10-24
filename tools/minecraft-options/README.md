@@ -31,10 +31,24 @@ python3 tools/minecraft-options/update.py --version 26.2
 
 That single command reads Mojang's version manifest, picks a **release** (never
 a snapshot or release candidate), downloads and SHA-1 verifies the official
-client JAR and version metadata into an untracked development cache, analyzes
-the JAR statically, refreshes that release's official language catalog, folds
+client JAR and version metadata into an untracked development cache, refreshes
+that release's official language catalog, analyzes the JAR statically, folds
 the result into the committed dataset, and writes the exact JSON to publish to
 the remote feed. It prints a short summary of what actually changed.
+
+A build counts as a release only when its `version.json` `name` and `id` agree
+on a release identifier (`1.N`, `1.N.P`, or `YY.N[.P]` from 26.1). A
+`release_target` never names a build, and an analysis record whose version is
+not a release identifier is skipped by `--from-analysis` instead of being
+ordered as if its non-numeric parts were zero.
+
+Exactly one of `--latest`, `--version` and `--from-analysis` selects the input.
+`--latest` always re-reads the manifest, and a `--version` the cached manifest
+does not list re-reads it once before failing. Every downloaded document and
+file is checked against the SHA-1 Mojang published for it; a mismatch or a
+missing hash stops the run, and the language catalog must be produced for the
+release or the run fails. The version metadata, assets, and catalogs all come
+from that one manifest.
 
 Two supporting modes:
 
@@ -44,16 +58,40 @@ python3 tools/minecraft-options/update.py --from-analysis <dir> --offline
 
 # Verify the committed dataset is exactly what those inputs regenerate.
 python3 tools/minecraft-options/update.py --check --from-analysis <dir> --offline
+
+# Verify it against a release already analyzed into the cache.
+python3 tools/minecraft-options/update.py --check --version 26.2
 ```
+
+`--check` writes nothing and never uses the network. With a release selection it
+reads the cached manifest and the analysis a previous run left under
+`.cache/analysis/mc-<version>`.
 
 `update.py --check` takes the directory for one analyzed *release*
 (`.cache/analysis/mc-26.2`), not the analysis root: the root's own `normalized/`
 holds whatever the last single-release run left there, which is not the same
-thing. `preferences.py --check` is the opposite - it reads the analysis root,
-because its enrichment comes from the canonical release's output beside it.
+thing. `preferences.py` takes either: it looks for the canonical release in
+`<dir>/mc-<version>/normalized` first and then in `<dir>/normalized`.
+
+`analyze_options.py` run by hand takes `--root` (a directory that must contain every
+JAR, including one passed with `--input-jar`) and `--output`. It refuses a root that
+is not a directory, an `--input-jar` outside the root, and a root with no JARs, and in
+each case leaves the output as it was. Two different JARs that report the same release
+are refused too, because the mapping for that release would be undecided; copies of
+one JAR count once. A successful run removes the `raw/` and `normalized/` records of
+JARs it did not analyze, so the output holds exactly that run's analysis, and
+`update.py` and `preferences.py` refuse analyzer output that holds different records for
+one release.
 
 Publication is manual and deliberate. `update.py` never edits the remote feed
 and never needs GitHub credentials; it writes the file and prints its path.
+
+Before anything is written, `dataset.validate` applies the same structural checks
+the application applies when it loads a dataset (codec parameters, option keys,
+representation positions, schema and release references), and requires the
+canonical release to support every setting Ephervex's own preference model needs.
+A dataset that fails either check is refused with an error, and neither the
+bundled file nor the feed file is touched.
 
 `update.py` also prints, without writing anything, whenever a current
 manageable setting is not yet covered by the bundled product catalog:
@@ -76,9 +114,21 @@ The first form regenerates `crates/options/data/minecraft-preferences.json`
 from the committed compatibility dataset plus the canonical release's own
 analyzer output (for proven defaults, enum labels and keybinding groups); the
 second verifies the bundled catalog is exactly what those inputs regenerate,
-without writing anything. `--from-analysis` is optional: without it, the
-catalog still regenerates completely (every accounting fact comes from the
-compatibility dataset alone), just with less presentation enrichment.
+without writing anything. A `--from-analysis` directory must hold a complete
+analysis of the canonical release whose extracted settings match the committed
+compatibility dataset. A directory with no such analysis (a mistyped path, a
+different release, an incomplete run, or output left over from an earlier
+analyzer version) is an error that names the cause and writes nothing. Without
+`--from-analysis` the catalog still regenerates completely (every accounting
+fact comes from the compatibility dataset alone), but with no proven defaults,
+enum labels or keybinding groups, so the tool says so and `--check` reports
+that as the reason for a mismatch.
+
+Generation also validates the catalog against the dataset, and the application
+repeats the same checks when it loads the bundled pair: each presentation kind
+must match the codec the canonical release stores the setting with, a numeric
+range must equal the codec's, an enum must offer every value the codec accepts,
+and a default must have the type its presentation kind holds.
 
 Regenerating the catalog is a reviewed source change, not something
 `update.py` ever does on its own - see
@@ -99,12 +149,14 @@ compiled into the binaries and are never fetched at build time. See
 
 | Path | Role |
 |---|---|
-| `analyze_options.py` | Static options.txt analyzer, imported unchanged from the completed research |
+| `analyze_options.py` | Static options.txt analyzer: reads a client JAR's bytecode and reports how each option is stored |
+| `official_sources.py` | Downloads from Mojang's published sources: https-only, SHA-1 verified, with validated identifiers and the shared version manifest cache |
 | `fetch_language_catalogs.py` | Fetches a release's language catalog from its own `pack.mcmeta` asset object |
+| `release_identity.py` | What counts as a release identifier, and how releases are ordered |
 | `dataset.py` | Turns analyzer output into the compatibility dataset, and validates it |
 | `preferences.py` | Turns the compatibility dataset (plus optional analyzer enrichment) into the bundled product preference catalog, and validates it |
 | `update.py` | The maintainer workflow: fetches, analyzes, folds into the compatibility dataset, and reports whether the product catalog needs review |
-| `test_dataset.py`, `test_preferences.py`, `test_update.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
+| `test_dataset.py`, `test_preferences.py`, `test_update.py`, `test_release_identity.py`, `test_official_sources.py`, `test_update_command.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
 | `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output, generated feed |
 
 Analyzer output is the input to every fingerprint in the committed dataset, so
@@ -158,11 +210,33 @@ Three per-release states, and the difference between the last two matters:
 | unknown (absent from both) | Nothing was established | Ephervex must not write it |
 
 Codecs are a closed set of typed variants with validated parameters - boolean,
-bounded integer, bounded decimal, an affine `scaled_decimal` (the pre-1.19
-field-of-view transform), enum id, enum token, LWJGL2 key code, GLFW key name,
-free text, and language code. A storage transform the generator cannot recognise
-as one of those becomes *unknown* here, at generation time. No expression is
-ever written into the dataset, so nothing downstream has to evaluate one.
+bounded integer, bounded decimal, an affine `scaled_decimal` (the field-of-view
+transform, `(degrees - 70) / 40`, written as a decimal), enum id, enum token,
+LWJGL2 key code, GLFW key name, free text, and language code. A storage
+transform the generator cannot recognize as one of those, or one on a setting
+the game writes as an integer, becomes *unknown* here, at generation time. No
+expression is ever written into the dataset, so nothing downstream has to
+evaluate one.
+
+Free text is the value written raw after the first colon. A string setting a
+release prints as a JSON string (`soundDevice:"Foo"` from 1.19) or stores as a
+Gson array line (`resourcePacks` before 1.17) is not that, so it stays
+*unknown* for that release instead of sharing the raw `text` representation.
+
+A key binding codec also needs the numeric table its release's default codes
+belong to. The analyzer assumes LWJGL2 before 1.13 and GLFW from 1.13, then
+checks the assumption against the release's own bytecode: well-known defaults
+(movement, jump, inventory, chat, the mouse buttons) must decode to the keys
+they are known to be. A release that contradicts the table, or exposes too few
+of those defaults to prove it, records the code space as `unverified`, with
+the evidence in `keybinding_code_space_check`. Its key bindings keep their raw
+codes but are medium confidence with no serialized key, and they get no codec.
+
+The codec does not depend on the default. A binding whose default the analyzer
+cannot read keeps the codec of its release, with an unknown default. A default
+built from a constant `Key` is the unbound key only when that constant's own
+static initializer creates it from code -1 and the key type enum registers -1
+under `key.keyboard.unknown`.
 
 The dataset carries no language catalogs. Those are Mojang-owned volatile data
 that the application fetches and caches per release during explicit metadata
@@ -186,7 +260,9 @@ accounted for exactly once, as either:
   product id, a category, and a closed presentation kind; or
 - an **exclusion**, naming the canonical id and a durable reason it is not a
   global preference (session/history state, machine-specific state, or state
-  that belongs to resource/pack management rather than to a settings screen).
+  that belongs to resource/pack management rather than to a settings screen),
+  or a manageable setting the canonical release has no codec for, which the
+  generator excludes by itself because a row for it could never be applied.
 
 `preferences.py --check` (or the Rust `MinecraftPreferenceCatalog::bundled`
 constructor, which every options-crate test runs against) refuses a catalog
@@ -196,7 +272,8 @@ that uses a category or presentation kind this build does not implement.
 
 A descriptor's presentation carries only what the analyzer actually proved for
 the canonical release: a default is absent, not guessed, when the analyzer
-never established one; a numeric range is absent, not guessed, when the
+never established one, including when the game picks it by a condition such as
+the platform or the JVM word size; a numeric range is absent, not guessed, when the
 compatibility dataset's own codec never proved one either. The list of valid
 Minecraft languages is deliberately not part of this file, for the same reason
 the compatibility dataset above carries no language catalogs: a descriptor may
@@ -224,8 +301,8 @@ notice into an exposed preference means:
 1. deciding whether the setting belongs on a settings screen at all, and if
    not, adding it to `preferences.py`'s `EXCLUSIONS` with a durable reason;
 2. otherwise doing nothing beyond that - `preferences.py`'s accounting is
-   automatic, so a manageable setting that is not explicitly excluded is
-   exposed the next time the catalog is regenerated;
+   automatic, so a manageable setting that is not explicitly excluded and has
+   a canonical codec is exposed the next time the catalog is regenerated;
 3. running `preferences.py --from-analysis <analysis dir>` and reviewing the
    diff to `crates/options/data/minecraft-preferences.json` like any other
    source change;
@@ -240,3 +317,12 @@ rewritten by a later run, so the historical client JARs are only needed to
 establish a release the first time. A key introduced after a release was
 analyzed stays *unknown* for that older release rather than being retroactively
 declared unsupported, which is the honest state and is never written.
+
+Folding never modifies the committed dataset it starts from, and the revision
+advances whenever the published content differs, including registry metadata
+and release data versions. Setting ids come only from a batch that reaches the
+committed canonical release; an older release names a new setting by its
+persisted key. Folding a release again keeps its family unless its own
+extracted representations changed, so re-folding analyzed releases, alone or
+together with a new release, gives the same dataset as folding only the new
+release.

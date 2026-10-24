@@ -712,13 +712,9 @@ mod tests {
             modern_text.contains("version:3465"),
             "1.20.1 marks its own file, got {modern_text:?}"
         );
-        // 1.12.2's client jar carries no data version to read, so its file is
-        // left unmarked rather than marked with a number from a release that
-        // is not this one. That is the same file this build wrote before, and
-        // no worse than it.
         assert!(
-            !legacy_text.contains("version:"),
-            "an unknown data version is not invented, got {legacy_text:?}"
+            legacy_text.contains("version:1343"),
+            "1.12.2 marks its own file, got {legacy_text:?}"
         );
     }
 
@@ -728,7 +724,8 @@ mod tests {
         // another is how a file gets the wrong historical fixes applied to it.
         let compatibility = OptionsCompatibility::bundled();
         assert_eq!(compatibility.data_version("1.20.1"), Some(3465));
-        assert_eq!(compatibility.data_version("1.12.2"), None);
+        assert_eq!(compatibility.data_version("1.12.2"), Some(1343));
+        assert_eq!(compatibility.data_version("1.13.2"), Some(1631));
         assert_eq!(compatibility.data_version("not-a-release"), None);
 
         let plan = plan_managed_preferences(

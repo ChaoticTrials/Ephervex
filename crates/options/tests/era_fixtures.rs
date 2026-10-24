@@ -15,8 +15,9 @@ use std::path::Path;
 
 use ephervex_options::{
     GlobalMinecraftPreferences, GuiScalePreference, LanguageAvailability, Managed,
-    OPTIONS_FILE_NAME, OptionsCompatibility, ParsedOptions, PreferenceApplication, PreferenceId,
-    PreferenceKey, PreferenceSupport, VERSION_KEY, WindowSize, apply_to_game_directory,
+    OPTIONS_FILE_NAME, OptionCodec, OptionsCompatibility, OptionsDataset, ParsedOptions,
+    PreferenceApplication, PreferenceId, PreferenceKey, PreferenceSupport, VERSION_KEY, WindowSize,
+    apply_to_game_directory,
 };
 
 /// One era fixture: a release and a real file from it.
@@ -190,6 +191,97 @@ fn every_era_fixture_belongs_to_a_release_the_dataset_can_answer_for() {
             era.version
         );
     }
+}
+
+/// What is wrong with `value` as the text a release stores for `codec`, if
+/// anything. This reads a stored value back; the codec itself only encodes.
+fn stored_value_problem(codec: &OptionCodec, value: &str) -> Option<String> {
+    let outside = |number: f64, min: Option<f64>, max: Option<f64>| {
+        const TOLERANCE: f64 = 1e-9;
+        min.is_some_and(|low| number < low - TOLERANCE)
+            || max.is_some_and(|high| number > high + TOLERANCE)
+    };
+    let problem = match codec {
+        OptionCodec::Boolean => !matches!(value, "true" | "false"),
+        OptionCodec::Text => false,
+        OptionCodec::LanguageCode => value.is_empty(),
+        OptionCodec::KeyCodeLwjgl2 => value.parse::<i64>().is_err(),
+        OptionCodec::KeyNameGlfw => !value.starts_with("key."),
+        OptionCodec::Integer { min, max } => value.parse::<i64>().map_or(true, |number| {
+            min.is_some_and(|low| number < low) || max.is_some_and(|high| number > high)
+        }),
+        OptionCodec::Decimal { min, max } => value.parse::<f64>().map_or(true, |number| {
+            !number.is_finite() || outside(number, *min, *max)
+        }),
+        OptionCodec::ScaledDecimal {
+            offset,
+            scale,
+            min,
+            max,
+        } => value.parse::<f64>().map_or(true, |stored| {
+            !stored.is_finite() || outside(stored * scale + offset, *min, *max)
+        }),
+        OptionCodec::EnumId { values } => value
+            .parse::<i64>()
+            .map_or(true, |id| !values.contains(&id)),
+        OptionCodec::EnumToken { tokens, quoted } => {
+            let token = if *quoted {
+                serde_json::from_str::<String>(value).ok()
+            } else {
+                Some(value.to_owned())
+            };
+            token.is_none_or(|token| !tokens.contains(&token))
+        }
+    };
+    problem.then(|| format!("`{value}` does not fit {codec:?}"))
+}
+
+#[test]
+fn every_fixture_line_is_a_key_and_value_its_release_writes() {
+    let dataset = OptionsDataset::bundled();
+    let mut problems = Vec::new();
+    for era in ERAS {
+        let schema = dataset
+            .schema_for(era.version)
+            .unwrap_or_else(|| panic!("{} is not mapped", era.version));
+        let writes: std::collections::BTreeMap<&str, &OptionCodec> = schema
+            .supported
+            .keys()
+            .filter_map(|setting| dataset.representation(schema, setting))
+            .map(|representation| (representation.key.as_str(), &representation.codec))
+            .collect();
+        // Only a proven absence counts: a key the dataset has no verdict on
+        // is a gap in what it knows, not evidence the release lacks it.
+        let proven_absent: std::collections::BTreeSet<&str> = schema
+            .unsupported
+            .iter()
+            .filter_map(|id| {
+                dataset
+                    .setting_registry
+                    .iter()
+                    .find(|entry| entry.id == *id)
+            })
+            .map(|entry| entry.key.as_str())
+            .collect();
+
+        let parsed = ParsedOptions::parse(era.text);
+        for key in parsed.keys().filter(|key| *key != VERSION_KEY) {
+            let value = parsed.get(key).expect("a listed key has a value");
+            match writes.get(key) {
+                Some(codec) => {
+                    if let Some(problem) = stored_value_problem(codec, value) {
+                        problems.push(format!("{} writes `{key}`, but {problem}", era.version));
+                    }
+                }
+                None if proven_absent.contains(key) => problems.push(format!(
+                    "{} contains `{key}`, which this release provably does not write",
+                    era.version
+                )),
+                None => {}
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{problems:#?}");
 }
 
 #[test]

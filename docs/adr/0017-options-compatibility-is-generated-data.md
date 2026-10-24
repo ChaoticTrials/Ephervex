@@ -10,8 +10,10 @@ one exact Minecraft release, what the game actually stores:
 
 - the key, which is not always the preference's name - a window size is
   `overrideWidth` and `overrideHeight`;
-- the encoding, which changes across releases - the field of view is
-  `(degrees - 70) / 40` through 1.18.2 and the degrees themselves from 1.19;
+- the encoding, which changes across releases - key bindings are LWJGL2 integer
+  codes before 1.13 and GLFW key names from then on, and the field of view is
+  stored as `(degrees - 70) / 40`, written as a decimal, so its default reads
+  `fov:0.0`;
 - the domain, which also changes - the simulation-distance value set narrowed in
   1.21.9;
 - whether the key existed at all - simulation distance arrived with 1.18;
@@ -72,8 +74,9 @@ JARs, committed as data, and distributed separately from the application**.
    only select among typed codec variants the binary implements - boolean,
    bounded integer, bounded decimal, an affine transform, enum id, enum token,
    the two key-code eras, text, and language code - with validated parameters. A
-   formula the generator cannot recognise as one of those becomes *unknown* at
-   generation time. Nothing evaluates anything at run time.
+   formula the generator cannot recognize as one of those, or a transform on a
+   setting the game writes as an integer, becomes *unknown* at generation time.
+   Nothing evaluates anything at run time.
 
 6. **Remote data extends compatibility; it does not create product surface.**
    Which settings exist as Ephervex preferences is compiled in. A canonical

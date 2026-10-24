@@ -29,11 +29,15 @@ the dataset, and therefore none can reach the application.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
 import re
+import unicodedata
 from typing import Any
+
+from release_identity import is_release, version_key
 
 # Bumped only when the document's own shape changes. An application that reads
 # a higher version must refuse the document rather than guess at it.
@@ -44,10 +48,10 @@ FORMAT_VERSION = 1
 VERSION_KEY = "version"
 VERSION_MARKER_SETTING_ID = "version"
 
-# The canonical setting ids Ephervex's own preference model is built on. The
-# generator refuses to publish a dataset that cannot describe all of them for
-# the canonical release, because that would ship a build whose settings screen
-# offers something the data cannot express.
+# The canonical setting ids Ephervex's own preference model is built on.
+# `validate` refuses a dataset whose canonical release does not support every
+# one of them, because that would ship a build whose settings screen offers
+# something the data cannot express.
 REQUIRED_CANONICAL_IDS = (
     "guiScale",
     "languageCode",
@@ -64,10 +68,16 @@ REQUIRED_CANONICAL_IDS = (
 # application knows a catalog check is required before writing.
 LANGUAGE_KEY = "lang"
 
-# `((value - 70) / 40)` and `(value - 1)`: the only storage transforms the
-# research recovered. Parsed into typed parameters rather than carried as text.
-_AFFINE = re.compile(r"^\(\(value - (-?[0-9.]+)\) / (-?[0-9.]+)\)$")
-_OFFSET = re.compile(r"^\(value - (-?[0-9.]+)\)$")
+# `((value - K) / S)` and `(value - K)`: the only storage transforms the
+# generator types. The field of view is `((value - 70) / 40)` in every release.
+# Parsed into typed parameters rather than carried as text.
+# A constant is digits with at most one decimal point, so `float()` can read it.
+_CONSTANT = r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)"
+_AFFINE = re.compile(rf"^\(\(value - ({_CONSTANT})\) / ({_CONSTANT})\)$")
+_OFFSET = re.compile(rf"^\(value - ({_CONSTANT})\)$")
+
+# How the analyzer describes a setting stored as a Gson array on one line.
+_JSON_ARRAY_LINE = "JSON array"
 
 
 class DatasetError(Exception):
@@ -78,7 +88,10 @@ class DatasetError(Exception):
 
 
 def _number(text: str) -> float:
-    value = float(text)
+    try:
+        value = float(text)
+    except ValueError:
+        raise DatasetError(f"`{text}` is not a number") from None
     if not math.isfinite(value):
         raise DatasetError(f"`{text}` is not a finite number")
     return value
@@ -158,6 +171,15 @@ def representation_issue(setting: dict[str, Any], code_space: str | None) -> str
         contradiction = _default_domain_contradiction(setting)
         if contradiction:
             return contradiction
+    if kind == "string":
+        # `text` is raw text after the first colon. A release that prints the
+        # value as a JSON string writes it inside quotes, and a Gson array
+        # line is structured data; neither is that, and a published `text`
+        # entry would be written back unquoted or as free text.
+        if setting.get("file_quoting") == "json_string":
+            return "the value is written as a JSON string, which `text` cannot express"
+        if (setting.get("file_encoding") or "").startswith(_JSON_ARRAY_LINE):
+            return "the value is a JSON array line, not free text"
     if kind == "enum":
         allowed = setting.get("allowed_values") or {}
         if setting.get("domain_confidence") != "high" or not allowed.get("values"):
@@ -192,9 +214,8 @@ def _default_domain_contradiction(setting: dict[str, Any]) -> str | None:
 def _numeric_codec(setting: dict[str, Any]) -> dict[str, Any] | None:
     domain = _domain(setting)
     # How the release writes the number is what matters, not the Java type it
-    # holds in memory: 1.19 onward stores the field of view as an integral
-    # value through a double codec, and writing `70` where the game writes
-    # `70.0` would be a gratuitous difference from the file it maintains itself.
+    # holds in memory: writing `70` where the game writes `70.0` would be a
+    # gratuitous difference from the file it maintains itself.
     encoding = setting.get("file_encoding") or ""
     if encoding == "decimal integer":
         written = "integer"
@@ -205,6 +226,10 @@ def _numeric_codec(setting: dict[str, Any]) -> dict[str, Any] | None:
 
     transform = setting.get("value_to_storage")
     if transform:
+        # `scaled_decimal` is always written as a decimal, so a transformed
+        # integer would gain a `.0` the game does not write.
+        if written == "integer":
+            return None
         affine = _AFFINE.match(transform)
         offset = _OFFSET.match(transform)
         if affine:
@@ -255,26 +280,30 @@ def _enum_codec(setting: dict[str, Any]) -> dict[str, Any] | None:
 # ------------------------------------------------------------------- building
 
 
-def registry_settings(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stable registry definitions across every analyzed release.
+def registry_settings(
+    records: list[dict[str, Any]], canonical: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """Stable registry definitions across the given analyzed releases.
 
-    Ids come from the canonical release, which is deobfuscated and therefore
-    has real field names. A key that only older releases had keeps its
-    persisted key as its id, because an obfuscated field name is not a name.
-    Older releases are matched to these definitions by persisted key, which the
-    research shows has never been renamed across the supported range.
+    Ids come from `canonical`, the release the dataset treats as current. It is
+    deobfuscated and therefore has real field names. A key that `canonical` does
+    not have keeps its persisted key as its id, because an obfuscated field name
+    is not a name. When `canonical` is `None` the batch does not reach the
+    current release, so no record in it may name a setting. Older releases are
+    matched to these definitions by persisted key, which the research shows has
+    never been renamed across the supported range.
 
     `records` must be ordered oldest first: a later release's definition wins,
     so the newest description of a setting is the one carried.
     """
-    canonical = {setting["persisted_key"]: setting for setting in records[-1]["settings"]}
+    named = {setting["persisted_key"]: setting for setting in canonical["settings"]} if canonical else {}
     definitions: dict[str, dict[str, Any]] = {}
     for record in records:
         for setting in record["settings"]:
             key = setting["persisted_key"]
-            named = canonical.get(key)
+            source = named.get(key)
             definitions[key] = {
-                "id": named["logical_id"] if named else key,
+                "id": source["logical_id"] if source else key,
                 "key": key,
                 "type": setting["type"],
                 "category": setting.get("category"),
@@ -390,14 +419,6 @@ def assemble(
     }
 
 
-def version_key(version: str) -> tuple[int, ...]:
-    """Numeric ordering for a dotted release id, for stable release output."""
-    parts = []
-    for piece in version.split("."):
-        parts.append(int(piece) if piece.isdigit() else 0)
-    return tuple(parts)
-
-
 def expand(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Turns a published document back into expanded per-family schemas."""
     table = document["representations"]
@@ -419,13 +440,29 @@ def merge(
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Folds newly analysed releases into the committed dataset.
 
-    Existing release mappings and family fingerprints are preserved untouched,
-    so adding a release cannot rewrite what an earlier analysis proved.
+    `previous` is never modified. Setting ids and release families that an
+    earlier analysis established are preserved, so adding or re-folding a
+    release cannot rewrite what an earlier analysis proved. Folding the full
+    history together with a new release gives the same result as folding only
+    the new release. A release first folded after the registry gained a key is
+    judged against that key, so separate folds of brand-new releases can differ
+    when a setting is registered between them.
     """
     changes: list[dict[str, str]] = []
 
+    by_version: dict[str, dict[str, Any]] = {}
+    for record in analysed:
+        version = record.get("minecraft_version")
+        if not is_release(version):
+            raise DatasetError(f"`{version}` is not a release identifier")
+        if by_version.setdefault(version, record) != record:
+            raise DatasetError(f"release `{version}` was analyzed more than once with different results")
+    analysed = list(by_version.values())
+
     setting_registry: list[dict[str, Any]] = (
-        list(previous.get("setting_registry", previous.get("settings", []))) if previous else []
+        copy.deepcopy(previous.get("setting_registry", previous.get("settings", [])))
+        if previous
+        else []
     )
     current_canonical_setting_ids: list[str] = (
         list(previous.get("current_canonical_setting_ids", [])) if previous else []
@@ -453,7 +490,10 @@ def merge(
         )
         by_key = {entry["key"]: entry for entry in setting_registry}
         taken = {entry["id"] for entry in setting_registry}
-        for entry in registry_settings(analysed):
+        # Only a batch that reaches the committed canonical release may name a
+        # new setting; an older release has no authority over ids.
+        canonical_record = analysed[-1] if refresh_current_definitions else None
+        for entry in registry_settings(analysed, canonical_record):
             established = by_key.get(entry["key"])
             if established is not None:
                 # An id, once committed, is what every schema already refers to.
@@ -490,11 +530,18 @@ def merge(
 
     for record in analysed:
         version = record["minecraft_version"]
+        # The number belongs to this analysis of the release: one that could not
+        # read it must not keep an earlier analysis's value.
         if record.get("data_version") is not None:
             data_versions[version] = record["data_version"]
+        else:
+            data_versions.pop(version, None)
         schema = schema_for(record, setting_registry)
-        schema_id = fingerprint(schema)
         existing = mapping.get(version)
+        if existing in schemas and _gained_only_later_settings(schemas[existing], schema):
+            changes.append({"kind": "release-unchanged", "detail": f"{version} -> {existing}"})
+            continue
+        schema_id = fingerprint(schema)
         if existing == schema_id:
             changes.append({"kind": "release-unchanged", "detail": f"{version} -> {schema_id}"})
             continue
@@ -529,6 +576,19 @@ def merge(
     return document, changes
 
 
+def _gained_only_later_settings(existing: dict[str, Any], fresh: dict[str, Any]) -> bool:
+    """Whether `fresh` differs from `existing` only by settings registered later.
+
+    A key absent from a completely extracted release is provably unsupported,
+    but only against the registry that existed when the release was analyzed.
+    A setting registered afterwards is unknown to that analysis and stays
+    unknown, so it must not move the release to another family.
+    """
+    return fresh["supported"] == existing["supported"] and set(existing["unsupported"]) <= set(
+        fresh["unsupported"]
+    )
+
+
 def equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """Whether two documents say the same thing, ignoring the revision."""
 
@@ -542,12 +602,105 @@ def equivalent(left: dict[str, Any], right: dict[str, Any]) -> bool:
     return body(left) == body(right)
 
 
+_U32_MAX = 2**32 - 1
+_I64_MIN, _I64_MAX = -(2**63), 2**63 - 1
+
+# Codec kinds that carry no parameters.
+_PLAIN_CODECS = frozenset(
+    ("boolean", "text", "language_code", "key_code_lwjgl2", "key_name_glfw")
+)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_i64(value: Any) -> bool:
+    return _is_int(value) and _I64_MIN <= value <= _I64_MAX
+
+
+def _is_finite_number(value: Any) -> bool:
+    if _is_int(value):
+        try:
+            return math.isfinite(float(value))
+        except OverflowError:
+            return False
+    return isinstance(value, float) and math.isfinite(value)
+
+
+def _is_writable(text: Any) -> bool:
+    return isinstance(text, str) and all(unicodedata.category(char) != "Cc" for char in text)
+
+
+def _is_valid_key(key: Any) -> bool:
+    """Mirrors `is_valid_key` in `crates/options/src/file.rs`."""
+    return isinstance(key, str) and bool(key) and ":" not in key and _is_writable(key)
+
+
+def _bounds_problem(codec: dict[str, Any], is_bound: Any, noun: str) -> str | None:
+    low, high = codec.get("min"), codec.get("max")
+    if any(bound is not None and not is_bound(bound) for bound in (low, high)):
+        return f"has a bound that is not {noun}"
+    if low is not None and high is not None and low > high:
+        return "has a minimum above its maximum"
+    return None
+
+
+def _codec_problem(codec: Any) -> str | None:
+    """Why the application would refuse this codec, mirroring `is_well_formed`
+    in `crates/options/src/codec.rs` and the shape its deserializer requires."""
+    if not isinstance(codec, dict):
+        return "is not an object"
+    kind = codec.get("kind")
+    if not isinstance(kind, str):
+        return "has no kind"
+    if kind in _PLAIN_CODECS:
+        return None
+    if kind == "integer":
+        return _bounds_problem(codec, _is_i64, "a 64-bit integer")
+    if kind == "decimal":
+        return _bounds_problem(codec, _is_finite_number, "a finite number")
+    if kind == "scaled_decimal":
+        offset, scale = codec.get("offset"), codec.get("scale")
+        if not (_is_finite_number(offset) and _is_finite_number(scale)):
+            return "needs a finite offset and scale"
+        if scale == 0:
+            return "has a zero scale"
+        return _bounds_problem(codec, _is_finite_number, "a finite number")
+    if kind == "enum_id":
+        values = codec.get("values")
+        if not isinstance(values, list) or not values:
+            return "has no values"
+        if not all(_is_i64(value) for value in values):
+            return "has a value that is not a 64-bit integer"
+        return None
+    if kind == "enum_token":
+        tokens = codec.get("tokens")
+        if not isinstance(tokens, list) or not tokens:
+            return "has no tokens"
+        if not all(_is_writable(token) for token in tokens):
+            return "has a token that cannot be written as one options line"
+        if not isinstance(codec.get("quoted", False), bool):
+            return "has a quoting flag that is not a boolean"
+        return None
+    return f"has the unknown kind `{kind}`"
+
+
 def validate(document: dict[str, Any]) -> None:
-    """Checks a document is internally consistent before it is published."""
+    """Checks a document is internally consistent before it is published.
+
+    This is the only gate between the generator and the published document, so
+    it refuses exactly what the application's loader refuses
+    (`crates/options/src/dataset.rs`): a document the application would reject
+    wholesale must never reach the bundled file or the feed. It also refuses a
+    canonical release that cannot describe every setting Ephervex's preference
+    model needs.
+    """
     if document.get("format_version") != FORMAT_VERSION:
         raise DatasetError(f"format version {document.get('format_version')} is not {FORMAT_VERSION}")
-    if not isinstance(document.get("revision"), int) or document["revision"] < 1:
-        raise DatasetError("revision must be a positive integer")
+    revision = document.get("revision")
+    if not _is_int(revision) or not 1 <= revision <= _U32_MAX:
+        raise DatasetError("revision must be a positive 32-bit integer")
 
     registry = document["setting_registry"]
     ids = {entry["id"] for entry in registry}
@@ -566,50 +719,85 @@ def validate(document: dict[str, Any]) -> None:
         raise DatasetError(f"current canonical settings missing from the dataset: {', '.join(missing)}")
 
     table = document["representations"]
+    for representation in table:
+        key = representation.get("key") if isinstance(representation, dict) else None
+        if not _is_valid_key(key):
+            raise DatasetError(f"{key!r} is not usable as an options.txt key")
+        problem = _codec_problem(representation.get("codec"))
+        if problem is not None:
+            raise DatasetError(f"the codec for `{key}` {problem}")
+
+    families: dict[str, dict[str, Any]] = {}
     for schema in document["schemas"]:
+        schema_id = schema["id"]
+        if schema_id in families:
+            raise DatasetError(f"schema `{schema_id}` is declared twice")
+        families[schema_id] = schema
+        for setting_id, position in schema["supported"].items():
+            if setting_id not in ids:
+                raise DatasetError(f"schema `{schema_id}` names unknown setting `{setting_id}`")
+            if not _is_int(position) or not 0 <= position < len(table):
+                raise DatasetError(f"schema `{schema_id}` has an out-of-range representation")
+        unsupported = schema["unsupported"]
+        if not isinstance(unsupported, list) or not all(isinstance(entry, str) for entry in unsupported):
+            raise DatasetError(f"schema `{schema_id}` has an unsupported list that is not a list of ids")
+        if len(set(unsupported)) != len(unsupported):
+            raise DatasetError(f"schema `{schema_id}` lists an unsupported setting twice")
+        for setting_id in unsupported:
+            if setting_id not in ids:
+                raise DatasetError(f"schema `{schema_id}` names unknown unsupported setting `{setting_id}`")
         if fingerprint(
             {
                 "supported": {
                     setting_id: table[position]
                     for setting_id, position in schema["supported"].items()
                 },
-                "unsupported": schema["unsupported"],
+                "unsupported": unsupported,
             }
-        ) != schema["id"]:
-            raise DatasetError(f"schema `{schema['id']}` does not match its own content")
+        ) != schema_id:
+            raise DatasetError(f"schema `{schema_id}` does not match its own content")
         writers: dict[str, str] = {}
         for setting_id, position in schema["supported"].items():
-            if setting_id not in ids:
-                raise DatasetError(f"schema `{schema['id']}` names unknown setting `{setting_id}`")
-            if not 0 <= position < len(table):
-                raise DatasetError(f"schema `{schema['id']}` has an out-of-range representation")
             key = table[position]["key"]
             if key == VERSION_KEY and setting_id != VERSION_MARKER_SETTING_ID:
                 raise DatasetError(
-                    f"schema `{schema['id']}` stores `{setting_id}` under the reserved `{VERSION_KEY}` key"
+                    f"schema `{schema_id}` stores `{setting_id}` under the reserved `{VERSION_KEY}` key"
                 )
             if key in writers:
                 raise DatasetError(
-                    f"schema `{schema['id']}` stores both `{writers[key]}` and `{setting_id}` under the key `{key}`"
+                    f"schema `{schema_id}` stores both `{writers[key]}` and `{setting_id}` under the key `{key}`"
                 )
             writers[key] = setting_id
-        overlap = set(schema["supported"]) & set(schema["unsupported"])
+        overlap = set(schema["supported"]) & set(unsupported)
         if overlap:
-            raise DatasetError(f"schema `{schema['id']}` is both supported and unsupported for {overlap}")
+            raise DatasetError(f"schema `{schema_id}` is both supported and unsupported for {overlap}")
 
-    known_schemas = {schema["id"] for schema in document["schemas"]}
-    seen_versions = set()
+    mapped: dict[str, str] = {}
     for release in document["releases"]:
         version = release["minecraft_version"]
-        if version in seen_versions:
+        if version in mapped:
             raise DatasetError(f"release `{version}` is mapped twice")
-        seen_versions.add(version)
-        if release["schema"] not in known_schemas:
+        if release["schema"] not in families:
             raise DatasetError(f"release `{version}` names an unknown schema")
+        data_version = release.get("data_version")
+        if data_version is not None and not _is_i64(data_version):
+            raise DatasetError(f"release `{version}` has a data version that is not a 64-bit integer")
+        mapped[version] = release["schema"]
 
     canonical = document["canonical_minecraft_version"]
-    if canonical not in seen_versions:
+    if canonical not in mapped:
         raise DatasetError("the canonical release is not itself mapped")
+
+    canonical_schema = families[mapped[canonical]]
+    unwritable = [
+        f"{required} ({'absent from the release' if required in canonical_schema['unsupported'] else 'not established'})"
+        for required in REQUIRED_CANONICAL_IDS
+        if required not in canonical_schema["supported"]
+    ]
+    if unwritable:
+        raise DatasetError(
+            f"the canonical release `{canonical}` cannot encode required settings: {', '.join(unwritable)}"
+        )
 
 
 def dumps(document: dict[str, Any]) -> str:

@@ -58,8 +58,8 @@ pub enum OptionCodec {
     Decimal { min: Option<f64>, max: Option<f64> },
     /// A decimal stored through an affine transform: `stored = (value - offset) / scale`.
     ///
-    /// This is the pre-1.19 field of view, whose file value is
-    /// `(degrees - 70) / 40` rather than the degrees the settings screen shows.
+    /// This is the field of view, whose file value is `(degrees - 70) / 40`
+    /// rather than the degrees the settings screen shows.
     /// `min` and `max` bound the *value*, not the stored number.
     ScaledDecimal {
         offset: f64,

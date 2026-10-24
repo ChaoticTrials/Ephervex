@@ -79,6 +79,29 @@ class MaintainerSummary(unittest.TestCase):
         self.assertEqual(reasons[0][0], "simulationDistance")
         self.assertIn("contradictory evidence", reasons[0][1])
 
+    def test_only_the_canonical_release_is_judged_for_required_settings(self):
+        before_simulation_distance = [e for e in REQUIRED if e["persisted_key"] != "simulationDistance"]
+        records = [release("1.17.1", before_simulation_distance), release("26.2", REQUIRED)]
+        document, _ = dataset.merge(None, records)
+        self.assertEqual(update.application_review_reasons(records, document), [])
+
+    def test_every_required_setting_the_canonical_release_cannot_encode_is_named(self):
+        special = [setting(entry["persisted_key"], kind="special") for entry in REQUIRED]
+        document, records = self.build(special)
+        reasons = update.application_review_reasons(records, document)
+        self.assertEqual(
+            [setting_id for setting_id, _ in reasons],
+            sorted(dataset.REQUIRED_CANONICAL_IDS),
+        )
+
+    def test_a_release_other_than_the_canonical_one_raises_no_review_reasons(self):
+        unresolved = copy.deepcopy(REQUIRED)
+        unresolved[5] = setting("fov", kind="number", transform="pow(value, 2)")
+        document, _ = dataset.merge(None, [release("26.2", REQUIRED)])
+        self.assertEqual(
+            update.application_review_reasons([release("1.20.1", unresolved)], document), []
+        )
+
     def test_a_new_unexposed_setting_is_recorded_without_requiring_an_update(self):
         document, records = self.build(REQUIRED + [setting("newCurrentOption")])
         self.assertIn("newCurrentOption", document["current_canonical_setting_ids"])

@@ -1081,10 +1081,9 @@ mod tests {
 
         // Neither instance inherited the other's file. Each is marked with
         // its own release's data version, so a copied one would carry the
-        // wrong marker rather than merely the wrong settings; 1.12.2's client
-        // jar never carried one to read.
+        // wrong marker rather than merely the wrong settings.
         assert!(new_options.contains("version:3465"), "{new_options}");
-        assert!(!old_options.contains("version:"), "{old_options}");
+        assert!(old_options.contains("version:1343"), "{old_options}");
         assert_ne!(old_options, new_options, "each file is its own release's");
     }
 

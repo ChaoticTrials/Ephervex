@@ -38,7 +38,8 @@ entityDistanceScaling:1.0
 guiScale:0
 particles:0
 maxFps:120
-graphicsMode:1
+graphicsPreset:"fancy"
+improvedTransparency:false
 ao:true
 prioritizeChunkUpdates:0
 biomeBlendRadius:2
@@ -48,7 +49,7 @@ incompatibleResourcePacks:[]
 lastServer:
 lang:en_us
 soundDevice:""
-chatVisibility:"full"
+chatVisibility:0
 chatOpacity:1.0
 mainHand:"right"
 narrator:0

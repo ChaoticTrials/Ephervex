@@ -13,8 +13,12 @@ fetch.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
+import shutil
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -24,12 +28,29 @@ from test_dataset import REQUIRED, release, setting
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 BUNDLED_DATASET = REPO_ROOT / "crates" / "options" / "data" / "minecraft-options.json"
+BUNDLED_CATALOG = REPO_ROOT / "crates" / "options" / "data" / "minecraft-preferences.json"
 
 
 def overriding(base: dict, **overrides) -> dict:
     merged = dict(base)
     merged.update(overrides)
     return merged
+
+
+NUMERIC_FIELD_NAMES = {"min": "minimum", "max": "maximum", "step": "step"}
+
+
+def with_codec(document: dict, canonical_id: str, codec: dict) -> dict:
+    """A copy of `document` whose canonical release stores one setting through
+    `codec`. The representation table is shared between settings, so the
+    setting is repointed at a new entry instead of editing a shared one."""
+    tampered = copy.deepcopy(document)
+    schema = preferences._canonical_schema(tampered)
+    entry = copy.deepcopy(tampered["representations"][schema["supported"][canonical_id]])
+    entry["codec"] = codec
+    tampered["representations"].append(entry)
+    schema["supported"][canonical_id] = len(tampered["representations"]) - 1
+    return tampered
 
 
 EXTRA_SETTINGS = [
@@ -150,6 +171,19 @@ class Determinism(unittest.TestCase):
         )
 
 
+    def test_a_setting_only_older_releases_have_is_never_exposed(self):
+        # The registry keeps every id any analyzed release ever had; only the
+        # canonical release's current set may reach a settings screen.
+        base = small_dataset_document()
+        with_legacy, _ = dataset.merge(base, [release("1.20.1", FIXTURE_SETTINGS + [setting("legacyOnly")])])
+        self.assertIn("legacyOnly", {entry["id"] for entry in with_legacy["setting_registry"]})
+        self.assertNotIn("legacyOnly", with_legacy["current_canonical_setting_ids"])
+        catalog = preferences.build(with_legacy)
+        preferences.validate(catalog, with_legacy)
+        self.assertNotIn("legacy_only", {d["id"] for d in catalog["descriptors"]})
+        self.assertEqual(preferences.dumps(catalog), preferences.dumps(preferences.build(base)))
+
+
 class Accounting(unittest.TestCase):
     def test_every_current_setting_is_exposed_or_excluded_exactly_once(self):
         document = small_dataset_document()
@@ -185,27 +219,41 @@ class Accounting(unittest.TestCase):
         self.assertNotIn("tutorialStep", {e["canonical_id"] for e in catalog["exclusions"]})
 
 
-class StableIdentity(unittest.TestCase):
-    def test_the_seven_pre_existing_preferences_keep_their_config_names(self):
-        document = small_dataset_document()
+class CanonicalCodecAccounting(unittest.TestCase):
+    def _catalog_with(self, extra: dict) -> tuple[dict, dict]:
+        document, _ = dataset.merge(None, [release("26.2", REQUIRED + [extra])])
         catalog = preferences.build(document)
-        ids = {d["id"] for d in catalog["descriptors"]}
-        for expected in (
-            "gui_scale",
-            "language",
-            "fullscreen",
-            "window_size",
-            "fov",
-            "render_distance",
-            "simulation_distance",
-        ):
-            self.assertIn(expected, ids)
+        preferences.validate(catalog, document)
+        return document, catalog
 
-    def test_a_new_canonical_id_gets_a_mechanical_snake_case_identity(self):
-        self.assertEqual(preferences.stable_id("cloudStatus"), "cloud_status")
-        self.assertEqual(preferences.stable_id("keybind.attack"), "keybind_attack")
-        self.assertEqual(preferences.stable_id("modelPart.cape"), "model_part_cape")
-        self.assertEqual(preferences.stable_id("invertXMouse"), "invert_x_mouse")
+    def test_a_current_manageable_setting_without_a_canonical_codec_is_excluded_with_a_reason(self):
+        unproven = overriding(
+            setting("key_key.test", "keybind.test", kind="key_binding", confidence="medium"), category="Controls"
+        )
+        document, catalog = self._catalog_with(unproven)
+
+        self.assertIsNone(dataset.codec_for(unproven, "glfw"))
+        self.assertNotIn("keybind_test", {d["id"] for d in catalog["descriptors"]})
+        self.assertIn(
+            {"canonical_id": "keybind.test", "reason": preferences.UNPROVEN_CODEC_REASON}, catalog["exclusions"]
+        )
+
+    def test_the_same_setting_with_a_proven_codec_is_exposed(self):
+        proven = overriding(setting("key_key.test", "keybind.test", kind="key_binding"), category="Controls")
+        _, catalog = self._catalog_with(proven)
+
+        self.assertIn("keybind_test", {d["id"] for d in catalog["descriptors"]})
+        self.assertNotIn("keybind.test", {e["canonical_id"] for e in catalog["exclusions"]})
+
+    def test_a_key_binding_whose_default_is_unknown_still_has_a_codec(self):
+        unknown_default = overriding(
+            setting("key_key.test", "keybind.test", kind="key_binding", default_confidence="medium"),
+            category="Controls",
+        )
+        _, catalog = self._catalog_with(unknown_default)
+
+        descriptor = next(d for d in catalog["descriptors"] if d["id"] == "keybind_test")
+        self.assertIsNone(descriptor["presentation"]["default"])
 
 
 class Presentation(unittest.TestCase):
@@ -266,11 +314,44 @@ class Presentation(unittest.TestCase):
         self.assertEqual(descriptor["presentation"], {"kind": "decimal", "default": 1.0, "min": 0.0, "max": 1.0, "step": None})
 
     def test_a_default_without_high_confidence_is_not_carried(self):
-        # guiScale in REQUIRED has no default_confidence override (defaults to
-        # "unknown" in the shared test helper), so no rich enrichment is
-        # supplied for it either; the presentation default must stay absent.
-        descriptor = self.by_id["gui_scale"]
-        self.assertIsNone(descriptor["presentation"]["default"])
+        # guiScale has enrichment here, so only the confidence gate decides.
+        for confidence, expected in (("medium", None), ("low", None), ("unknown", None), ("high", 2)):
+            enrichment = dict(RICH_ENRICHMENT, guiScale={"default": 2, "default_confidence": confidence})
+            catalog = preferences.build(self.document, enrichment)
+            gui_scale = next(d for d in catalog["descriptors"] if d["id"] == "gui_scale")
+            self.assertEqual(gui_scale["presentation"]["default"], expected, confidence)
+
+
+class NumericStep(unittest.TestCase):
+    """A step is presented only when stepping from the minimum reaches both the
+    maximum and the default, so a control never offers values the game would
+    not itself persist."""
+
+    def _presentation(self, step, *, default=1.0, minimum=0.5, maximum=5.0):
+        codec = {"kind": "decimal", "min": minimum, "max": maximum}
+        rich = {
+            "default": default,
+            "default_confidence": "high",
+            "numeric": {"min": minimum, "max": maximum, "step": step},
+        }
+        return preferences._numeric_presentation("decimal", codec, rich)
+
+    def test_a_step_that_reaches_the_range_ends_and_the_default_is_kept(self):
+        self.assertEqual(self._presentation(0.25)["step"], 0.25)
+
+    def test_a_step_that_cannot_reach_the_default_is_dropped(self):
+        self.assertIsNone(self._presentation(1.0)["step"])
+
+    def test_a_step_that_cannot_reach_the_maximum_is_dropped(self):
+        self.assertIsNone(self._presentation(0.4, default=0.5)["step"])
+
+    def test_a_step_is_dropped_when_the_analyzer_range_disagrees_with_the_codec(self):
+        codec = {"kind": "decimal", "min": 0.0, "max": 2.0}
+        rich = {"numeric": {"min": 0.0, "max": 3.0, "step": 0.05}}
+        self.assertIsNone(preferences._numeric_presentation("decimal", codec, rich)["step"])
+
+    def test_a_non_positive_step_is_dropped(self):
+        self.assertIsNone(self._presentation(0.0)["step"])
 
 
 class KeybindingDefaults(unittest.TestCase):
@@ -342,122 +423,46 @@ class KeybindingDefaults(unittest.TestCase):
 
 
 class Validation(unittest.TestCase):
+    """Each rule is exercised through the message it raises, so removing the
+    rule cannot be masked by another one refusing the same tampered catalog."""
+
     def build(self) -> tuple[dict, dict]:
         document = small_dataset_document()
         catalog = preferences.build(document, RICH_ENRICHMENT)
         preferences.validate(catalog, document)
         return catalog, document
 
+    def refused(self, pattern: str, catalog: dict, document: dict) -> None:
+        with self.assertRaisesRegex(preferences.PreferenceCatalogError, pattern):
+            preferences.validate(catalog, document)
+
+    @staticmethod
+    def descriptor(catalog: dict, preference_id: str) -> dict:
+        return next(d for d in catalog["descriptors"] if d["id"] == preference_id)
+
     def test_a_well_formed_catalog_validates(self):
         self.build()
+
+    def test_a_future_format_version_is_refused(self):
+        catalog, document = self.build()
+        catalog["format_version"] = preferences.FORMAT_VERSION + 1
+        self.refused("format version", catalog, document)
+
+    def test_a_catalog_for_another_canonical_release_is_refused(self):
+        catalog, document = self.build()
+        catalog["canonical_minecraft_version"] = "1.20.1"
+        self.refused("canonical release does not match", catalog, document)
 
     def test_two_descriptors_sharing_one_id_are_refused(self):
         catalog, document = self.build()
         catalog["descriptors"][1]["id"] = catalog["descriptors"][0]["id"]
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_exposed_and_excluded_overlap_is_refused(self):
-        catalog, document = self.build()
-        catalog["exclusions"].append({"canonical_id": "fov", "reason": "test-only overlap"})
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_a_missing_exclusion_reason_is_refused(self):
-        catalog, document = self.build()
-        catalog["exclusions"][0]["reason"] = "   "
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_exclusion_for_a_non_current_setting_is_refused(self):
-        catalog, document = self.build()
-        catalog["exclusions"].append({"canonical_id": "notCurrentAtAll", "reason": "test-only"})
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_unaccounted_current_setting_is_refused(self):
-        catalog, document = self.build()
-        catalog["descriptors"] = [d for d in catalog["descriptors"] if d["id"] != "fov"]
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_unknown_category_is_refused(self):
-        catalog, document = self.build()
-        catalog["descriptors"][0]["category"] = "novelty"
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_unknown_presentation_kind_is_refused(self):
-        catalog, document = self.build()
-        catalog["descriptors"][0]["presentation"] = {"kind": "eval"}
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_a_presentation_kind_mismatched_with_its_canonical_type_is_refused(self):
-        catalog, document = self.build()
-        fov = next(d for d in catalog["descriptors"] if d["id"] == "fov")
-        fov["presentation"] = {"kind": "toggle", "default": None}
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_a_field_claimed_by_two_descriptors_is_refused(self):
-        catalog, document = self.build()
-        catalog["descriptors"][0]["fields"] = [{"role": "value", "canonical_id": "fov"}]
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_inverted_numeric_domain_is_refused(self):
-        catalog, document = self.build()
-        render_distance = next(d for d in catalog["descriptors"] if d["id"] == "render_distance")
-        render_distance["presentation"]["min"] = 100
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_a_default_outside_the_numeric_domain_is_refused(self):
-        catalog, document = self.build()
-        render_distance = next(d for d in catalog["descriptors"] if d["id"] == "render_distance")
-        render_distance["presentation"]["default"] = 9999
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_duplicate_enum_technical_values_are_refused(self):
-        catalog, document = self.build()
-        cloud = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")
-        cloud["presentation"]["values"].append(dict(cloud["presentation"]["values"][0]))
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
-
-    def test_an_enum_value_outside_the_canonical_codec_domain_is_refused(self):
-        catalog, document = self.build()
-        cloud = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")
-        cloud["presentation"]["values"].append(
-            {"technical_value": "999999", "enum_constant": None, "translation_key": None, "ordinal": None}
-        )
-        with self.assertRaisesRegex(preferences.PreferenceCatalogError, "999999"):
-            preferences.validate(catalog, document)
-
-    def test_enum_ids_are_checked_against_the_integer_the_text_parses_to(self):
-        codec = {"kind": "enum_id", "values": [0, 1, 2]}
-        for inside in ("0", "2", "+1", "02"):
-            self.assertTrue(preferences._enum_value_in_codec(inside, codec), inside)
-        for outside in ("3", "-1", "two", "", " 1", "1_0", "\uff11"):
-            self.assertFalse(preferences._enum_value_in_codec(outside, codec), repr(outside))
-
-    def test_an_enum_over_a_setting_stored_as_another_shape_is_refused(self):
-        catalog, document = self.build()
-        enum_setting = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")["fields"][0][
-            "canonical_id"
-        ]
-        schema = preferences._canonical_schema(document)
-        document["representations"][schema["supported"][enum_setting]]["codec"] = {"kind": "boolean"}
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
+        self.refused("share one product preference id", catalog, document)
 
     def test_a_descriptor_id_the_application_cannot_represent_is_refused(self):
-        for bad in ("BAD-ID", "Fov", "has space", "dotted.id", "caf\u00e9", "", "a" * 65, "fov\n"):
+        for bad in ("BAD-ID", "Fov", "has space", "dotted.id", "caf\u00e9", "", "a" * 65, "fov\n", None):
             catalog, document = self.build()
             catalog["descriptors"][0]["id"] = bad
-            with self.assertRaises(preferences.PreferenceCatalogError, msg=repr(bad)):
+            with self.assertRaisesRegex(preferences.PreferenceCatalogError, "not a valid preference id", msg=repr(bad)):
                 preferences.validate(catalog, document)
 
     def test_a_descriptor_id_of_the_longest_accepted_length_is_kept(self):
@@ -465,31 +470,57 @@ class Validation(unittest.TestCase):
         catalog["descriptors"][0]["id"] = "a" * 64
         preferences.validate(catalog, document)
 
-    def test_an_enum_default_absent_from_its_own_values_is_refused(self):
+    def test_an_unknown_category_is_refused(self):
         catalog, document = self.build()
-        cloud = next(d for d in catalog["descriptors"] if d["id"] == "cloud_status")
-        cloud["presentation"]["default"] = "not-a-real-value"
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
+        self.descriptor(catalog, "fov")["category"] = "novelty"
+        self.refused("unknown category", catalog, document)
 
-    def test_a_window_size_descriptor_missing_a_component_is_refused(self):
+    def test_an_unknown_presentation_tier_is_refused(self):
         catalog, document = self.build()
-        window = next(d for d in catalog["descriptors"] if d["id"] == "window_size")
+        self.descriptor(catalog, "fov")["tier"] = "expert"
+        self.refused("unknown presentation tier", catalog, document)
+
+    def test_an_unknown_presentation_kind_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "fov")["presentation"] = {"kind": "eval"}
+        self.refused("unknown presentation kind", catalog, document)
+
+    def test_a_descriptor_missing_the_fields_its_kind_requires_is_refused(self):
+        catalog, document = self.build()
+        window = self.descriptor(catalog, "window_size")
         window["fields"] = [f for f in window["fields"] if f["role"] != "height"]
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
+        self.refused("does not reference the fields", catalog, document)
 
-    def test_a_future_format_version_is_refused(self):
+    def test_a_simple_descriptor_over_a_compound_field_set_is_refused(self):
         catalog, document = self.build()
-        catalog["format_version"] = preferences.FORMAT_VERSION + 1
-        with self.assertRaises(preferences.PreferenceCatalogError):
-            preferences.validate(catalog, document)
+        fov = self.descriptor(catalog, "fov")
+        fov["fields"] = [{"role": "width", "canonical_id": "fov"}, {"role": "height", "canonical_id": "guiScale"}]
+        self.refused("does not reference the fields", catalog, document)
+
+    def test_a_field_claimed_by_two_descriptors_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "gui_scale")["fields"] = [{"role": "value", "canonical_id": "fov"}]
+        self.refused("is claimed by both", catalog, document)
+
+    def test_a_reference_to_an_unknown_canonical_setting_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "fov")["fields"] = [{"role": "value", "canonical_id": "notInTheRegistry"}]
+        self.refused("unknown canonical setting", catalog, document)
+
+    def test_a_reference_to_a_historical_setting_is_refused(self):
+        catalog, document = self.build()
+        legacy_document, _ = dataset.merge(document, [release("1.20.1", FIXTURE_SETTINGS + [setting("legacyOnly")])])
+        self.assertNotIn("legacyOnly", legacy_document["current_canonical_setting_ids"])
+        self.assertIn("legacyOnly", {entry["id"] for entry in legacy_document["setting_registry"]})
+        self.descriptor(catalog, "fov")["fields"] = [{"role": "value", "canonical_id": "legacyOnly"}]
+        self.refused("historical", catalog, legacy_document)
 
     def test_a_deliberately_unmanaged_setting_cannot_be_exposed(self):
-        # Proves a generator regression that tried to expose one of the seven
-        # unsafe settings would be caught, not just that the real generator
-        # happens not to do it.
+        # Proves a generator regression that tried to expose one of the unsafe
+        # settings would be caught, not just that the real generator happens
+        # not to do it.
         catalog, document = self.build()
+        catalog["exclusions"] = [e for e in catalog["exclusions"] if e["canonical_id"] != "resourcePacks"]
         catalog["descriptors"].append(
             {
                 "id": "resource_packs_regression",
@@ -502,8 +533,654 @@ class Validation(unittest.TestCase):
                 "presentation": {"kind": "text", "default": None},
             }
         )
-        with self.assertRaises(preferences.PreferenceCatalogError):
+        self.refused("which is not manageable", catalog, document)
+
+    def test_a_presentation_kind_mismatched_with_its_canonical_type_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "fov")["presentation"] = {"kind": "toggle", "default": None}
+        self.refused("does not fit canonical type", catalog, document)
+
+    def test_a_presentation_kind_that_disagrees_with_its_codec_is_refused(self):
+        # Both kinds accept the registry's numeric types, so only the proven
+        # codec can tell an integer setting from a decimal one.
+        catalog, document = self.build()
+        render_distance = self.descriptor(catalog, "render_distance")
+        render_distance["presentation"] = {
+            "kind": "decimal", "default": 12.0, "min": 2.0, "max": 32.0, "step": 1.0,
+        }
+        self.refused("does not fit the `integer` codec of `renderDistance`", catalog, document)
+
+    def test_every_presentation_kind_is_tied_to_the_codec_that_stores_it(self):
+        document = small_dataset_document()
+        wrong_codec = {
+            "fullscreen": {"kind": "text"},
+            "renderDistance": {"kind": "boolean"},
+            "cloudStatus": {"kind": "integer", "min": None, "max": None},
+            "keybind.attack": {"kind": "boolean"},
+            "guiScale": {"kind": "decimal", "min": None, "max": None},
+            "languageCode": {"kind": "text"},
+        }
+        for canonical_id, codec in wrong_codec.items():
+            catalog = preferences.build(document, RICH_ENRICHMENT)
+            tampered = with_codec(document, canonical_id, codec)
+            self.refused(f"does not fit the `{codec['kind']}` codec of `{canonical_id}`", catalog, tampered)
+
+    def test_an_enum_over_a_setting_stored_as_another_shape_is_refused(self):
+        catalog, document = self.build()
+        document = with_codec(document, "cloudStatus", {"kind": "boolean"})
+        self.refused("does not fit the `boolean` codec of `cloudStatus`", catalog, document)
+
+    def test_a_window_size_carries_no_default(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "window_size")["presentation"]["default"] = {"serialized": None, "unbound": False}
+        self.refused("default .* is not a valid `window_size` default", catalog, document)
+
+    def test_a_window_size_over_ranged_integer_codecs_is_not_tied_to_their_range(self):
+        catalog, document = self.build()
+        for canonical_id in ("overrideWidth", "overrideHeight"):
+            document = with_codec(document, canonical_id, {"kind": "integer", "min": 1, "max": 16384})
+        preferences.validate(catalog, document)
+
+    def test_an_enum_without_a_proven_codec_is_not_checked_against_one(self):
+        catalog, document = self.build()
+        del preferences._canonical_schema(document)["supported"]["cloudStatus"]
+        preferences.validate(catalog, document)
+
+    def test_a_setting_without_a_proven_codec_is_not_tied_to_one(self):
+        catalog, document = self.build()
+        schema = preferences._canonical_schema(document)
+        del schema["supported"]["fullscreen"]
+        preferences.validate(catalog, document)
+
+    def test_a_numeric_range_that_differs_from_the_codec_is_refused(self):
+        catalog, document = self.build()
+        volume = self.descriptor(catalog, "sound_volume_master")
+        volume["presentation"].update(min=-50.0, max=500.0)
+        self.refused("differs from the canonical release's", catalog, document)
+
+    def test_each_numeric_bound_is_compared_with_the_codec_on_its_own(self):
+        for bound, value in (("min", 1), ("max", 31), ("min", None), ("max", None)):
+            catalog, document = self.build()
+            self.descriptor(catalog, "render_distance")["presentation"][bound] = value
+            self.refused("differs from the canonical release's", catalog, document)
+
+    def test_an_enum_that_omits_a_proven_value_is_refused(self):
+        catalog, document = self.build()
+        cloud = self.descriptor(catalog, "cloud_status")
+        cloud["presentation"]["values"] = cloud["presentation"]["values"][:1]
+        cloud["presentation"]["default"] = None
+        self.refused("omits value\\(s\\).*", catalog, document)
+
+    def test_an_id_enum_that_omits_a_proven_id_is_refused(self):
+        catalog, document = self.build()
+        document = with_codec(document, "cloudStatus", {"kind": "enum_id", "values": [0, 1, 2]})
+        cloud = self.descriptor(catalog, "cloud_status")
+        cloud["presentation"]["values"] = [
+            {"technical_value": str(i), "enum_constant": None, "translation_key": None, "ordinal": None}
+            for i in (0, 2)
+        ]
+        cloud["presentation"]["default"] = None
+        self.refused("omits value\\(s\\).*: 1$", catalog, document)
+
+    def test_an_enum_value_outside_the_canonical_codec_domain_is_refused(self):
+        catalog, document = self.build()
+        cloud = self.descriptor(catalog, "cloud_status")
+        cloud["presentation"]["values"].append(
+            {"technical_value": "999999", "enum_constant": None, "translation_key": None, "ordinal": None}
+        )
+        self.refused("999999", catalog, document)
+
+    def test_a_value_is_only_a_member_of_an_enum_codec(self):
+        self.assertIsNone(preferences._enum_value_in_codec("true", {"kind": "boolean"}))
+        self.assertIsNone(preferences._enum_value_in_codec("true", {"kind": "text"}))
+
+    def test_enum_ids_are_checked_against_the_integer_the_text_parses_to(self):
+        codec = {"kind": "enum_id", "values": [0, 1, 2]}
+        for inside in ("0", "2", "+1", "02"):
+            self.assertTrue(preferences._enum_value_in_codec(inside, codec), inside)
+        for outside in ("3", "-1", "two", "", " 1", "1_0", "\uff11"):
+            self.assertFalse(preferences._enum_value_in_codec(outside, codec), repr(outside))
+        self.assertEqual(preferences._missing_enum_values(["0", "+2"], codec), ["1"])
+        self.assertEqual(preferences._missing_enum_values(["0", "1", "2"], codec), [])
+
+    def test_duplicate_enum_technical_values_are_refused(self):
+        catalog, document = self.build()
+        cloud = self.descriptor(catalog, "cloud_status")
+        cloud["presentation"]["values"].append(dict(cloud["presentation"]["values"][0]))
+        self.refused("same technical value", catalog, document)
+
+    def test_an_enum_default_absent_from_its_own_values_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "cloud_status")["presentation"]["default"] = "not-a-real-value"
+        self.refused("not one of its own enum values", catalog, document)
+
+    def test_an_inverted_numeric_domain_is_refused(self):
+        catalog, document = self.build()
+        self.descriptor(catalog, "render_distance")["presentation"].update(min=40, max=32)
+        self.refused("domain is inverted", catalog, document)
+
+    def test_a_degenerate_numeric_domain_is_not_inverted(self):
+        catalog, document = self.build()
+        document = with_codec(document, "renderDistance", {"kind": "integer", "min": 8, "max": 8})
+        self.descriptor(catalog, "render_distance")["presentation"].update(min=8, max=8, default=8)
+        preferences.validate(catalog, document)
+
+    def test_a_non_positive_numeric_step_is_refused(self):
+        for step in (0, -1):
+            catalog, document = self.build()
+            self.descriptor(catalog, "render_distance")["presentation"]["step"] = step
+            self.refused("step must be positive", catalog, document)
+
+    def test_a_default_outside_the_numeric_domain_is_refused_on_either_side(self):
+        for default in (1, 33, 9999):
+            catalog, document = self.build()
+            self.descriptor(catalog, "render_distance")["presentation"]["default"] = default
+            self.refused("outside its own numeric domain", catalog, document)
+
+    def test_a_default_at_either_end_of_the_numeric_domain_is_kept(self):
+        for default in (2, 32):
+            catalog, document = self.build()
+            self.descriptor(catalog, "render_distance")["presentation"]["default"] = default
             preferences.validate(catalog, document)
+
+    def test_a_default_of_the_wrong_type_is_refused(self):
+        wrong = {
+            "fullscreen": "yes",
+            "render_distance": 12.0,
+            "sound_volume_master": "loud",
+            "cloud_status": 3,
+            "language": 5,
+            "keybind_attack": "w",
+        }
+        for preference_id, default in wrong.items():
+            catalog, document = self.build()
+            self.descriptor(catalog, preference_id)["presentation"]["default"] = default
+            self.refused("default .* is not a valid", catalog, document)
+
+    def test_a_boolean_is_not_a_numeric_default(self):
+        for preference_id in ("render_distance", "sound_volume_master"):
+            catalog, document = self.build()
+            self.descriptor(catalog, preference_id)["presentation"]["default"] = True
+            self.refused("default .* is not a valid", catalog, document)
+
+    def test_a_key_binding_default_must_be_a_bound_or_unbound_object(self):
+        for default in (
+            {"serialized": 5, "unbound": False},
+            {"serialized": None, "unbound": "no"},
+            {"serialized": None},
+            [],
+        ):
+            catalog, document = self.build()
+            self.descriptor(catalog, "keybind_attack")["presentation"]["default"] = default
+            self.refused("default .* is not a valid", catalog, document)
+
+    def test_an_integer_presentation_refuses_numbers_the_application_could_not_read(self):
+        for field, value in (("step", 1.0), ("min", 2.0), ("max", 32.5), ("min", True)):
+            catalog, document = self.build()
+            self.descriptor(catalog, "render_distance")["presentation"][field] = value
+            self.refused(f"numeric {NUMERIC_FIELD_NAMES[field]}", catalog, document)
+
+    def test_a_decimal_presentation_refuses_non_finite_numbers(self):
+        for value in (float("inf"), float("nan"), "wide"):
+            catalog, document = self.build()
+            self.descriptor(catalog, "sound_volume_master")["presentation"]["step"] = value
+            self.refused("numeric step", catalog, document)
+
+    def test_a_decimal_presentation_accepts_whole_and_fractional_numbers(self):
+        catalog, document = self.build()
+        presentation = self.descriptor(catalog, "sound_volume_master")["presentation"]
+        presentation["step"] = 1
+        presentation["default"] = 0.5
+        preferences.validate(catalog, document)
+
+    def test_a_missing_exclusion_reason_is_refused(self):
+        catalog, document = self.build()
+        catalog["exclusions"][0]["reason"] = "   "
+        self.refused("has no reason", catalog, document)
+
+    def test_an_exclusion_for_a_non_current_setting_is_refused(self):
+        catalog, document = self.build()
+        catalog["exclusions"].append({"canonical_id": "notCurrentAtAll", "reason": "test-only"})
+        self.refused("is not a current canonical setting", catalog, document)
+
+    def test_a_setting_excluded_twice_is_refused(self):
+        catalog, document = self.build()
+        catalog["exclusions"].append(dict(catalog["exclusions"][0]))
+        self.refused("is excluded twice", catalog, document)
+
+    def test_an_exposed_and_excluded_overlap_is_refused(self):
+        catalog, document = self.build()
+        catalog["exclusions"].append({"canonical_id": "fov", "reason": "test-only overlap"})
+        self.refused("both exposed and excluded", catalog, document)
+
+    def test_an_unaccounted_current_setting_is_refused(self):
+        catalog, document = self.build()
+        catalog["descriptors"] = [d for d in catalog["descriptors"] if d["id"] != "fov"]
+        self.refused("not accounted for: fov", catalog, document)
+
+
+class WindowSizeComposition(unittest.TestCase):
+    def test_a_release_without_the_window_fields_cannot_compose_window_size(self):
+        without = [s for s in FIXTURE_SETTINGS if s["persisted_key"] not in ("overrideWidth", "overrideHeight")]
+        document, _ = dataset.merge(None, [release("26.2", without)])
+        with self.assertRaisesRegex(preferences.PreferenceCatalogError, "non-current canonical setting"):
+            preferences.build(document)
+
+    def test_a_release_with_only_the_window_fields_still_builds(self):
+        only = [s for s in FIXTURE_SETTINGS if s["persisted_key"] in ("overrideWidth", "overrideHeight")]
+        document, _ = dataset.merge(None, [release("26.2", only)])
+        catalog = preferences.build(document)
+        preferences.validate(catalog, document)
+        self.assertEqual([d["id"] for d in catalog["descriptors"]], ["window_size"])
+
+
+class NumericKind(unittest.TestCase):
+    def test_the_codec_decides_the_kind_not_the_field_type(self):
+        self.assertEqual(preferences._numeric_kind("integer", {"kind": "decimal"}), "decimal")
+        self.assertEqual(preferences._numeric_kind("integer", {"kind": "scaled_decimal"}), "decimal")
+        self.assertEqual(preferences._numeric_kind("number", {"kind": "integer"}), "integer")
+
+    def test_without_a_numeric_codec_the_field_type_decides(self):
+        self.assertEqual(preferences._numeric_kind("integer", None), "integer")
+        self.assertEqual(preferences._numeric_kind("number", None), "decimal")
+        self.assertEqual(preferences._numeric_kind("integer", {"kind": "text"}), "integer")
+        self.assertEqual(preferences._numeric_kind("number", {"kind": "text"}), "decimal")
+
+
+class IntegerPresentation(unittest.TestCase):
+    """The application reads an `integer` presentation as `i64`, so whole
+    numbers serialize without a fractional part and fractions are never
+    rounded into one."""
+
+    def _presentation(self, codec: dict, rich: dict | None) -> dict:
+        return preferences._numeric_presentation("integer", codec, rich)
+
+    def test_whole_valued_floats_are_written_as_integers(self):
+        codec = {"kind": "integer", "min": 2.0, "max": 32.0}
+        rich = {
+            "default": 12.0,
+            "default_confidence": "high",
+            "numeric": {"min": 2, "max": 32, "step": 1.0},
+        }
+        presentation = self._presentation(codec, rich)
+        self.assertEqual(presentation, {"kind": "integer", "default": 12, "min": 2, "max": 32, "step": 1})
+        for field in ("default", "min", "max", "step"):
+            self.assertIs(type(presentation[field]), int, field)
+        self.assertNotIn("1.0", preferences.dumps(presentation))
+
+    def test_decimal_bounds_are_written_as_floats(self):
+        presentation = preferences._numeric_presentation("decimal", {"kind": "decimal", "min": 0, "max": 1}, None)
+        self.assertEqual((presentation["min"], presentation["max"]), (0.0, 1.0))
+        self.assertIs(type(presentation["min"]), float)
+        self.assertIs(type(presentation["max"]), float)
+        self.assertIsNone(preferences._numeric_presentation("decimal", {"kind": "decimal"}, None)["min"])
+
+    def test_a_fractional_default_is_dropped_not_rounded(self):
+        rich = {"default": 12.5, "default_confidence": "high"}
+        self.assertIsNone(self._presentation({"kind": "integer"}, rich)["default"])
+
+    def test_a_fractional_step_has_no_integer_presentation(self):
+        codec = {"kind": "integer", "min": 0, "max": 10}
+        rich = {"numeric": {"min": 0, "max": 10, "step": 0.5}}
+        self.assertIsNone(self._presentation(codec, rich)["step"])
+
+    def test_a_fractional_codec_bound_is_kept_so_validation_can_name_it(self):
+        document = with_codec(small_dataset_document(), "renderDistance", {"kind": "integer", "min": 2.5, "max": 32})
+        catalog = preferences.build(document, RICH_ENRICHMENT)
+        with self.assertRaisesRegex(preferences.PreferenceCatalogError, "numeric minimum"):
+            preferences.validate(catalog, document)
+
+
+class DefaultConfidence(unittest.TestCase):
+    """A default is carried only when the analyzer proved it."""
+
+    def _presentation(self, cid: str, value_type: str, codec: dict | None, default, confidence: str) -> dict:
+        rich = {"default": default, "default_confidence": confidence}
+        return preferences._presentation(cid, value_type, codec, rich)
+
+    def test_each_kind_carries_a_high_confidence_default_and_drops_any_other(self):
+        cases = [
+            ("fullscreen", "boolean", {"kind": "boolean"}, True),
+            ("someText", "string", {"kind": "text"}, "hello"),
+            (preferences.LANGUAGE_CANONICAL_ID, "string", {"kind": "language_code"}, "en_us"),
+            ("guiScale", "integer", {"kind": "integer"}, 2),
+            ("chatOpacity", "number", {"kind": "decimal"}, 0.5),
+            ("cloudStatus", "enum", {"kind": "enum_token", "tokens": ["fast"]}, "fast"),
+            ("mapped", "enum", {"kind": "enum_id", "values": [3]}, 3),
+        ]
+        for cid, value_type, codec, default in cases:
+            proven = self._presentation(cid, value_type, codec, default, "high")["default"]
+            self.assertEqual(proven, str(default) if value_type == "enum" else default, cid)
+            for confidence in ("medium", "low", "unknown"):
+                self.assertIsNone(self._presentation(cid, value_type, codec, default, confidence)["default"], cid)
+
+    def test_a_default_of_the_wrong_type_is_not_carried(self):
+        self.assertIsNone(self._presentation("fullscreen", "boolean", {"kind": "boolean"}, 1, "high")["default"])
+        self.assertIsNone(self._presentation("someText", "string", {"kind": "text"}, 5, "high")["default"])
+        self.assertIsNone(self._presentation("guiScale", "integer", {"kind": "integer"}, True, "high")["default"])
+        self.assertIsNone(self._presentation("guiScale", "integer", {"kind": "integer"}, "2", "high")["default"])
+
+    def test_the_language_setting_is_presented_as_a_language_not_as_text(self):
+        language = self._presentation(preferences.LANGUAGE_CANONICAL_ID, "string", {"kind": "language_code"}, "en_us", "high")
+        self.assertEqual(language, {"kind": "language", "default": "en_us"})
+        text = self._presentation("someText", "string", {"kind": "text"}, "en_us", "high")
+        self.assertEqual(text, {"kind": "text", "default": "en_us"})
+
+    def test_an_unknown_canonical_type_has_no_presentation(self):
+        with self.assertRaisesRegex(preferences.PreferenceCatalogError, "no presentation kind covers"):
+            preferences._presentation("odd", "special", None, None)
+
+    def test_a_step_is_dropped_when_either_analyzer_bound_disagrees_with_the_codec(self):
+        codec = {"kind": "decimal", "min": 0.0, "max": 2.0}
+        for numeric in (
+            {"min": 0.5, "max": 2.0, "step": 0.5},
+            {"min": 0.0, "max": 3.0, "step": 0.5},
+            {"min": None, "max": 2.0, "step": 0.5},
+            {"min": 0.0, "max": None, "step": 0.5},
+        ):
+            presentation = preferences._numeric_presentation("decimal", codec, {"numeric": numeric})
+            self.assertIsNone(presentation["step"], numeric)
+        agreeing = preferences._numeric_presentation(
+            "decimal", codec, {"numeric": {"min": 0, "max": 2, "step": 0.5}}
+        )
+        self.assertEqual(agreeing["step"], 0.5)
+
+    def test_a_step_needs_a_proven_codec_range_to_agree_with(self):
+        codec = {"kind": "decimal", "min": 0.0, "max": None}
+        presentation = preferences._numeric_presentation(
+            "decimal", codec, {"numeric": {"min": 0.0, "max": 2.0, "step": 0.5}}
+        )
+        self.assertIsNone(presentation["step"])
+
+
+class Sections(unittest.TestCase):
+    def test_sections_come_from_the_setting_family(self):
+        self.assertEqual(preferences._section("sound.volume.music", "number", None), "volume")
+        self.assertEqual(preferences._section("modelPart.cape", "boolean", None), "skin_parts")
+        self.assertIsNone(preferences._section("modelPartial", "boolean", None))
+        self.assertIsNone(preferences._section("soundVolume", "number", None))
+        self.assertIsNone(preferences._section("fov", "integer", {"binding_category": "movement"}))
+
+    def test_a_key_binding_section_is_its_binding_category(self):
+        self.assertEqual(preferences._section("keybind.attack", "key_binding", {"binding_category": "gameplay"}), "gameplay")
+        self.assertIsNone(preferences._section("keybind.attack", "key_binding", None))
+
+    def test_only_debug_key_bindings_are_advanced(self):
+        self.assertEqual(preferences._tier("key_binding", {"binding_category": "debug"}), "advanced")
+        self.assertEqual(preferences._tier("key_binding", {"binding_category": "movement"}), "standard")
+        self.assertEqual(preferences._tier("key_binding", None), "standard")
+        self.assertEqual(preferences._tier("boolean", {"binding_category": "debug"}), "standard")
+
+    def test_built_descriptors_carry_their_family_section_and_no_help_text(self):
+        document = small_dataset_document()
+        catalog = preferences.build(document, RICH_ENRICHMENT)
+        by_id = {d["id"]: d for d in catalog["descriptors"]}
+        self.assertEqual(by_id["model_part_cape"]["section"], "skin_parts")
+        self.assertIsNone(by_id["fov"]["section"])
+        for descriptor in catalog["descriptors"]:
+            self.assertIn("help_translation_key", descriptor)
+            self.assertIsNone(descriptor["help_translation_key"], descriptor["id"])
+
+
+class EnumValues(unittest.TestCase):
+    def _values(self, codec: dict, labeled: list[dict] | None) -> list[str]:
+        rich = None if labeled is None else {"allowed_values": {"values": labeled}}
+        return [v["technical_value"] for v in preferences._enum_values(codec, rich)]
+
+    @staticmethod
+    def _label(persisted, ordinal) -> dict:
+        return {"persisted": persisted, "enum_constant": f"C{ordinal}", "translation_key": f"k.{ordinal}", "ordinal": ordinal}
+
+    def test_proven_values_without_enrichment_are_offered_unlabeled(self):
+        values = preferences._enum_values({"kind": "enum_token", "tokens": ["b", "a"]}, None)
+        self.assertEqual(
+            values,
+            [
+                {"technical_value": token, "enum_constant": None, "translation_key": None, "ordinal": None}
+                for token in ("a", "b")
+            ],
+        )
+
+    def test_values_enrichment_does_not_cover_are_appended_unlabeled(self):
+        codec = {"kind": "enum_token", "tokens": ["a", "b", "c"]}
+        values = preferences._enum_values(codec, {"allowed_values": {"values": [self._label("c", 0)]}})
+        self.assertEqual([v["technical_value"] for v in values], ["c", "a", "b"])
+        self.assertEqual(values[0]["enum_constant"], "C0")
+        self.assertIsNone(values[1]["enum_constant"])
+
+    def test_unlabeled_ids_are_appended_in_numeric_order(self):
+        codec = {"kind": "enum_id", "values": [0, 1, 2, 10, 11, 3]}
+        self.assertEqual(self._values(codec, None), ["0", "1", "2", "3", "10", "11"])
+        labeled = [self._label(11, 0)]
+        self.assertEqual(self._values(codec, labeled), ["11", "0", "1", "2", "3", "10"])
+
+    def test_labeled_values_follow_their_ordinal_not_their_text(self):
+        codec = {"kind": "enum_id", "values": [0, 1, 2, 10]}
+        labeled = [self._label(10, 0), self._label(2, 1), self._label(0, 2), self._label(1, 3)]
+        self.assertEqual(self._values(codec, labeled), ["10", "2", "0", "1"])
+
+    def test_a_label_the_codec_does_not_prove_is_dropped(self):
+        codec = {"kind": "enum_token", "tokens": ["a"]}
+        self.assertEqual(self._values(codec, [self._label("a", 0), self._label("zzz", 1)]), ["a"])
+
+    def test_a_value_labeled_twice_is_offered_once(self):
+        codec = {"kind": "enum_token", "tokens": ["a"]}
+        self.assertEqual(self._values(codec, [self._label("a", 0), self._label("a", 1)]), ["a"])
+
+    def test_a_label_without_a_persisted_value_is_skipped(self):
+        values = [{"persisted": None, "enum_constant": "NONE", "translation_key": None, "ordinal": 0}, self._label("x", 1)]
+        self.assertEqual(self._values({}, values), ["x"])
+
+    def test_without_a_proven_domain_only_labeled_values_are_offered(self):
+        self.assertEqual(self._values({}, [self._label("x", 0)]), ["x"])
+        self.assertEqual(self._values({}, None), [])
+
+
+class StableIdentity(unittest.TestCase):
+    def test_the_preferences_that_predate_the_catalog_keep_their_exact_ids(self):
+        expected = {
+            "guiScale": "gui_scale",
+            "languageCode": "language",
+            "fullscreen": "fullscreen",
+            "fov": "fov",
+            "renderDistance": "render_distance",
+            "simulationDistance": "simulation_distance",
+        }
+        self.assertEqual(preferences.STABLE_ID_OVERRIDES, expected)
+        for canonical_id, preference_id in expected.items():
+            self.assertEqual(preferences.stable_id(canonical_id), preference_id)
+        self.assertNotEqual(preferences.snake_case("languageCode"), "language")
+
+    def test_a_new_canonical_id_gets_a_mechanical_snake_case_identity(self):
+        self.assertEqual(preferences.stable_id("cloudStatus"), "cloud_status")
+        self.assertEqual(preferences.stable_id("keybind.attack"), "keybind_attack")
+        self.assertEqual(preferences.stable_id("modelPart.cape"), "model_part_cape")
+        self.assertEqual(preferences.stable_id("invertXMouse"), "invert_x_mouse")
+
+    def test_snake_case_handles_the_edges_of_an_identifier(self):
+        self.assertEqual(preferences.snake_case("Fov"), "fov")
+        self.assertEqual(preferences.snake_case("scaleX"), "scale_x")
+        self.assertEqual(preferences.snake_case("useHTTP"), "use_http")
+        self.assertEqual(preferences.snake_case("sound.volume.master"), "sound_volume_master")
+        self.assertEqual(preferences.snake_case("gui2Scale"), "gui2_scale")
+
+
+class Serialization(unittest.TestCase):
+    def test_the_on_disk_text_is_compact_sorted_ascii_and_newline_terminated(self):
+        text = preferences.dumps({"b": [1, 2], "a": "caf\u00e9"})
+        self.assertEqual(text, '{"a":"caf\\u00e9","b":[1,2]}\n')
+
+
+class MaintainerCommand(unittest.TestCase):
+    """`main` regenerates and verifies the bundled catalog; a request for
+    enrichment that cannot be met must fail instead of writing a stripped
+    catalog."""
+
+    def setUp(self):
+        self.directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.directory, ignore_errors=True)
+        self.document = small_dataset_document()
+        self.dataset_path = self.directory / "dataset.json"
+        self.dataset_path.write_text(json.dumps(self.document), encoding="utf-8")
+        self.out = self.directory / "out" / "preferences.json"
+
+    def record(self, **overrides) -> dict:
+        record = release("26.2", FIXTURE_SETTINGS)
+        for extracted in record["settings"]:
+            if extracted["persisted_key"] == "fov":
+                extracted.update(default=70, default_confidence="high")
+        record.update(jar_sha256="a" * 64)
+        record.update(overrides)
+        return record
+
+    def analysis(self, record: dict, *, layout: str = "per-release", name: str = "26.2.json") -> Path:
+        root = self.directory / "analysis"
+        directory = root / "mc-26.2" / "normalized" if layout == "per-release" else root / "normalized"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / name).write_text(json.dumps(record), encoding="utf-8")
+        return root
+
+    def run_main(self, *arguments: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = preferences.main(["--dataset", str(self.dataset_path), "--out", str(self.out), *arguments])
+        return code, out.getvalue(), err.getvalue()
+
+    def written(self) -> dict:
+        return json.loads(self.out.read_text(encoding="utf-8"))
+
+    def fov_default(self) -> object:
+        return next(d for d in self.written()["descriptors"] if d["id"] == "fov")["presentation"]["default"]
+
+    def test_the_catalog_is_written_with_the_proven_enrichment(self):
+        code, out, err = self.run_main("--from-analysis", str(self.analysis(self.record())))
+        self.assertEqual((code, err), (0, ""), err)
+        self.assertIn("bundled preference catalog", out)
+        self.assertEqual(self.fov_default(), 70)
+        expected = preferences.build(self.document, preferences.rich_settings_by_canonical_id(self.record()))
+        self.assertEqual(self.out.read_text(encoding="utf-8"), preferences.dumps(expected))
+
+    def test_the_analysis_root_layout_of_an_analyzed_release_is_read_too(self):
+        code, _, err = self.run_main("--from-analysis", str(self.analysis(self.record(), layout="release")))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.fov_default(), 70)
+
+    def test_a_stale_root_leftover_beside_the_per_release_analysis_is_ignored(self):
+        stale = self.record()
+        stale["settings"] = [s for s in stale["settings"] if s["persisted_key"] != "lang"]
+        root = self.analysis(stale, layout="release", name="old.json")
+        self.analysis(self.record())
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.fov_default(), 70)
+
+    def test_check_accepts_exactly_what_was_written(self):
+        analysis = str(self.analysis(self.record()))
+        self.assertEqual(self.run_main("--from-analysis", analysis)[0], 0)
+        code, out, err = self.run_main("--from-analysis", analysis, "--check")
+        self.assertEqual((code, err), (0, ""), err)
+        self.assertIn("exactly what these inputs regenerate", out)
+
+    def test_check_reports_a_catalog_that_drifted(self):
+        analysis = str(self.analysis(self.record()))
+        self.run_main("--from-analysis", analysis)
+        self.out.write_text(self.out.read_text(encoding="utf-8").replace('"default":70', '"default":71'), encoding="utf-8")
+        code, out, err = self.run_main("--from-analysis", analysis, "--check")
+        self.assertEqual(code, 1)
+        self.assertIn("does not match what these inputs regenerate", err)
+        self.assertNotIn("--from-analysis", err)
+
+    def test_check_writes_nothing_and_a_missing_catalog_does_not_match(self):
+        code, _, err = self.run_main("--from-analysis", str(self.analysis(self.record())), "--check")
+        self.assertEqual(code, 1)
+        self.assertIn("does not match", err)
+        self.assertFalse(self.out.exists())
+
+    def test_a_missing_analysis_directory_is_an_error_that_writes_nothing(self):
+        for arguments in (("--from-analysis", str(self.directory / "mistyped")), ("--from-analysis", str(self.directory))):
+            code, _, err = self.run_main(*arguments)
+            self.assertEqual(code, 1, arguments)
+            self.assertIn("no analyzer output", err)
+            self.assertFalse(self.out.exists())
+
+    def test_check_names_a_missing_analysis_instead_of_reporting_a_mismatch(self):
+        self.run_main()
+        code, _, err = self.run_main("--from-analysis", str(self.directory / "mistyped"), "--check")
+        self.assertEqual(code, 1)
+        self.assertIn("no analyzer output", err)
+        self.assertNotIn("does not match", err)
+
+    def test_a_requested_analysis_never_overwrites_an_existing_catalog_when_it_fails(self):
+        self.out.parent.mkdir(parents=True)
+        self.out.write_text("untouched\n", encoding="utf-8")
+        self.assertEqual(self.run_main("--from-analysis", str(self.directory / "mistyped"))[0], 1)
+        self.assertEqual(self.out.read_text(encoding="utf-8"), "untouched\n")
+
+    def test_an_analysis_of_another_release_is_refused(self):
+        root = self.analysis(release("1.20.1", FIXTURE_SETTINGS))
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 1)
+        self.assertIn("no record for 26.2", err)
+
+    def test_an_incomplete_analysis_is_refused(self):
+        root = self.analysis(self.record(extraction_complete=False))
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 1)
+        self.assertIn("did not extract completely", err)
+
+    def test_an_analysis_that_no_longer_matches_the_dataset_is_refused_as_stale(self):
+        stale = self.record()
+        stale["settings"] = [s for s in stale["settings"] if s["persisted_key"] != "lang"]
+        code, _, err = self.run_main("--from-analysis", str(self.analysis(stale)))
+        self.assertEqual(code, 1)
+        self.assertIn("stale", err)
+        self.assertFalse(self.out.exists())
+
+    def test_two_different_analyses_of_the_canonical_release_are_ambiguous(self):
+        root = self.analysis(self.record(jar_sha256="a" * 64), name="a.json")
+        self.analysis(self.record(jar_sha256="b" * 64), name="b.json")
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 1)
+        self.assertIn("more than one distinct analysis", err)
+
+    def test_the_same_analysis_found_twice_is_not_ambiguous(self):
+        root = self.analysis(self.record(), name="a.json")
+        self.analysis(self.record(), layout="release", name="b.json")
+        self.assertEqual(self.run_main("--from-analysis", str(root))[0], 0)
+
+    def test_an_unreadable_analysis_file_is_named(self):
+        root = self.analysis(self.record())
+        (root / "mc-26.2" / "normalized" / "broken.json").write_text("{", encoding="utf-8")
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read analyzer output", err)
+
+    def test_an_analysis_file_that_is_not_an_object_is_named(self):
+        root = self.analysis(self.record())
+        (root / "mc-26.2" / "normalized" / "list.json").write_text("[]", encoding="utf-8")
+        code, _, err = self.run_main("--from-analysis", str(root))
+        self.assertEqual(code, 1)
+        self.assertIn("not a JSON object", err)
+
+    def test_without_an_analysis_the_catalog_is_written_without_enrichment_and_says_so(self):
+        code, _, err = self.run_main()
+        self.assertEqual(code, 0)
+        self.assertIn("without enrichment", err)
+        self.assertIsNone(self.fov_default())
+
+    def test_check_without_an_analysis_names_the_missing_enrichment(self):
+        self.run_main("--from-analysis", str(self.analysis(self.record())))
+        code, _, err = self.run_main("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("no --from-analysis was given", err)
+
+    def test_a_catalog_that_fails_validation_is_not_written(self):
+        document = with_codec(self.document, "renderDistance", {"kind": "integer", "min": 2.5, "max": 32})
+        self.dataset_path.write_text(json.dumps(document), encoding="utf-8")
+        code, _, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("numeric minimum", err)
+        self.assertFalse(self.out.exists())
 
 
 class RealCanonicalShape(unittest.TestCase):
@@ -517,38 +1194,81 @@ class RealCanonicalShape(unittest.TestCase):
         cls.catalog = preferences.build(cls.dataset_document)
         preferences.validate(cls.catalog, cls.dataset_document)
 
-    def test_current_canonical_setting_count(self):
-        self.assertEqual(len(self.dataset_document["current_canonical_setting_ids"]), 189)
+    def test_every_current_setting_is_exposed_or_excluded_exactly_once(self):
+        exposed = [f["canonical_id"] for d in self.catalog["descriptors"] for f in d["fields"]]
+        excluded = [e["canonical_id"] for e in self.catalog["exclusions"]]
+        self.assertEqual(len(set(exposed)), len(exposed))
+        self.assertEqual(set(exposed) & set(excluded), set())
+        self.assertEqual(set(exposed) | set(excluded), set(self.dataset_document["current_canonical_setting_ids"]))
 
-    def test_exposed_and_excluded_accounting(self):
-        exposed = {f["canonical_id"] for d in self.catalog["descriptors"] for f in d["fields"]}
-        self.assertEqual(len(exposed), 182)
-        self.assertEqual(len(self.catalog["exclusions"]), 7)
-
-    def test_keybinding_count(self):
-        keybindings = [d for d in self.catalog["descriptors"] if d["presentation"]["kind"] == "key_binding"]
-        self.assertEqual(len(keybindings), 61)
-
-    def test_sound_and_music_accounting(self):
-        registry = {entry["id"]: entry for entry in self.dataset_document["setting_registry"]}
+    def test_the_exclusions_are_the_reviewed_policy_that_is_still_current(self):
         current = set(self.dataset_document["current_canonical_setting_ids"])
-        sound_current = [cid for cid in current if registry[cid]["category"] == "Sound & Music"]
-        self.assertEqual(len(sound_current), 16)
-        sound_manageable = [cid for cid in sound_current if registry[cid]["manageable"]]
-        self.assertEqual(len(sound_manageable), 15)
-
-    def test_the_seven_deliberate_exclusions_match_the_plan(self):
         self.assertEqual(
             {e["canonical_id"] for e in self.catalog["exclusions"]},
-            {
-                "incompatibleResourcePacks",
-                "joinedFirstServer",
-                "lastMpIp",
-                "resourcePacks",
-                "soundDevice",
-                "startedCleanly",
-                "tutorialStep",
-            },
+            set(preferences.EXCLUSIONS) & current,
+        )
+
+    def test_the_deliberately_unmanaged_settings_are_the_excluded_ones(self):
+        registry = {entry["id"]: entry for entry in self.dataset_document["setting_registry"]}
+        current = set(self.dataset_document["current_canonical_setting_ids"])
+        unmanaged = {cid for cid in current if not registry[cid]["manageable"]}
+        self.assertEqual(unmanaged, {e["canonical_id"] for e in self.catalog["exclusions"]})
+
+    def test_every_current_manageable_key_binding_has_a_descriptor(self):
+        registry = {entry["id"]: entry for entry in self.dataset_document["setting_registry"]}
+        current = set(self.dataset_document["current_canonical_setting_ids"])
+        expected = {
+            cid for cid in current
+            if registry[cid]["type"] == "key_binding" and registry[cid]["manageable"]
+        }
+        shown = {
+            d["fields"][0]["canonical_id"]
+            for d in self.catalog["descriptors"]
+            if d["presentation"]["kind"] == "key_binding"
+        }
+        self.assertEqual(shown, expected)
+
+    def test_sound_and_music_settings_are_exposed_in_their_category(self):
+        registry = {entry["id"]: entry for entry in self.dataset_document["setting_registry"]}
+        current = set(self.dataset_document["current_canonical_setting_ids"])
+        expected = {
+            cid for cid in current
+            if registry[cid]["category"] == "Sound & Music" and registry[cid]["manageable"]
+        }
+        shown = {
+            f["canonical_id"]
+            for d in self.catalog["descriptors"]
+            if d["category"] == "sound_and_music"
+            for f in d["fields"]
+        }
+        self.assertEqual(shown, expected)
+
+    def test_the_bundled_catalog_satisfies_every_validation_rule(self):
+        bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
+        preferences.validate(bundled, self.dataset_document)
+
+    def test_the_mouse_wheel_range_is_not_the_slider_positions_of_its_helper(self):
+        document = self.dataset_document
+        registry = {entry["id"]: entry for entry in document["setting_registry"]}
+        self.assertEqual(registry["mouseWheelSensitivity"]["type"], "number")
+        for schema in document["schemas"]:
+            position = schema["supported"].get("mouseWheelSensitivity")
+            if position is None:
+                continue
+            codec = document["representations"][position]["codec"]
+            self.assertNotEqual((codec.get("min"), codec.get("max")), (-200, 100))
+
+    def test_the_bundled_catalog_steps_match_what_the_game_stores(self):
+        bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
+        steps = {d["id"]: d["presentation"].get("step") for d in bundled["descriptors"]}
+        self.assertEqual(steps["chat_delay"], 0.1)
+        self.assertEqual(steps["chunk_section_fade_in_time"], 0.05)
+        self.assertEqual(steps["entity_distance_scaling"], 0.25)
+        self.assertEqual(steps["notification_display_time"], 0.1)
+        wheel = next(d for d in bundled["descriptors"] if d["id"] == "mouse_wheel_sensitivity")
+        self.assertEqual(
+            {key: wheel["presentation"][key] for key in ("min", "max", "step")},
+            {"min": None, "max": None, "step": None},
         )
 
     def test_regenerating_from_the_same_dataset_is_deterministic(self):
