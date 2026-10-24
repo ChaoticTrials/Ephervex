@@ -265,7 +265,7 @@ fn every_fixture_line_is_a_key_and_value_its_release_writes() {
             .collect();
 
         let parsed = ParsedOptions::parse(era.text);
-        for key in parsed.keys().filter(|key| *key != VERSION_KEY) {
+        for key in parsed.keys() {
             let value = parsed.get(key).expect("a listed key has a value");
             match writes.get(key) {
                 Some(codec) => {

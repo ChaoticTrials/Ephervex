@@ -182,6 +182,56 @@ class IntegerSliderBehindDecimalCodec(unittest.TestCase):
                          (30, 110, 1))
 
 
+class PersistedCodecXmap(unittest.TestCase):
+    """The `Codec.xmap` lambdas decide what lands in the file."""
+
+    CODEC_LAMBDAS = [
+        ("getstatic", "#11|Field com/mojang/serialization/Codec.DOUBLE:Lcom/mojang/serialization/Codec;"),
+        ("invokedynamic", "#4|InvokeDynamic #0:apply:()Ljava/util/function/Function;"),
+        ("invokedynamic", "#5|InvokeDynamic #1:apply:()Ljava/util/function/Function;"),
+    ]
+
+    def codec_record(self, lambdas: str) -> dict:
+        window = construct(0, 40, self.CODEC_LAMBDAS, slider_mapping=False, codec_xmap=True)
+        return analyze(window, mapping=lambdas)
+
+    def test_a_linear_lambda_pair_is_a_resolved_transform(self) -> None:
+        record = self.codec_record(slider_pair("lambda$new$1", "lambda$new$2", "20.0d"))
+
+        self.assertTrue(record["codec"]["transform_resolved"])
+
+    def test_a_lambda_pair_calling_math_helpers_is_left_unresolved(self) -> None:
+        logarithmic = listing(
+            "private static java.lang.Double lambda$new$1(int)",
+            [("iload_0", ""), ("i2d", ""), ("ldc2_w", "#1|double 100.0d"), ("ddiv", ""),
+             ("ldc2_w", "#1|double 10.0d"), ("invokestatic", "#5|Method java/lang/Math.pow:(DD)D"),
+             ("invokestatic", f"#2|{VALUE_OF}"), ("areturn", "")],
+        ) + "\n" + listing(
+            "private static int lambda$new$2(java.lang.Double)",
+            [("aload_0", ""), ("invokevirtual", "#3|Method java/lang/Double.doubleValue:()D"),
+             ("invokestatic", "#6|Method java/lang/Math.log10:(D)D"), ("ldc2_w", "#1|double 100.0d"),
+             ("dmul", ""), ("d2i", ""), ("ireturn", "")],
+        )
+        record = self.codec_record(logarithmic)
+
+        self.assertFalse(record["codec"]["transform_resolved"])
+
+    def test_a_lambda_pair_that_branches_is_left_unresolved(self) -> None:
+        branching = listing(
+            "private static java.lang.Double lambda$new$1(int)",
+            [("iload_0", ""), ("ifge", "3"), ("iconst_0", ""), ("istore_0", ""), ("iload_0", ""),
+             ("i2d", ""), ("ldc2_w", "#1|double 20.0d"), ("ddiv", ""),
+             ("invokestatic", f"#2|{VALUE_OF}"), ("areturn", "")],
+        ) + "\n" + listing(
+            "private static int lambda$new$2(java.lang.Double)",
+            [("aload_0", ""), ("invokevirtual", "#3|Method java/lang/Double.doubleValue:()D"),
+             ("ldc2_w", "#1|double 20.0d"), ("dmul", ""), ("d2i", ""), ("ireturn", "")],
+        )
+        record = self.codec_record(branching)
+
+        self.assertFalse(record["codec"]["transform_resolved"])
+
+
 STRING_EQUALS = "Method java/lang/String.equals:(Ljava/lang/Object;)Z"
 PARSE_INT = "Method java/lang/Integer.parseInt:(Ljava/lang/String;)I"
 PRINTLN = "Method java/io/PrintWriter.println:(Ljava/lang/String;)V"

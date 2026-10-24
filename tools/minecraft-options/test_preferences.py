@@ -21,8 +21,10 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import dataset
+import file_io
 import preferences
 from test_dataset import REQUIRED, release, setting
 
@@ -1181,6 +1183,95 @@ class MaintainerCommand(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("numeric minimum", err)
         self.assertFalse(self.out.exists())
+
+    def test_a_damaged_or_missing_dataset_is_an_error_not_a_traceback(self):
+        for content in ('{"format_version": 1, "setting_reg', "[]", ""):
+            self.dataset_path.write_text(content, encoding="utf-8")
+            with self.subTest(content=content):
+                code, _, err = self.run_main()
+                self.assertEqual(code, 1)
+                self.assertIn("the compatibility dataset", err)
+                self.assertFalse(self.out.exists())
+        self.dataset_path.unlink()
+        code, _, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("cannot be read", err)
+
+    def test_a_dataset_missing_the_structure_the_catalog_is_built_from_is_an_error(self):
+        def without_canonical_schema(document):
+            document["schemas"] = []
+
+        def unregistered_current_setting(document):
+            document["current_canonical_setting_ids"].append("no.such.setting")
+
+        def without_registry(document):
+            del document["setting_registry"]
+
+        def non_object_codec(document):
+            for representation in document["representations"]:
+                representation["codec"] = "x"
+
+        def non_string_current_id(document):
+            document["current_canonical_setting_ids"].append([1])
+
+        def dangling_representation(document):
+            schema = next(s for s in document["schemas"] if s["supported"])
+            schema["supported"][next(iter(schema["supported"]))] = 10_000
+
+        for mutate in (
+            without_canonical_schema, unregistered_current_setting, without_registry, dangling_representation,
+            non_object_codec, non_string_current_id,
+        ):
+            document = copy.deepcopy(self.document)
+            mutate(document)
+            self.dataset_path.write_text(json.dumps(document), encoding="utf-8")
+            with self.subTest(mutation=mutate.__name__):
+                code, _, err = self.run_main()
+                self.assertEqual(code, 1)
+                self.assertIn("the compatibility dataset is malformed", err)
+                self.assertFalse(self.out.exists())
+
+    def test_a_matching_analyzer_record_with_unusable_settings_is_an_error(self):
+        for damage in (
+            lambda setting: setting.pop("logical_id"),
+            lambda setting: setting.update(logical_id=["unhashable"]),
+        ):
+            record = self.record()
+            for setting in record["settings"]:
+                damage(setting)
+            with self.subTest(record=record["settings"][0].get("logical_id")):
+                code, _, err = self.run_main("--from-analysis", str(self.analysis(record)))
+                self.assertEqual(code, 1)
+                self.assertIn("analyzer output", err)
+                self.assertIn("malformed", err)
+                self.assertFalse(self.out.exists())
+
+    def test_an_interrupted_write_keeps_the_previous_catalog(self):
+        self.assertEqual(self.run_main()[0], 0)
+        before = self.out.read_bytes()
+        self.dataset_path.write_text(
+            json.dumps(with_codec(self.document, "renderDistance", {"kind": "integer", "min": 4, "max": 24})),
+            encoding="utf-8",
+        )
+        with mock.patch.object(file_io.os, "replace", side_effect=OSError("killed")):
+            code, _, err = self.run_main()
+        self.assertEqual(code, 1)
+        self.assertIn("could not write", err)
+        self.assertEqual(self.out.read_bytes(), before)
+        self.assertEqual([p.name for p in self.out.parent.iterdir()], [self.out.name])
+
+    def test_check_reports_a_catalog_path_that_cannot_be_read(self):
+        self.out.mkdir(parents=True)
+        code, _, err = self.run_main("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("cannot read", err)
+
+    def test_check_treats_a_damaged_catalog_as_a_mismatch(self):
+        self.out.parent.mkdir(parents=True)
+        self.out.write_bytes(b'{"descriptors": [\xff')
+        code, _, err = self.run_main("--check")
+        self.assertEqual(code, 1)
+        self.assertIn("does not match", err)
 
 
 class RealCanonicalShape(unittest.TestCase):

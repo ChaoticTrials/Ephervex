@@ -14,6 +14,7 @@ from unittest import mock
 
 import analyze_options as analyzer
 import dataset
+import file_io
 import preferences
 import update
 from test_dataset import REQUIRED, release
@@ -134,6 +135,34 @@ class AnalyzerCommandLine(unittest.TestCase):
         self.assertEqual(1, status)
         self.assertIn("1.20.1 comes from a.jar, b.jar", error)
         self.assertFalse(self.output.exists())
+
+
+class LanguageCacheReading(unittest.TestCase):
+    def test_a_damaged_cached_record_is_reported_and_skipped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            language = Path(directory) / "language"
+            language.mkdir()
+            (language / "26.1.json").write_text('{"version": "26.1", "stat')
+            (language / "26.2.json").write_text(json.dumps({"version": "26.2", "status": "ok"}))
+            (language / "26.3.json").write_text("[]")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                loaded = analyzer.load_language_cache(Path(directory), ["26.1", "26.2", "26.3", "26.4"])
+        self.assertEqual(list(loaded), ["26.2"])
+        self.assertIn("26.1.json", stderr.getvalue())
+        self.assertIn("26.3.json", stderr.getvalue())
+        self.assertIn("fetch_language_catalogs.py", stderr.getvalue())
+
+    def test_a_generated_output_is_replaced_whole(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "out" / "languages.json"
+            analyzer.stable_json(target, {"languages": [1]})
+            before = target.read_bytes()
+            with mock.patch.object(file_io.os, "replace", side_effect=OSError("killed")):
+                with self.assertRaises(OSError):
+                    analyzer.stable_json(target, {"languages": [1, 2]})
+            self.assertEqual(target.read_bytes(), before)
+            self.assertEqual([p.name for p in target.parent.iterdir()], [target.name])
 
 
 class ReleaseUniqueness(unittest.TestCase):

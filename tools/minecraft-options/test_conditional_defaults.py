@@ -11,6 +11,7 @@ byte long.
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import analyze_options as analyzer
 
@@ -182,6 +183,64 @@ class OptionInstanceDefaults(unittest.TestCase):
             ("invokestatic", f"#4|{BOOLEAN_FACTORY}"),
         ])
         self.assertEqual((record["default"], record["default_confidence"]), (True, "high"))
+
+
+class EnumOptionDefaults(unittest.TestCase):
+    MODE = "net/minecraft/client/Mode"
+    ENUM_OPTION = f"{OPTION}$Enum"
+    CODEC = f"Field {MODE}.CODEC:Lcom/mojang/serialization/Codec;"
+    ENUM_INIT = f"Method {ENUM_OPTION}.\"<init>\":(Ljava/util/List;Lcom/mojang/serialization/Codec;)V"
+    OPTION_INIT = f"Method {OPTION}.\"<init>\":(Ljava/lang/String;Ljava/lang/Object;)V"
+    ENUM_INFO = {
+        "class": MODE,
+        "codec_fields": {"CODEC": {"persisted_form": "integer_id"}},
+        "constants": [
+            {"name": "FAST", "field": "FAST", "ordinal": 0, "id": 0, "translation_key": "mode.fast"},
+            {"name": "FANCY", "field": "FANCY", "ordinal": 1, "id": 1, "translation_key": "mode.fancy"},
+        ],
+    }
+
+    def constant(self, name: str) -> tuple[str, str]:
+        return ("getstatic", f"#9|Field {self.MODE}.{name}:L{self.MODE};")
+
+    def definition(self, default: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        """`new OptionInstance(..., new Enum(List, Mode.CODEC), <default>)`."""
+        return [
+            ("ldc_w", "#1|String options.mode"),
+            ("new", f"#2|class {self.ENUM_OPTION}"), ("dup", ""),
+            ("getstatic", f"#3|{self.CODEC}"),
+            ("invokespecial", f"#4|{self.ENUM_INIT}"),
+            *default,
+            ("invokespecial", f"#5|{self.OPTION_INIT}"),
+        ]
+
+    def analyse_enum(self, default: list[tuple[str, str]]) -> dict:
+        with mock.patch.object(analyzer, "extract_enum", return_value=self.ENUM_INFO):
+            return analyse(self.definition(default))
+
+    def test_an_enum_constant_chosen_by_a_ternary_is_not_a_default(self) -> None:
+        record = self.analyse_enum([
+            ("iload_3", ""), ("ifeq", "9"), self.constant("FAST"), ("goto", "10"), self.constant("FANCY"),
+        ])
+        self.assertEqual(record["type"], "enum")
+        self.assertIsNone(record["default"])
+        self.assertEqual(record["default_confidence"], "unknown")
+        self.assertIsNone(record["enum_default_constant"])
+        self.assertIn(analyzer.CONDITIONAL_DEFAULT_NOTE, record["notes"])
+
+    def test_an_enum_constant_passed_unconditionally_is_a_default(self) -> None:
+        record = self.analyse_enum([self.constant("FANCY")])
+        self.assertEqual((record["default"], record["default_confidence"]), (1, "high"))
+        self.assertEqual(record["enum_default_constant"], "FANCY")
+        self.assertNotIn(analyzer.CONDITIONAL_DEFAULT_NOTE, record["notes"])
+
+    def test_an_enum_constant_after_a_finished_ternary_is_a_default(self) -> None:
+        record = self.analyse_enum([
+            ("iload_3", ""), ("ifeq", "9"), self.constant("FAST"), ("goto", "10"), self.constant("FANCY"),
+            ("pop", ""), self.constant("FAST"),
+        ])
+        self.assertEqual((record["default"], record["default_confidence"]), (0, "high"))
+        self.assertEqual(record["enum_default_constant"], "FAST")
 
 
 class ControlFlowMarks(unittest.TestCase):

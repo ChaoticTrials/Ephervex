@@ -47,6 +47,7 @@ FORMAT_VERSION = 1
 # setting may be stored under it; every other setting would overwrite it.
 VERSION_KEY = "version"
 VERSION_MARKER_SETTING_ID = "version"
+VERSION_MARKER_CODEC = {"kind": "integer", "min": None, "max": None}
 
 # The canonical setting ids Ephervex's own preference model is built on.
 # `validate` refuses a dataset whose canonical release does not support every
@@ -114,6 +115,11 @@ def _domain(setting: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Code spaces whose releases persist a binding as the name the game gives its key
+# (`key.keyboard.w`); the numbering the defaults are written in does not reach the file.
+NAMED_KEY_CODE_SPACES = ("glfw", "hid")
+
+
 def codec_for(setting: dict[str, Any], code_space: str | None) -> dict[str, Any] | None:
     """The typed codec for one release's own extraction of one setting.
 
@@ -133,7 +139,7 @@ def codec_for(setting: dict[str, Any], code_space: str | None) -> dict[str, Any]
     if kind == "key_binding":
         if code_space == "lwjgl2":
             return {"kind": "key_code_lwjgl2"}
-        if code_space == "glfw":
+        if code_space in NAMED_KEY_CODE_SPACES:
             return {"kind": "key_name_glfw"}
         return None
     if kind in ("integer", "number"):
@@ -151,7 +157,7 @@ def representation_issue(setting: dict[str, Any], code_space: str | None) -> str
         return "the analyzer could not establish its codec"
 
     kind = setting.get("type")
-    if kind == "key_binding" and code_space not in ("lwjgl2", "glfw"):
+    if kind == "key_binding" and code_space not in ("lwjgl2", *NAMED_KEY_CODE_SPACES):
         return "the key binding code space is unknown"
     if kind in ("integer", "number"):
         encoding = setting.get("file_encoding") or ""
@@ -324,9 +330,17 @@ def schema_for(record: dict[str, Any], settings: list[dict[str, Any]]) -> dict[s
 
     supported: dict[str, dict[str, Any]] = {}
     unsupported: list[str] = []
+    marker_written = record.get("data_version") is not None
     for entry in settings:
+        if entry["id"] == VERSION_MARKER_SETTING_ID and marker_written:
+            # The stamp comes from version data, not the options population.
+            supported[entry["id"]] = {"key": VERSION_KEY, "codec": dict(VERSION_MARKER_CODEC)}
+            continue
         setting = extracted.get(entry["key"])
         if setting is None:
+            if entry["id"] == VERSION_MARKER_SETTING_ID:
+                # A complete extraction does not cover the stamp, so its absence proves nothing.
+                continue
             # Absent from a completely extracted persistence path is proof the
             # key did not exist in this release. Without that proof it is only
             # unknown, and unknown is never written.
@@ -439,6 +453,23 @@ def merge(
     analysed: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Folds newly analysed releases into the committed dataset.
+
+    A previous dataset or analyzer record that lacks the structure the fold
+    reads is refused with a `DatasetError`, never a lookup traceback.
+    """
+    try:
+        return _merge(previous, analysed)
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
+        raise DatasetError(
+            f"the dataset or analyzer records are malformed ({type(error).__name__}: {error})"
+        ) from error
+
+
+def _merge(
+    previous: dict[str, Any] | None,
+    analysed: list[dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """The fold behind `merge`, which assumes well-formed structure.
 
     `previous` is never modified. Setting ids and release families that an
     earlier analysis established are preserved, so adding or re-folding a
@@ -686,8 +717,64 @@ def _codec_problem(codec: Any) -> str | None:
     return f"has the unknown kind `{kind}`"
 
 
-def validate(document: dict[str, Any]) -> None:
+def validate(document: Any) -> None:
     """Checks a document is internally consistent before it is published.
+
+    A document whose structure is missing or has the wrong type is refused with
+    a `DatasetError` like any other inconsistency, never a lookup traceback.
+    """
+    if not isinstance(document, dict):
+        raise DatasetError("the document is not a JSON object")
+    try:
+        _validate(document)
+    except (KeyError, IndexError, TypeError, AttributeError) as error:
+        raise DatasetError(f"the document is malformed ({type(error).__name__}: {error})") from error
+
+
+def _check_field_types(document: dict[str, Any]) -> None:
+    """Refuses the field types the application's loader deserializes into.
+
+    Mirrors the serde structs in `crates/options/src/dataset.rs`: an absent
+    required field is a `KeyError` that `validate` reports as malformed, and an
+    optional field may be absent or null.
+    """
+    if not isinstance(document["canonical_minecraft_version"], str):
+        raise DatasetError("the canonical release is not a string")
+    for name in ("setting_registry", "current_canonical_setting_ids", "representations", "schemas", "releases"):
+        if not isinstance(document[name], list):
+            raise DatasetError(f"`{name}` is not a list")
+    for entry in document["setting_registry"]:
+        if not isinstance(entry, dict):
+            raise DatasetError("a setting registry entry is not an object")
+        for field in ("id", "key", "type"):
+            if not isinstance(entry[field], str):
+                raise DatasetError(f"a setting registry entry has a `{field}` that is not a string")
+        setting_id = entry["id"]
+        for field in ("category", "translation_key"):
+            if entry.get(field) is not None and not isinstance(entry[field], str):
+                raise DatasetError(f"setting `{setting_id}` has a `{field}` that is not a string")
+        if not isinstance(entry["manageable"], bool):
+            raise DatasetError(f"setting `{setting_id}` has a `manageable` flag that is not a boolean")
+    if not all(isinstance(setting_id, str) for setting_id in document["current_canonical_setting_ids"]):
+        raise DatasetError("a current canonical setting id is not a string")
+    for schema in document["schemas"]:
+        if not isinstance(schema, dict):
+            raise DatasetError("a schema is not an object")
+        if not isinstance(schema["id"], str):
+            raise DatasetError("a schema has an id that is not a string")
+        supported = schema["supported"]
+        if not isinstance(supported, dict) or not all(isinstance(key, str) for key in supported):
+            raise DatasetError(f"schema `{schema['id']}` has a supported map that is not keyed by setting id")
+    for release in document["releases"]:
+        if not isinstance(release, dict):
+            raise DatasetError("a release is not an object")
+        for field in ("minecraft_version", "schema"):
+            if not isinstance(release[field], str):
+                raise DatasetError(f"a release has a `{field}` that is not a string")
+
+
+def _validate(document: dict[str, Any]) -> None:
+    """The consistency checks behind `validate`, which assume the document's structure.
 
     This is the only gate between the generator and the published document, so
     it refuses exactly what the application's loader refuses
@@ -701,6 +788,8 @@ def validate(document: dict[str, Any]) -> None:
     revision = document.get("revision")
     if not _is_int(revision) or not 1 <= revision <= _U32_MAX:
         raise DatasetError("revision must be a positive 32-bit integer")
+
+    _check_field_types(document)
 
     registry = document["setting_registry"]
     ids = {entry["id"] for entry in registry}
@@ -782,6 +871,8 @@ def validate(document: dict[str, Any]) -> None:
         data_version = release.get("data_version")
         if data_version is not None and not _is_i64(data_version):
             raise DatasetError(f"release `{version}` has a data version that is not a 64-bit integer")
+        if data_version is not None and VERSION_MARKER_SETTING_ID in families[release["schema"]]["unsupported"]:
+            raise DatasetError(f"release `{version}` has a data version but its schema lists the marker as unsupported")
         mapped[version] = release["schema"]
 
     canonical = document["canonical_minecraft_version"]

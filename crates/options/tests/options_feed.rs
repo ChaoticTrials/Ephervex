@@ -190,9 +190,17 @@ async fn a_bad_publish_never_replaces_the_last_known_good_cache() {
     let truncated = published().split_at(published().len() / 2).0.to_owned();
     let future_format = published().replacen("\"format_version\": 1", "\"format_version\": 99", 1);
     let dangling_schema = published().replacen(
-        "\"canonical_minecraft_version\": \"26.2\"",
+        &format!(
+            "\"canonical_minecraft_version\": \"{}\"",
+            OptionsDataset::bundled().canonical_minecraft_version
+        ),
         "\"canonical_minecraft_version\": \"nothing-maps-this\"",
         1,
+    );
+    assert_ne!(
+        dangling_schema,
+        published(),
+        "the hostile document must actually differ from the good one"
     );
     let executable_codec = published().replacen(
         "\"kind\": \"boolean\"",

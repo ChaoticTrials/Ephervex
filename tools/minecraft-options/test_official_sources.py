@@ -9,13 +9,14 @@ import json
 import tempfile
 import unittest
 import urllib.request
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 from zipfile import ZipFile
 
 import analyze_options
 import fetch_language_catalogs
+import file_io
 import official_sources
 from official_sources import SourceError
 
@@ -169,12 +170,33 @@ class SharedVersionManifest(unittest.TestCase):
                 official_sources.load_manifest(self.path, online=True, refresh=True)
             self.assertEqual(self.path.read_bytes(), good)
 
-    def test_an_unreadable_cached_manifest_is_replaced_by_a_download(self):
+    def test_an_unreadable_cached_manifest_is_reported_and_replaced_by_a_download(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text("{truncated")
         self.publish_manifest("26.2")
-        document = official_sources.load_manifest(self.path, online=True)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            document = official_sources.load_manifest(self.path, online=True)
         self.assertEqual(document["latest"]["release"], "26.2")
+        self.assertIn("is damaged", stderr.getvalue())
+        self.assertEqual(json.loads(self.path.read_text())["latest"]["release"], "26.2")
+
+    def test_a_damaged_cached_manifest_offline_is_an_error_naming_the_cache(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{truncated")
+        with redirect_stderr(io.StringIO()), self.assertRaisesRegex(SourceError, "no usable cached version manifest"):
+            official_sources.load_manifest(self.path, online=False)
+
+    def test_an_interrupted_cache_write_keeps_the_previous_manifest(self):
+        self.publish_manifest("26.2")
+        official_sources.load_manifest(self.path, online=True)
+        good = self.path.read_bytes()
+        self.publish_manifest("26.3")
+        with mock.patch.object(file_io.os, "replace", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                official_sources.load_manifest(self.path, online=True, refresh=True)
+        self.assertEqual(self.path.read_bytes(), good)
+        self.assertEqual([p.name for p in self.path.parent.iterdir()], [self.path.name])
 
 
 class LanguageCatalogCollection(unittest.TestCase):
@@ -282,6 +304,42 @@ class LanguageCatalogRefresh(unittest.TestCase):
         self.assertEqual(failures, {})
         self.assertEqual(sorted(records["26.2"]["languages"]), ["en_us"])
 
+    def test_a_truncated_cached_record_is_reported_and_fetched_again(self):
+        entry = self.mojang.publish_release("26.2")
+        target = self.cache / "language" / "26.2.json"
+        target.parent.mkdir(parents=True)
+        target.write_text('{"version": "26.2", "status": "o')
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            records, failures = self.refresh(manifest_document(entry), ["26.2"])
+        self.assertEqual(failures, {})
+        self.assertEqual(sorted(records["26.2"]["languages"]), ["en_us"])
+        self.assertIn("cached language catalog", stderr.getvalue())
+        self.assertIn("fetching it again", stderr.getvalue())
+        self.assertEqual(json.loads(target.read_text())["status"], "ok")
+
+    def test_an_interrupted_record_write_keeps_the_previous_record(self):
+        entry = self.mojang.publish_release("26.2")
+        target = self.cache / "language" / "26.2.json"
+        fetch_language_catalogs.stable_json(target, {"version": "26.2", "status": "stale"})
+        before = target.read_bytes()
+        with mock.patch.object(file_io.os, "replace", side_effect=OSError("killed")):
+            with self.assertRaises(OSError):
+                self.refresh(manifest_document(entry), ["26.2"])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertEqual([p.name for p in target.parent.iterdir()], [target.name])
+
+    def test_an_unusable_inventory_is_a_message_with_a_nonzero_status(self):
+        inventory = self.cache / "inventory.json"
+        self.cache.mkdir(parents=True, exist_ok=True)
+        for content in ('{"jars": [', "[]", "{}", '{"jars": 3}'):
+            inventory.write_text(content)
+            stderr = io.StringIO()
+            arguments = ["fetch_language_catalogs.py", "--cache", str(self.cache), "--inventory", str(inventory)]
+            with self.subTest(content=content), mock.patch("sys.argv", arguments), redirect_stderr(stderr):
+                self.assertEqual(fetch_language_catalogs.main(), 1)
+            self.assertIn("analyzer inventory", stderr.getvalue())
+
     def test_a_manifest_entry_without_a_sha1_fails_even_when_a_record_is_cached(self):
         entry = self.mojang.publish_release("26.2")
         target = self.cache / "language" / "26.2.json"
@@ -351,7 +409,8 @@ class AnalyzerLanguageOutput(unittest.TestCase):
                 archive.writestr("assets/minecraft/lang/en_us.json", "{}")
             cache = {"26.2": record} if record is not None else {}
             return analyze_options.language_output(
-                {"detected_version": "26.2", "sha256": "0" * 64}, jar, {"settings": []}, cache, ["26.2"]
+                {"detected_version": "26.2", "sha256": "0" * 64}, jar, {"settings": []}, cache,
+                [{"minecraft_version": "26.2", "settings": []}]
             )
 
     def record(self, matches: bool) -> dict:

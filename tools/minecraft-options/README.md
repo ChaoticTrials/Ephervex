@@ -152,11 +152,12 @@ compiled into the binaries and are never fetched at build time. See
 | `analyze_options.py` | Static options.txt analyzer: reads a client JAR's bytecode and reports how each option is stored |
 | `official_sources.py` | Downloads from Mojang's published sources: https-only, SHA-1 verified, with validated identifiers and the shared version manifest cache |
 | `fetch_language_catalogs.py` | Fetches a release's language catalog from its own `pack.mcmeta` asset object |
+| `file_io.py` | Every file the scripts generate or cache is written through a temporary file in the same directory and renamed into place, so an interrupted run leaves the previous file. Damaged inputs are reported with their path |
 | `release_identity.py` | What counts as a release identifier, and how releases are ordered |
 | `dataset.py` | Turns analyzer output into the compatibility dataset, and validates it |
 | `preferences.py` | Turns the compatibility dataset (plus optional analyzer enrichment) into the bundled product preference catalog, and validates it |
 | `update.py` | The maintainer workflow: fetches, analyzes, folds into the compatibility dataset, and reports whether the product catalog needs review |
-| `test_dataset.py`, `test_preferences.py`, `test_update.py`, `test_release_identity.py`, `test_official_sources.py`, `test_update_command.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
+| `test_dataset.py`, `test_preferences.py`, `test_update.py`, `test_release_identity.py`, `test_official_sources.py`, `test_update_command.py`, `test_file_io.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
 | `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output, generated feed |
 
 Analyzer output is the input to every fingerprint in the committed dataset, so
@@ -227,7 +228,10 @@ A key binding codec also needs the numeric table its release's default codes
 belong to. The analyzer assumes LWJGL2 before 1.13 and GLFW from 1.13, then
 checks the assumption against the release's own bytecode: well-known defaults
 (movement, jump, inventory, chat, the mouse buttons) must decode to the keys
-they are known to be. A release that contradicts the table, or exposes too few
+they are known to be. A modern release that contradicts the GLFW table is tried
+against USB HID usage ids (`hid`, 1-based mouse buttons), which 26.3 uses; it
+is adopted only when its own anchors verify. Both write the same key names, so
+they share one codec. A release that contradicts every table, or exposes too few
 of those defaults to prove it, records the code space as `unverified`, with
 the evidence in `keybinding_code_space_check`. Its key bindings keep their raw
 codes but are medium confidence with no serialized key, and they get no codec.

@@ -369,11 +369,37 @@ impl OptionsDataset {
                     release.minecraft_version, release.schema
                 )));
             }
+            self.check_marker_support(release)?;
         }
         if !versions.contains(self.canonical_minecraft_version.as_str()) {
             return Err(inconsistent(
                 "the canonical release is not itself mapped".to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    /// A release that stamps a data version writes the marker line, so its
+    /// schema cannot call that setting absent.
+    fn check_marker_support(&self, release: &ReleaseMapping) -> Result<(), DatasetError> {
+        let marker_absent = release.data_version.is_some()
+            && self
+                .schemas
+                .iter()
+                .find(|schema| schema.id == release.schema)
+                .is_some_and(|schema| {
+                    schema
+                        .unsupported
+                        .iter()
+                        .any(|setting| setting == VERSION_MARKER_SETTING_ID)
+                });
+        if marker_absent {
+            return Err(DatasetError::Inconsistent {
+                detail: format!(
+                    "release `{}` has a data version but its schema lists the marker as unsupported",
+                    release.minecraft_version
+                ),
+            });
         }
         Ok(())
     }
@@ -558,6 +584,60 @@ mod tests {
         let hijacked = marker.replace(r#""fov":0,"version":1"#, r#""fov":1,"version":1"#);
         let error = OptionsDataset::parse(&hijacked).expect_err("fov must not use the marker key");
         assert!(matches!(error, DatasetError::Inconsistent { .. }));
+    }
+
+    #[test]
+    fn a_release_with_a_data_version_cannot_list_the_marker_as_unsupported() {
+        let with_marker_unsupported = document("")
+            .replace(
+                r#"manageable":true}]"#,
+                r#"manageable":true},{"id":"version","key":"version","type":"integer","category":null,"translation_key":null,"manageable":false}]"#,
+            )
+            .replace(r#""unsupported":[]"#, r#""unsupported":["version"]"#);
+        OptionsDataset::parse(&with_marker_unsupported)
+            .expect("a release that writes no marker may lack it");
+
+        let stamped = with_marker_unsupported.replace(
+            r#""schema":"aaaaaaaaaaaaaaaa"}]"#,
+            r#""schema":"aaaaaaaaaaaaaaaa","data_version":3465}]"#,
+        );
+        let error = OptionsDataset::parse(&stamped)
+            .expect_err("a stamped release writes the marker, so it cannot lack it");
+        assert!(matches!(error, DatasetError::Inconsistent { .. }));
+    }
+
+    #[test]
+    fn the_bundled_marker_is_supported_for_every_release_that_has_a_data_version() {
+        let bundled = OptionsDataset::bundled();
+        for release in &bundled.releases {
+            let Some(data_version) = release.data_version else {
+                continue;
+            };
+            let schema = bundled
+                .schema_for(&release.minecraft_version)
+                .expect("a mapped release has a schema");
+            let representation = bundled
+                .representation(schema, VERSION_MARKER_SETTING_ID)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{} stamps data version {data_version} but does not support the marker",
+                        release.minecraft_version
+                    )
+                });
+            assert_eq!(
+                representation.key, VERSION_KEY,
+                "{}",
+                release.minecraft_version
+            );
+            assert!(
+                !schema
+                    .unsupported
+                    .iter()
+                    .any(|setting| setting == VERSION_MARKER_SETTING_ID),
+                "{}",
+                release.minecraft_version
+            );
+        }
     }
 
     #[test]

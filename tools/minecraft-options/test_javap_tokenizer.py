@@ -161,21 +161,61 @@ class ExactStringConstants(unittest.TestCase):
     def test_trailing_spaces_javap_omitted_are_restored(self) -> None:
         text = self.listing("", "", "  a", " b")
         pool = class_with_strings(b"", b"  ", b" a ", b"b")
-        exact = analyzer.with_trailing_spaces(text, analyzer.string_constants(pool))
+        exact = analyzer.with_exact_strings(text, analyzer.string_constants(pool))
         insns = analyzer.parse_members(exact)[0].insns
         values = [ins.string() for ins in insns if ins.op == "ldc"]
         self.assertEqual(values, ["", "  ", " a ", "b"])
 
     def test_a_listing_with_no_constant_to_restore_is_unchanged(self) -> None:
         text = self.listing("", "  a")
-        self.assertEqual(analyzer.with_trailing_spaces(text, {}), text)
-        self.assertEqual(analyzer.with_trailing_spaces(text, {1: "", 3: " a"}), text)
+        self.assertEqual(analyzer.with_exact_strings(text, {}), text)
+        self.assertEqual(analyzer.with_exact_strings(text, {1: "", 3: " a"}), text)
 
     def test_a_padded_initializer_is_recorded_with_its_padding(self) -> None:
         text = self.listing("  a")
-        exact = analyzer.with_trailing_spaces(text, analyzer.string_constants(class_with_strings(b" a  ")))
+        exact = analyzer.with_exact_strings(text, analyzer.string_constants(class_with_strings(b" a  ")))
         defaults = analyzer.field_initial_values(analyzer.parse_members(exact))
         self.assertEqual(defaults["f0"]["value"], " a  ")
+
+
+class EscapedAndLineSeparatorStringConstants(unittest.TestCase):
+    """javap escapes control characters and quoting, and prints U+2028 and U+2029 raw."""
+
+    def values(self, text: str) -> list[str | None]:
+        insns = analyzer.parse_members(text)[0].insns
+        return [ins.string() for ins in insns if ins.op == "ldc"]
+
+    def listing(self, *printed: str) -> str:
+        return ExactStringConstants.listing(self, *printed)
+
+    def test_javap_escapes_are_undone_without_a_constant_pool(self) -> None:
+        text = self.listing(r" x\n", r" t\t", r" back\\slash", r" q\"uote\'s", r" \u0085\u0000z")
+        self.assertEqual(self.values(text),
+                         ["x\n", "t\t", "back\\slash", "q\"uote's", "\x85\x00z"])
+
+    def test_an_unknown_escape_is_kept_as_written(self) -> None:
+        self.assertEqual(self.values(self.listing(r" a\qb\u12")), ["a\\qb\\u12"])
+
+    def test_a_line_separator_inside_a_constant_does_not_end_the_instruction(self) -> None:
+        for separator in ("\u2028", "\u2029"):
+            text = self.listing(f" a{separator}b", f" a{separator}")
+            self.assertEqual(self.values(text), [f"a{separator}b", f"a{separator}"], repr(separator))
+            self.assertEqual([i.op for i in analyzer.parse_members(text)[0].insns],
+                             ["ldc", "putfield", "ldc", "putfield"])
+
+    def test_exact_constants_replace_javap_text_including_newlines_and_backslashes(self) -> None:
+        values = ["x\n", "a\u2028 ", "back\\slash", "\\n", "t\t", " \n ", "\x00"]
+        pool = class_with_strings(*(v.encode("utf-8").replace(b"\x00", b"\xc0\x80") for v in values))
+        text = self.listing(*([" ignored"] * len(values)))
+        exact = analyzer.with_exact_strings(text, analyzer.string_constants(pool))
+        self.assertEqual(self.values(exact), values)
+        self.assertEqual(len(analyzer.parse_members(exact)[0].insns), 2 * len(values))
+
+    def test_a_constant_with_a_line_separator_is_recorded_exactly_as_an_initializer(self) -> None:
+        text = self.listing(" a")
+        exact = analyzer.with_exact_strings(text, analyzer.string_constants(class_with_strings("a\u2028 ".encode())))
+        defaults = analyzer.field_initial_values(analyzer.parse_members(exact))
+        self.assertEqual(defaults["f0"]["value"], "a\u2028 ")
 
 
 class PaddedSavePrefix(unittest.TestCase):
@@ -199,7 +239,7 @@ class PaddedSavePrefix(unittest.TestCase):
 
     def test_a_save_prefix_with_a_trailing_space_still_names_its_key(self) -> None:
         pool = class_with_strings(b"chatDelay: ")
-        text = analyzer.with_trailing_spaces(self.SAVE, analyzer.string_constants(pool))
+        text = analyzer.with_exact_strings(self.SAVE, analyzer.string_constants(pool))
         saved = analyzer.legacy_save_blocks(analyzer.parse_members(text)[0])
         self.assertEqual(saved["chatDelay"]["field"], "chatDelay")
         self.assertEqual(saved["chatDelay"]["field_descriptor"], "D")

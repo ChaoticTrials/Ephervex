@@ -333,6 +333,40 @@ class Merging(unittest.TestCase):
         self.assertIn("simulationDistance", legacy["unsupported"])
         self.assertNotIn("simulationDistance", legacy["supported"])
 
+    def schemas_by_release(self, document: dict) -> dict:
+        schemas = {schema["id"]: schema for schema in document["schemas"]}
+        return {entry["minecraft_version"]: schemas[entry["schema"]] for entry in document["releases"]}
+
+    def test_the_data_version_marker_is_supported_wherever_a_release_stamps_one(self):
+        # The stamp comes from the release's version data, so its population
+        # not listing it says nothing about whether the release writes it.
+        listed = REQUIRED + [setting("version", kind="integer")]
+        document, _ = dataset.merge(
+            None,
+            [
+                release("1.16.5", listed, data_version=2586),
+                release("1.20.1", REQUIRED, data_version=3465),
+                release("26.2", REQUIRED, data_version=4800),
+            ],
+        )
+        for version, schema in self.schemas_by_release(document).items():
+            with self.subTest(version=version):
+                self.assertNotIn("version", schema["unsupported"])
+                position = schema["supported"]["version"]
+                self.assertEqual(
+                    document["representations"][position],
+                    {"key": "version", "codec": {"kind": "integer", "min": None, "max": None}},
+                )
+
+    def test_a_release_without_a_readable_stamp_leaves_the_marker_unknown(self):
+        listed = REQUIRED + [setting("version", kind="integer")]
+        document, _ = dataset.merge(
+            None, [release("1.16.5", listed, data_version=2586), release("1.20.1", REQUIRED)]
+        )
+        schema = self.schemas_by_release(document)["1.20.1"]
+        self.assertNotIn("version", schema["supported"])
+        self.assertNotIn("version", schema["unsupported"])
+
     def test_an_unresolved_representation_is_neither_supported_nor_unsupported(self):
         unresolved = copy.deepcopy(REQUIRED)
         unresolved[5] = setting("fov", kind="number", transform="unrecognised(value)")
@@ -349,6 +383,20 @@ class Validation(unittest.TestCase):
 
     def test_a_well_formed_dataset_validates(self):
         dataset.validate(self.build())
+
+    def test_a_document_missing_structure_is_refused_as_a_dataset_error(self):
+        for value in ([], "text", {}):
+            with self.subTest(value=value), self.assertRaises(dataset.DatasetError):
+                dataset.validate(value)
+        for key in ("setting_registry", "schemas", "releases", "representations", "canonical_minecraft_version"):
+            broken = self.build()
+            del broken[key]
+            with self.subTest(missing=key), self.assertRaisesRegex(dataset.DatasetError, "malformed"):
+                dataset.validate(broken)
+        broken = self.build()
+        broken["releases"][0] = "26.2"
+        with self.assertRaisesRegex(dataset.DatasetError, "not an object"):
+            dataset.validate(broken)
 
     def test_a_dataset_missing_a_setting_this_build_manages_is_refused(self):
         broken = self.build()
@@ -426,6 +474,35 @@ class Validation(unittest.TestCase):
         document["schemas"][0]["supported"]["version"] = len(document["representations"]) - 1
         self.reseal(document)
         dataset.validate(document)
+
+    def test_a_release_with_a_data_version_cannot_have_the_marker_unsupported(self):
+        listed = REQUIRED + [setting("version", kind="integer")]
+        document, _ = dataset.merge(
+            None,
+            [release("1.20.1", REQUIRED, data_version=3465), release("1.16.5", listed, data_version=2586)],
+        )
+        dataset.validate(document)
+        schema = next(s for s in document["schemas"] if "version" in s["supported"])
+        del schema["supported"]["version"]
+        schema["unsupported"] = sorted(schema["unsupported"] + ["version"])
+        self.reseal_schema(document, schema)
+        with self.assertRaisesRegex(dataset.DatasetError, "marker"):
+            dataset.validate(document)
+
+    def reseal_schema(self, document: dict, schema: dict) -> None:
+        old = schema["id"]
+        schema["id"] = dataset.fingerprint(
+            {
+                "supported": {
+                    setting_id: document["representations"][position]
+                    for setting_id, position in schema["supported"].items()
+                },
+                "unsupported": schema["unsupported"],
+            }
+        )
+        for release in document["releases"]:
+            if release["schema"] == old:
+                release["schema"] = schema["id"]
 
     def test_two_settings_of_one_schema_cannot_share_a_stored_key(self):
         broken = self.build()
@@ -587,6 +664,57 @@ class ApplicationLoadParity(unittest.TestCase):
                 broken = self.build()
                 broken["schemas"][0]["supported"]["fullscreen"] = position
                 self.assert_refused(broken, "out-of-range representation")
+
+    def test_a_registry_field_of_the_wrong_type_is_refused(self):
+        for field, value, pattern in (
+            ("id", 7, "`id` that is not a string"),
+            ("key", None, "`key` that is not a string"),
+            ("type", ["boolean"], "`type` that is not a string"),
+            ("category", 3, "`category` that is not a string"),
+            ("translation_key", {}, "`translation_key` that is not a string"),
+            ("manageable", None, "`manageable` flag that is not a boolean"),
+            ("manageable", 1, "`manageable` flag that is not a boolean"),
+        ):
+            with self.subTest(field=field, value=value):
+                broken = self.build()
+                broken["setting_registry"][0][field] = value
+                self.assert_refused(broken, pattern)
+
+    def test_a_registry_entry_may_leave_its_optional_strings_null_or_absent(self):
+        document = self.build()
+        entry = document["setting_registry"][0]
+        entry["category"] = None
+        del entry["translation_key"]
+        dataset.validate(document)
+
+    def test_a_field_of_the_wrong_type_outside_the_registry_is_refused(self):
+        for path, value, pattern in (
+            (("canonical_minecraft_version",), 26, "canonical release is not a string"),
+            (("current_canonical_setting_ids", 0), 1, "current canonical setting id is not a string"),
+            (("schemas", 0, "id"), ["x"], "id that is not a string"),
+            (("schemas", 0, "supported"), [], "not keyed by setting id"),
+            (("schemas", 0, "supported"), None, "not keyed by setting id"),
+            (("releases", 0, "minecraft_version"), 26.2, "`minecraft_version` that is not a string"),
+            (("releases", 0, "schema"), {}, "`schema` that is not a string"),
+        ):
+            with self.subTest(path=path, value=value):
+                broken = self.build()
+                target = broken
+                for step in path[:-1]:
+                    target = target[step]
+                target[path[-1]] = value
+                self.assert_refused(broken, pattern)
+
+    def test_a_structure_of_the_wrong_shape_is_a_dataset_error_not_a_crash(self):
+        for key in ("setting_registry", "schemas", "releases"):
+            for value in ("text", {}, None):
+                with self.subTest(key=key, value=value):
+                    broken = self.build()
+                    broken[key] = value
+                    self.assert_refused(broken, "is not a list")
+            broken = self.build()
+            broken[key][0] = "text"
+            self.assert_refused(broken, "is not an object")
 
     def test_a_data_version_that_is_not_an_integer_is_refused(self):
         for value in ("1", True, 1.5, 2**63):

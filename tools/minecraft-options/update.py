@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import subprocess
 import sys
 import urllib.error
@@ -39,6 +38,7 @@ import dataset
 import fetch_language_catalogs
 import official_sources
 import preferences
+from file_io import read_json_object, read_text_or_empty, write_atomic
 from official_sources import SourceError
 from release_identity import is_release
 
@@ -76,6 +76,8 @@ def select_release(document: dict[str, Any], wanted: str | None) -> dict[str, An
         if any(version["id"] == target for version in document["versions"]):
             raise WorkflowError(f"`{target}` is not a release; only releases are analyzed")
         raise WorkflowError(f"`{target}` is not in Mojang's version manifest")
+    if not is_release(target):
+        raise WorkflowError(f"`{target}` is not a release identifier")
     if dataset.version_key(target) < dataset.version_key(MINIMUM_SUPPORTED_VERSION):
         raise WorkflowError(f"`{target}` predates the supported floor {MINIMUM_SUPPORTED_VERSION}")
     official_sources.require_version_id(entry["id"])
@@ -104,7 +106,7 @@ def client_jar(entry: dict[str, Any], cache: Path) -> Path:
             body = cached
     if body is None:
         body = official_sources.fetch_verified(entry.get("url"), metadata_sha1, metadata_label)
-        metadata_path.write_bytes(body)
+        write_atomic(metadata_path, body)
     metadata = official_sources.json_object(body, metadata_label)
 
     download = (metadata.get("downloads") or {}).get("client")
@@ -116,7 +118,7 @@ def client_jar(entry: dict[str, Any], cache: Path) -> Path:
     if target.exists() and hashlib.sha1(target.read_bytes()).hexdigest() == jar_sha1:  # noqa: S324
         return target
 
-    target.write_bytes(official_sources.fetch_verified(jar_url, jar_sha1, jar_label))
+    write_atomic(target, official_sources.fetch_verified(jar_url, jar_sha1, jar_label))
     return target
 
 
@@ -184,7 +186,10 @@ def normalized_records(analysis: Path, only: set[str] | None) -> list[dict[str, 
         raise WorkflowError(f"no normalized analyzer output under {directory}")
     by_version: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
     for path in sorted(directory.glob("*.json")):
-        record = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            record = read_json_object(path, "analyzer output")
+        except ValueError as error:
+            raise WorkflowError(f"{error}; run the analyzer again to regenerate it") from error
         version = record.get("minecraft_version")
         if not is_release(version):
             continue
@@ -211,16 +216,24 @@ def normalized_records(analysis: Path, only: set[str] | None) -> list[dict[str, 
 # -------------------------------------------------------------------- writing
 
 
-def read_bundled() -> dict[str, Any] | None:
-    if not BUNDLED_DATASET.exists():
+def _read_committed(path: Path, what: str) -> dict[str, Any] | None:
+    if not path.exists():
         return None
-    return json.loads(BUNDLED_DATASET.read_text(encoding="utf-8"))
+    try:
+        document = read_json_object(path, what)
+    except ValueError as error:
+        raise WorkflowError(f"{error}; restore it from version control") from error
+    if not document:
+        raise WorkflowError(f"{what} {path} is empty; restore it from version control")
+    return document
+
+
+def read_bundled() -> dict[str, Any] | None:
+    return _read_committed(BUNDLED_DATASET, "the bundled dataset")
 
 
 def read_bundled_preferences() -> dict[str, Any] | None:
-    if not BUNDLED_PREFERENCE_CATALOG.exists():
-        return None
-    return json.loads(BUNDLED_PREFERENCE_CATALOG.read_text(encoding="utf-8"))
+    return _read_committed(BUNDLED_PREFERENCE_CATALOG, "the bundled preference catalog")
 
 
 def preference_catalog_candidates(
@@ -236,10 +249,18 @@ def preference_catalog_candidates(
     """
     if preference_catalog is None:
         return []
-    accounted = {
-        field["canonical_id"] for descriptor in preference_catalog["descriptors"] for field in descriptor["fields"]
-    }
-    accounted.update(exclusion["canonical_id"] for exclusion in preference_catalog["exclusions"])
+    try:
+        accounted = {
+            field["canonical_id"]
+            for descriptor in preference_catalog["descriptors"]
+            for field in descriptor["fields"]
+        }
+        accounted.update(exclusion["canonical_id"] for exclusion in preference_catalog["exclusions"])
+    except (KeyError, TypeError) as error:
+        raise WorkflowError(
+            f"the bundled preference catalog {BUNDLED_PREFERENCE_CATALOG} is malformed "
+            f"({type(error).__name__}: {error}); restore it from version control"
+        ) from error
     registry = {entry["id"]: entry for entry in document["setting_registry"]}
     return sorted(
         setting_id
@@ -434,10 +455,11 @@ def main() -> int:
     online = not (args.check or args.offline)
 
     cache: Path = args.cache.resolve()
-    previous = read_bundled()
     catalogs: dict[str, dict[str, Any]] | None = None
 
     try:
+        previous = read_bundled()
+        preference_catalog = None if args.check else read_bundled_preferences()
         if args.from_analysis:
             analysis = args.from_analysis.resolve()
             records = normalized_records(analysis, None)
@@ -479,21 +501,32 @@ def main() -> int:
 
     text = dataset.dumps(merged)
     if args.check:
-        current = BUNDLED_DATASET.read_text(encoding="utf-8") if BUNDLED_DATASET.exists() else ""
+        try:
+            current = read_text_or_empty(BUNDLED_DATASET)
+        except OSError as error:
+            print(f"[update] cannot read {BUNDLED_DATASET}: {error}", file=sys.stderr)
+            return 1
         if current != text:
             print("[update] the committed dataset does not match what these inputs regenerate", file=sys.stderr)
             return 1
         print("[update] committed dataset is exactly what these inputs regenerate")
         return 0
 
-    BUNDLED_DATASET.parent.mkdir(parents=True, exist_ok=True)
-    BUNDLED_DATASET.write_text(text, encoding="utf-8")
+    try:
+        summary = summarize(merged, previous, changes, records, catalogs, preference_catalog)
+    except WorkflowError as error:
+        print(f"[update] {error}", file=sys.stderr)
+        return 1
 
     feed = cache / "feed" / "minecraft-options.json"
-    feed.parent.mkdir(parents=True, exist_ok=True)
-    feed.write_text(text, encoding="utf-8")
+    try:
+        write_atomic(BUNDLED_DATASET, text)
+        write_atomic(feed, text)
+    except OSError as error:
+        print(f"[update] could not write the generated dataset: {error}", file=sys.stderr)
+        return 1
 
-    for line in summarize(merged, previous, changes, records, catalogs, read_bundled_preferences()):
+    for line in summary:
         print(line)
     print(f"bundled dataset: {BUNDLED_DATASET}")
     print(f"remote feed to publish: {feed}")

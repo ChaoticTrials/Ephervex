@@ -62,6 +62,17 @@ class KeyCodeSpaceVerification(unittest.TestCase):
         jump = next(m for m in check["mismatches"] if m["binding"] == "key.jump")
         self.assertEqual((jump["code"], jump["expected_code"]), (44, 32))
 
+    def test_default_codes_that_decode_to_their_keys_verify_a_hid_release(self) -> None:
+        check = analyzer.verify_key_code_space(bindings(HID_KEYS, HID_MOUSE), "hid")
+
+        self.assertEqual(check["status"], "verified")
+        self.assertEqual(check["anchors_proven"], 12)
+
+    def test_glfw_codes_do_not_verify_as_hid(self) -> None:
+        check = analyzer.verify_key_code_space(bindings(GLFW_DEFAULTS, GLFW_MOUSE_DEFAULTS), "hid")
+
+        self.assertEqual(check["status"], "mismatch")
+
     def test_one_contradicting_anchor_fails_a_release_whose_other_anchors_agree(self) -> None:
         keys = dict(GLFW_DEFAULTS, **{"key.jump": 44})
 
@@ -138,6 +149,60 @@ class UnverifiedCodeSpaceHandling(unittest.TestCase):
 
         self.assertIsNone(dataset.codec_for(setting, analyzer.UNVERIFIED_CODE_SPACE))
         self.assertIsNotNone(dataset.representation_issue(setting, analyzer.UNVERIFIED_CODE_SPACE))
+
+
+class ModernCodeSpaceResolution(unittest.TestCase):
+    def test_glfw_codes_resolve_to_glfw_names(self) -> None:
+        records = bindings(GLFW_DEFAULTS, GLFW_MOUSE_DEFAULTS)
+
+        space, check = analyzer.resolve_key_code_space(records, legacy_codes=False)
+
+        self.assertEqual((space, check["status"]), ("glfw", "verified"))
+
+    def test_hid_codes_resolve_to_the_names_the_game_writes(self) -> None:
+        records = bindings(HID_KEYS, HID_MOUSE)
+
+        space, check = analyzer.resolve_key_code_space(records, legacy_codes=False)
+
+        self.assertEqual((space, check["status"]), ("hid", "verified"))
+        self.assertEqual(check["rejected"][0]["assumed"], "glfw")
+        serialized = {r["translation_key"]: r["serialized"] for r in records}
+        self.assertEqual(serialized["key.forward"], "key.keyboard.w")
+        self.assertEqual(serialized["key.sneak"], "key.keyboard.left.shift")
+        self.assertEqual(serialized["key.jump"], "key.keyboard.space")
+        self.assertEqual(serialized["key.attack"], "key.mouse.left")
+        self.assertEqual(serialized["key.use"], "key.mouse.right")
+        self.assertEqual(serialized["key.pickItem"], "key.mouse.middle")
+        self.assertTrue(all(r["confidence"] == r["codec_confidence"] == "high" for r in records))
+
+    def test_a_hid_code_the_game_has_no_name_for_stays_unproven(self) -> None:
+        records = bindings(HID_KEYS, HID_MOUSE) + [binding("key.odd", 400)]
+
+        analyzer.resolve_key_code_space(records, legacy_codes=False)
+
+        odd = next(r for r in records if r["translation_key"] == "key.odd")
+        self.assertIsNone(odd["serialized"])
+        self.assertEqual(odd["confidence"], "medium")
+
+    def test_codes_matching_neither_table_stay_unverified(self) -> None:
+        records = bindings({name: code + 1000 for name, code in GLFW_DEFAULTS.items()})
+
+        space, _ = analyzer.resolve_key_code_space(records, legacy_codes=False)
+
+        self.assertEqual(space, analyzer.UNVERIFIED_CODE_SPACE)
+        self.assertTrue(all(r["serialized"] is None for r in records))
+
+    def test_legacy_releases_are_only_checked_against_the_legacy_table(self) -> None:
+        space, _ = analyzer.resolve_key_code_space(bindings(HID_KEYS, HID_MOUSE), legacy_codes=True)
+
+        self.assertEqual(space, analyzer.UNVERIFIED_CODE_SPACE)
+
+    def test_a_named_code_space_gives_the_name_based_key_binding_codec(self) -> None:
+        setting = {"persisted_key": "key_key.jump", "type": "key_binding", "confidence": "high",
+                   "type_confidence": "high"}
+
+        for space in ("glfw", "hid"):
+            self.assertEqual(dataset.codec_for(setting, space), {"kind": "key_name_glfw"}, space)
 
 
 if __name__ == "__main__":

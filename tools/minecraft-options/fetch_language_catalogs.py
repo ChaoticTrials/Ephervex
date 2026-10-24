@@ -19,13 +19,13 @@ everything else.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import urllib.error
 from pathlib import Path
 from typing import Any
 
 import official_sources
+from file_io import read_json_object, stable_json
 from official_sources import SourceError
 
 TOOL_DIR = Path(__file__).resolve().parent
@@ -33,12 +33,6 @@ TOOL_DIR = Path(__file__).resolve().parent
 # Stored in every record collected with each downloaded document hash-verified.
 # Records without it predate that check and are fetched again.
 VERIFIED_RECORD_FORMAT = 2
-
-
-def stable_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-                    encoding="utf-8")
 
 
 def collect(version: str, entry: dict[str, Any]) -> dict[str, Any]:
@@ -95,11 +89,17 @@ def collect(version: str, entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def read_cached(path: Path) -> dict[str, Any] | None:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    """The cached record at `path`, or None when it is absent or damaged.
+
+    A damaged record is reported and then fetched again.
+    """
+    if not path.exists():
         return None
-    return value if isinstance(value, dict) else None
+    try:
+        return read_json_object(path, "cached language catalog")
+    except ValueError as error:
+        print(f"[cache] {error}; fetching it again", file=sys.stderr, flush=True)
+        return None
 
 
 def is_current(record: dict[str, Any], entry: dict[str, Any]) -> bool:
@@ -169,9 +169,14 @@ def main() -> int:
     versions = args.versions
     if not versions:
         if args.inventory.exists():
-            inventory = json.loads(args.inventory.read_text(encoding="utf-8"))
-            versions = sorted({j["detected_version"] for j in inventory["jars"]
-                               if j.get("detected_version")})
+            try:
+                inventory = read_json_object(args.inventory, "analyzer inventory")
+                versions = sorted({j["detected_version"] for j in inventory["jars"]
+                                   if j.get("detected_version")})
+            except (ValueError, KeyError, TypeError, AttributeError) as error:
+                print(f"[error] the analyzer inventory {args.inventory} is unusable ({error}); "
+                      "run the analyzer again or pass --versions", file=sys.stderr)
+                return 1
         else:
             print("no --versions and no inventory.json; nothing to do", file=sys.stderr)
             return 1

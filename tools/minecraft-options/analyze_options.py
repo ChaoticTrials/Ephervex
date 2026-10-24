@@ -14,10 +14,13 @@ it cannot prove stays `unknown` rather than being guessed.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
+import math
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -27,6 +30,7 @@ from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile, ZipFile
 
+from file_io import read_json_object, stable_json, write_atomic
 from release_identity import RELEASE_PATTERN, is_release, version_key
 
 TOOL_VERSION = "2.0.0"
@@ -51,12 +55,6 @@ def is_safe_class_name(name: str) -> bool:
 
 def weakest(*values: str) -> str:
     return min(values, key=lambda c: CONF_ORDER.get(c, 0))
-
-
-def stable_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(value, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
-    path.write_text(text, encoding="utf-8")
 
 
 def sha256(path: Path) -> str:
@@ -309,7 +307,7 @@ class Disassembler:
             if p.returncode:
                 self.errors.append({"class": key, "error": p.stderr.strip() or f"javap exit {p.returncode}"})
             else:
-                text = with_trailing_spaces(text, self.string_values(key))
+                text = with_exact_strings(text, self.string_values(key))
         except (OSError, subprocess.TimeoutExpired) as exc:
             self.errors.append({"class": key, "error": str(exc)})
             text = ""
@@ -331,11 +329,30 @@ class Disassembler:
 LDC_STRING_RE = re.compile(r"^(\s+\d+:\s+ldc(?:_w)?\s+#(\d+)\s+// String)(.*)$")
 
 
-def with_trailing_spaces(text: str, constants: dict[int, str]) -> str:
-    """Put back the trailing spaces javap leaves off a printed string constant.
+# javap prints a string constant with Java escapes: control characters, `\\`, `"` and `'`.
+JAVAP_ESCAPE_RE = re.compile(r"\\(?:u([0-9a-fA-F]{4})|(.))", re.DOTALL)
+JAVAP_SIMPLE_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+                        "\\": "\\", '"': '"', "'": "'"}
 
-    javap never prints trailing whitespace, so `"a "` reads as `a` and `"  "`
-    as an empty string. The class constant pool has the exact value.
+
+def unescape_javap_string(printed: str) -> str:
+    """The constant javap printed, with its Java escapes undone; an unknown escape is kept as written."""
+    def replace(m: re.Match[str]) -> str:
+        if m.group(1) is not None:
+            return chr(int(m.group(1), 16))
+        return JAVAP_SIMPLE_ESCAPES.get(m.group(2), m.group(0))
+    return JAVAP_ESCAPE_RE.sub(replace, printed)
+
+
+def escape_listing_string(value: str) -> str:
+    """Write a constant so it stays on one listing line and `unescape_javap_string` restores it."""
+    return value.replace("\\", "\\\\").replace("\n", "\\n")
+
+
+def with_exact_strings(text: str, constants: dict[int, str]) -> str:
+    """Replace each printed string constant with the exact value from the class constant pool.
+
+    javap never prints trailing whitespace, so `"a "` reads as `a` and `"  "` as an empty string.
     """
     lines = text.split("\n")
     for i, line in enumerate(lines):
@@ -343,9 +360,7 @@ def with_trailing_spaces(text: str, constants: dict[int, str]) -> str:
         value = constants.get(int(m.group(2))) if m else None
         if value is None:
             continue
-        spaces = len(value) - len(value.rstrip(" "))
-        if spaces:
-            lines[i] = line + (" " if not m.group(3) else "") + " " * spaces
+        lines[i] = m.group(1) + (" " + escape_listing_string(value) if value else "")
     return "\n".join(lines)
 
 
@@ -385,7 +400,7 @@ class Insn:
 
     def string(self) -> str | None:
         m = M_STRING.match(self.comment)
-        return (m.group(1) or "") if m else None
+        return unescape_javap_string(m.group(1) or "") if m else None
 
     def klass(self) -> str | None:
         m = M_CLASS.match(self.comment)
@@ -454,7 +469,8 @@ def parse_members(text: str) -> list[Member]:
     members: list[Member] = []
     signature: str | None = None
     insns: list[Insn] = []
-    for line in text.splitlines():
+    # javap prints U+2028, U+2029 and similar raw inside a string constant, so only "\n" ends a line.
+    for line in text.split("\n"):
         if MEMBER_RE.match(line):
             if signature is not None and insns:
                 members.append(Member(signature, insns))
@@ -691,7 +707,8 @@ def is_plain_arithmetic(member: Member) -> bool:
 
     `arithmetic_chain` reads the constant operands of arithmetic and skips
     everything else, so a body that calls `Math.pow` or branches would read as
-    the linear remainder of what it computes.
+    the linear remainder of what it computes. Every `Codec.xmap` and slider
+    mapping lambda is read only when this holds.
     """
     for ins in member.insns:
         if ins.op.startswith("if") or ins.op in ("goto", "goto_w", "tableswitch", "lookupswitch"):
@@ -704,7 +721,7 @@ def is_plain_arithmetic(member: Member) -> bool:
 
 
 def lambda_arithmetic(members: list[Member], owner: str, name: str,
-                      descriptor: str, plain: bool = False) -> list[dict[str, Any]] | None:
+                      descriptor: str) -> list[dict[str, Any]] | None:
     """The constant arithmetic one synthetic lambda performs, if it is that
     simple.
 
@@ -716,7 +733,7 @@ def lambda_arithmetic(members: list[Member], owner: str, name: str,
     wanted = [java_type(p) for p in params]
     want_ret = java_type(ret)
     matches = [m for m in members if m.name == name and member_types(m) == (wanted, want_ret)]
-    if len(matches) != 1 or (plain and not is_plain_arithmetic(matches[0])):
+    if len(matches) != 1 or not is_plain_arithmetic(matches[0]):
         return None
     return arithmetic_chain(matches[0].insns)
 
@@ -799,9 +816,42 @@ LWJGL2_KEYS = {1: "escape", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5", 7: "6", 8: "
 
 MOUSE_NAMES = {0: "left", 1: "right", 2: "middle"}
 
+# USB HID keyboard usage ids (the numbering SDL3 scancodes share), the table the
+# 26.3 client's key mappings use. Names are the ones the game writes to options.txt,
+# which are unchanged from the GLFW era. Only keys with a name in that file's
+# vocabulary are listed; any other code stays unnamed, so its binding stays unproven.
+HID_KEYS = {**{4 + i: chr(ord("a") + i) for i in range(26)},
+            **{30 + i: str(i + 1) for i in range(9)}, 39: "0",
+            40: "enter", 41: "escape", 42: "backspace", 43: "tab", 44: "space", 45: "minus",
+            46: "equal", 47: "left.bracket", 48: "right.bracket", 49: "backslash",
+            51: "semicolon", 52: "apostrophe", 53: "grave.accent", 54: "comma", 55: "period",
+            56: "slash", 57: "caps.lock",
+            **{58 + i: f"f{i + 1}" for i in range(12)},
+            70: "print.screen", 71: "scroll.lock", 72: "pause", 73: "insert", 74: "home",
+            75: "page.up", 76: "delete", 77: "end", 78: "page.down", 79: "right", 80: "left",
+            81: "down", 82: "up", 83: "num.lock", 84: "keypad.divide", 85: "keypad.multiply",
+            86: "keypad.subtract", 87: "keypad.add", 88: "keypad.enter",
+            **{89 + i: f"keypad.{i + 1}" for i in range(9)}, 98: "keypad.0", 99: "keypad.decimal",
+            103: "keypad.equal", 224: "left.control", 225: "left.shift", 226: "left.alt",
+            227: "left.win", 228: "right.control", 229: "right.shift", 230: "right.alt",
+            231: "right.win"}
+# SDL numbers mouse buttons from 1.
+HID_MOUSE_NAMES = {1: "left", 3: "right", 2: "middle"}
 
-def glfw_name(code: int) -> str | None:
-    return GLFW.get(code)
+# The numeric table each code space decodes keyboard defaults with, and its mouse buttons.
+KEY_TABLES = {"lwjgl2": LWJGL2_KEYS, "glfw": GLFW, "hid": HID_KEYS}
+MOUSE_TABLES = {"glfw": MOUSE_NAMES, "hid": HID_MOUSE_NAMES}
+
+
+def key_file_name(code: int, input_type: str, space: str) -> str | None:
+    """The name a release of this code space writes for a default, when the tables name it."""
+    if input_type == "mouse":
+        if space == "glfw":
+            return "key.mouse." + MOUSE_NAMES.get(code, str(code + 1))
+        name = MOUSE_TABLES.get(space, {}).get(code)
+        return None if name is None else "key.mouse." + name
+    name = KEY_TABLES[space].get(code)
+    return None if name is None else "key.keyboard." + name
 
 
 # ---------------------------------------------------------------------------
@@ -1767,7 +1817,7 @@ def is_enum_id_mapping(dis: Disassembler, pair: list[tuple[str, str, str]]) -> b
 
 
 def xmap_transform(dis: Disassembler, before: list[Insn], members: list[Member] | None,
-                   owner: str | None, plain: bool = False) -> list[dict[str, Any]] | None:
+                   owner: str | None) -> list[dict[str, Any]] | None:
     """The value-to-storage arithmetic of a `Codec.xmap` pair.
 
     `xmap(to, from)` takes the storage-to-value function first and the
@@ -1788,8 +1838,8 @@ def xmap_transform(dis: Disassembler, before: list[Insn], members: list[Member] 
         return None
     if decode_params[0] != encode_ret or encode_params[0] != decode_ret:
         return None
-    encode = lambda_arithmetic(members, owner, encode_name, encode_desc, plain)
-    decode = lambda_arithmetic(members, owner, decode_name, decode_desc, plain)
+    encode = lambda_arithmetic(members, owner, encode_name, encode_desc)
+    decode = lambda_arithmetic(members, owner, decode_name, decode_desc)
     if not encode or not decode:
         return None
     if invert_ops(encode) != decode:
@@ -1827,7 +1877,7 @@ def slider_step(dis: Disassembler, before: list[Insn], members: list[Member] | N
     """
     if not stored_range or slider.get("min") is None or slider.get("max") is None:
         return None
-    encode = xmap_transform(dis, before, members, owner, plain=True)
+    encode = xmap_transform(dis, before, members, owner)
     if not encode:
         return None
     decode = invert_ops(encode)
@@ -1952,7 +2002,7 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
     default_conf = "unknown"
     default_conditional = False
     enum_default_constant = None
-    for ins in tail:
+    for position, ins in enumerate(tail):
         ref = ins.method()
         fld = ins.field()
         if ref and ref[0] in ("java/lang/Integer", "java/lang/Double", "java/lang/Float",
@@ -1974,7 +2024,11 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
                 else:
                     default_value, default_conf, default_conditional = None, "unknown", True
         elif fld and enum_class and fld[0] == enum_class and fld[2] == f"L{enum_class};":
-            enum_default_constant = fld[1]
+            if runs_unconditionally(tail[position:position + 2]):
+                enum_default_constant = fld[1]
+            else:
+                enum_default_constant = None
+                default_value, default_conf, default_conditional = None, "unknown", True
 
     factory_params = split_descriptor(factory_desc)[0] if factory_desc else []
     if factory_desc and factory_params.count("Z") == 1 and factory_params[0] == "Ljava/lang/String;":
@@ -2245,12 +2299,9 @@ def extract_keybinds(dis: Disassembler, members: list[Member], legacy_codes: boo
                 encoding = "InputConstants key name string (for example key.keyboard.w)"
                 if code == -1:
                     serialized, confidence = "key.keyboard.unknown", "high"
-                elif input_type == "mouse" and code is not None:
-                    serialized = "key.mouse." + MOUSE_NAMES.get(code, str(code + 1))
-                    confidence = "high"
-                elif code is not None and glfw_name(code):
-                    serialized = "key.keyboard." + glfw_name(code)
-                    confidence = "high"
+                elif code is not None:
+                    serialized = key_file_name(code, input_type, "glfw")
+                    confidence = "high" if serialized else "medium"
             out.append({"translation_key": name, "persisted_key": "key_" + name,
                         "input_type": "mouse" if input_type == "mouse" else "keyboard",
                         "code": code, "serialized": serialized, "unbound": unbound,
@@ -2280,12 +2331,11 @@ UNVERIFIED_CODE_SPACE = "unverified"
 
 def verify_key_code_space(keybinds: list[dict[str, Any]], assumed: str) -> dict[str, Any]:
     """Check that the assumed code table decodes the anchor defaults to their keys."""
-    table = LWJGL2_KEYS if assumed == "lwjgl2" else GLFW
-    codes = {name: code for code, name in table.items()}
-    mouse_codes = {name: code for code, name in MOUSE_NAMES.items()}
+    codes = {name: code for code, name in KEY_TABLES[assumed].items()}
+    mouse_codes = {name: code for code, name in MOUSE_TABLES.get(assumed, {}).items()}
     expected: dict[str, tuple[str, int]] = {
         binding: ("keyboard", codes[key]) for binding, key in KEY_CODE_ANCHORS.items()}
-    if assumed == "glfw":
+    if assumed in MOUSE_TABLES:
         expected.update({binding: ("mouse", mouse_codes[button])
                          for binding, button in MOUSE_CODE_ANCHORS.items()})
     by_name = {kb["translation_key"]: kb for kb in keybinds}
@@ -2307,6 +2357,29 @@ def verify_key_code_space(keybinds: list[dict[str, Any]], assumed: str) -> dict[
         status = "verified"
     return {"assumed": assumed, "status": status, "anchors_proven": proven,
             "anchors_required": MIN_KEY_CODE_ANCHORS, "mismatches": mismatches}
+
+
+def resolve_key_code_space(keybinds: list[dict[str, Any]], legacy_codes: bool) -> tuple[str, dict[str, Any]]:
+    """The proven code space of a release's key bindings, and the check that proved it.
+
+    A modern release is first assumed to number keys like GLFW. When that is
+    contradicted outright, the HID numbering is tried; it is adopted only when
+    its own anchors verify, and its names are then written over the bindings.
+    """
+    if legacy_codes:
+        check = verify_key_code_space(keybinds, "lwjgl2")
+        return apply_key_code_check(keybinds, check), check
+    check = verify_key_code_space(keybinds, "glfw")
+    if check["status"] == "mismatch":
+        hid_check = verify_key_code_space(keybinds, "hid")
+        if hid_check["status"] == "verified":
+            hid_check["rejected"] = [{"assumed": "glfw", "mismatches": check["mismatches"]}]
+            for kb in keybinds:
+                if kb["code"] is not None and not kb["unbound"]:
+                    kb["serialized"] = key_file_name(kb["code"], kb["input_type"], "hid")
+                    kb["confidence"] = kb["codec_confidence"] = "high" if kb["serialized"] else "medium"
+            check = hid_check
+    return apply_key_code_check(keybinds, check), check
 
 
 def apply_key_code_check(keybinds: list[dict[str, Any]], check: dict[str, Any]) -> str:
@@ -2349,6 +2422,43 @@ def apply_ops(value: int | float, ops: list[dict[str, Any]]) -> int | float | No
             return None
     out = round(out, 6)
     return int(out) if isinstance(value, int) and not isinstance(value, bool) and out.is_integer() else out
+
+
+_ARITHMETIC = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b,
+               ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b if b != 0 else None}
+
+
+def evaluate_formula(expression: str | None, name: str, value: int | float) -> float | None:
+    """The result of a recovered transform's formula text for one value of `name`.
+
+    Formulas are the plain arithmetic `formula` writes. None means the text is
+    absent or anything other than that arithmetic, never a partly evaluated result.
+    """
+    if not expression:
+        return None
+    try:
+        tree = ast.parse(expression, mode="eval")
+    except (SyntaxError, ValueError, RecursionError):
+        return None
+
+    def walk(node: ast.AST) -> float | None:
+        if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+            return float(node.value)
+        if isinstance(node, ast.Name) and node.id == name:
+            return float(value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            operand = walk(node.operand)
+            return None if operand is None else (-operand if isinstance(node.op, ast.USub) else operand)
+        if isinstance(node, ast.BinOp) and type(node.op) in _ARITHMETIC:
+            left, right = walk(node.left), walk(node.right)
+            return None if left is None or right is None else _ARITHMETIC[type(node.op)](left, right)
+        return None
+
+    try:
+        result = walk(tree.body)
+    except RecursionError:
+        return None
+    return None if result is None else round(result, 6) + 0.0
 
 
 def jvm_default(descriptor: str | None, ops: list[dict[str, Any]]) -> bool | int | float | None:
@@ -2848,8 +2958,7 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                             "file units; the loader itself does not clamp"}
 
         keybinds = extract_keybinds(dis, members, legacy_codes, option_class)
-        code_check = verify_key_code_space(keybinds, "lwjgl2" if legacy_codes else "glfw")
-        code_space = apply_key_code_check(keybinds, code_check)
+        code_space, code_check = resolve_key_code_space(keybinds, legacy_codes)
         sound_enum, part_enum = field_generic_types(root_text)
         sounds = dynamic_family(dis, "soundCategory_", sound_enum, constants,
                                 sound_default_volume(members, sound_enum))
@@ -3150,14 +3259,31 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
 # Cross-version products
 # ---------------------------------------------------------------------------
 
+def has_known_default(setting: dict[str, Any]) -> bool:
+    """A key binding's default is always a record, so it is known only once it has a serialized key."""
+    default = setting.get("default")
+    if setting["type"] == "key_binding":
+        return bool((default or {}).get("serialized"))
+    return default is not None
+
+
+def has_proven_domain(setting: dict[str, Any]) -> bool:
+    """An explicit numeric range, an enumerated enum domain, or an inherently closed boolean or key-binding domain."""
+    return bool(setting.get("numeric") or (setting.get("allowed_values") or {}).get("values")
+                or setting["type"] in ("boolean", "key_binding"))
+
+
+def percent(part: int, whole: int) -> str:
+    return f"{100 * part / whole:.1f}%" if whole else "n/a"
+
+
 def make_latest_schema(latest: dict[str, Any]) -> dict[str, Any]:
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for setting in latest["settings"]:
         groups[setting["category"]].append(setting)
     typed = [s for s in latest["settings"] if s["type"] not in ("unknown",)]
-    with_default = [s for s in latest["settings"] if s.get("default") is not None]
-    with_domain = [s for s in latest["settings"]
-                   if s.get("numeric") or (s.get("allowed_values") or {}).get("values")]
+    with_default = [s for s in latest["settings"] if has_known_default(s)]
+    with_domain = [s for s in latest["settings"] if has_proven_domain(s)]
     return {"schema_version": ANALYSIS_SCHEMA_VERSION, "canonical_minecraft_version": latest["minecraft_version"],
             "source_jar_sha256": latest["jar_sha256"], "setting_count": len(latest["settings"]),
             "fully_typed_count": len(typed), "with_default_count": len(with_default),
@@ -3332,13 +3458,16 @@ def keybinding_eras(versions: list[dict[str, Any]]) -> list[dict[str, Any]]:
         space = v.get("keybinding_code_space")
         encodings = sorted({s["file_encoding"] for s in v["settings"] if s["type"] == "key_binding"})
         signature = (space, tuple(encodings))
+        count = sum(1 for s in v["settings"] if s["type"] == "key_binding")
         if eras and eras[-1]["_signature"] == signature:
             eras[-1]["through"] = v["minecraft_version"]
+            eras[-1]["binding_count_min"] = min(eras[-1]["binding_count_min"], count)
+            eras[-1]["binding_count_max"] = max(eras[-1]["binding_count_max"], count)
             continue
         eras.append({"_signature": signature, "from": v["minecraft_version"],
                      "through": v["minecraft_version"], "code_space": space,
                      "file_encodings": encodings,
-                     "binding_count": sum(1 for s in v["settings"] if s["type"] == "key_binding")})
+                     "binding_count_min": count, "binding_count_max": count})
     for era in eras:
         era.pop("_signature")
         era["confidence"] = "high"
@@ -3355,6 +3484,8 @@ def facet_eras(versions: list[dict[str, Any]], key: str) -> list[dict[str, Any]]
                   "quoting": written_quoting(setting) if setting else None,
                   "value_to_storage": setting.get("value_to_storage") if setting else None,
                   "storage_to_value": setting.get("storage_to_value") if setting else None,
+                  "transform_resolved": setting.get("transform_resolved") if setting else None,
+                  "default_space": setting.get("default_space") if setting else None,
                   "numeric": setting.get("numeric") if setting else None,
                   "ui_domain": setting.get("ui_domain") if setting else None,
                   "default": setting.get("default") if setting else None}
@@ -3369,6 +3500,75 @@ def facet_eras(versions: list[dict[str, Any]], key: str) -> list[dict[str, Any]]
     return eras
 
 
+def enum_tokens(setting: dict[str, Any]) -> list[Any] | None:
+    """An enum's persisted tokens in order; None when it has none or any is unread."""
+    values = (setting.get("allowed_values") or {}).get("values")
+    tokens = [v.get("persisted") for v in values or []]
+    return tokens if tokens and None not in tokens else None
+
+
+def file_space_default(setting: dict[str, Any]) -> Any:
+    """The default as written to the file; None when it is unknown or its conversion is unread.
+
+    A default in the UI space goes through the storage transform first, so two
+    releases that differ only in which space they record it in compare equal.
+    """
+    default = setting.get("default")
+    if default is None or setting.get("default_space") != "ui":
+        return default
+    if isinstance(default, (int, float)) and not isinstance(default, bool):
+        return evaluate_formula(setting.get("value_to_storage"), "value", default)
+    return None
+
+
+# A default stored as a float in one release and a double in the next differs by about 1e-8.
+DEFAULT_RELATIVE_TOLERANCE = 1e-6
+
+
+def same_default(old: Any, new: Any) -> bool:
+    numbers = all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (old, new))
+    return math.isclose(old, new, rel_tol=DEFAULT_RELATIVE_TOLERANCE, abs_tol=1e-9) if numbers else old == new
+
+
+def default_change(old: dict[str, Any], new: dict[str, Any], same_code_space: bool) -> dict[str, Any] | None:
+    """A change of the file-space default between two releases; None when unchanged or not comparable.
+
+    A key binding's default is a different record in each code space, which the
+    code-space crosscheck covers instead.
+    """
+    if new["type"] == "key_binding" or old["type"] == "key_binding":
+        if not (new["type"] == old["type"] and same_code_space):
+            return None
+        before, after = old.get("default") or {}, new.get("default") or {}
+        if not (before.get("serialized") and after.get("serialized")):
+            return None
+        if before["serialized"] == after["serialized"]:
+            return None
+        return {"key": new["persisted_key"], "from": before, "to": after}
+    before, after = file_space_default(old), file_space_default(new)
+    if before is None or after is None or same_default(before, after):
+        return None
+    return {"key": new["persisted_key"], "from": before, "to": after}
+
+
+def persisted_key_renames(previous: dict[str, Any], item: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keys the same single caption proves were renamed between two consecutive releases."""
+    index, older = key_index(item), translation_index(previous)
+    claims = Counter((s["translation_key"], s["type"] == "key_binding")
+                     for s in item["settings"] if s.get("translation_key"))
+    renames = []
+    for key in sorted(set(index) - set(key_index(previous))):
+        setting = index[key]
+        caption = setting.get("translation_key")
+        if not caption:
+            continue
+        old = renamed_from(setting, older.get(caption, []), set(index),
+                           claims[(caption, setting["type"] == "key_binding")])
+        if old is not None:
+            renames.append({"from": old["persisted_key"], "to": key, "translation_key": caption})
+    return renames
+
+
 def schema_changes(versions: list[dict[str, Any]], canonical_keys: set[str]) -> dict[str, Any]:
     changes = []
     previous = None
@@ -3381,21 +3581,19 @@ def schema_changes(versions: list[dict[str, Any]], canonical_keys: set[str]) -> 
             union = keys | oldkeys
             similarity = len(keys & oldkeys) / len(union) if union else 1.0
             type_changes, default_changes, numeric_changes, enum_changes, serialization_changes = [], [], [], [], []
+            same_code_space = previous.get("keybinding_code_space") == item.get("keybinding_code_space")
             for key in sorted(keys & oldkeys):
                 new, old = index[key], prev_index[key]
                 if new["type"] != old["type"] and "unknown" not in (new["type"], old["type"]):
                     type_changes.append({"key": key, "from": old["type"], "to": new["type"]})
-                if (new.get("default") != old.get("default")
-                        and new.get("default") is not None and old.get("default") is not None):
-                    default_changes.append({"key": key, "from": old["default"], "to": new["default"]})
+                changed_default = default_change(old, new, same_code_space)
+                if changed_default:
+                    default_changes.append(changed_default)
                 if (new.get("numeric") or {}) != (old.get("numeric") or {}) and new.get("numeric") and old.get("numeric"):
                     numeric_changes.append({"key": key, "from": old["numeric"], "to": new["numeric"]})
-                new_domain = (new.get("allowed_values") or {}).get("values")
-                old_domain = (old.get("allowed_values") or {}).get("values")
-                if new_domain and old_domain and new_domain != old_domain:
-                    enum_changes.append({"key": key,
-                                         "from": [v["persisted"] for v in old_domain],
-                                         "to": [v["persisted"] for v in new_domain]})
+                new_tokens, old_tokens = enum_tokens(new), enum_tokens(old)
+                if new_tokens is not None and old_tokens is not None and new_tokens != old_tokens:
+                    enum_changes.append({"key": key, "from": old_tokens, "to": new_tokens})
                 wire_new = (new["file_encoding"], written_quoting(new), new.get("value_to_storage"),
                             new.get("storage_to_value"))
                 wire_old = (old["file_encoding"], written_quoting(old), old.get("value_to_storage"),
@@ -3419,7 +3617,8 @@ def schema_changes(versions: list[dict[str, Any]], canonical_keys: set[str]) -> 
                                   f"{item.get('keybinding_code_space')}")
             changes.append({"from": previous["minecraft_version"], "to": item["minecraft_version"],
                             "options_added": added, "options_removed": removed,
-                            "persisted_key_renames": [], "type_changes": type_changes,
+                            "persisted_key_renames": persisted_key_renames(previous, item),
+                            "type_changes": type_changes,
                             "default_changes": default_changes, "numeric_changes": numeric_changes,
                             "enum_changes": enum_changes, "serialization_changes": serialization_changes,
                             "keybind_encoding_change": keybind_change,
@@ -3485,6 +3684,10 @@ def schema_changes(versions: list[dict[str, Any]], canonical_keys: set[str]) -> 
                             "on both sides.", "Representation comparisons ignore facets that stayed unresolved."]}
 
 
+# LWJGL 2 `Keyboard.KEY_NONE`, the code a binding holds when it is unbound.
+LWJGL2_UNBOUND_CODE = 0
+
+
 def keycode_crosscheck(versions: list[dict[str, Any]]) -> dict[str, Any]:
     """Derive LWJGL2 -> GLFW default-code pairs locally, then compare with the reference table."""
     legacy = [v for v in versions if v.get("keybinding_code_space") == "lwjgl2"]
@@ -3501,7 +3704,7 @@ def keycode_crosscheck(versions: list[dict[str, Any]]) -> dict[str, Any]:
         new_name = after_map[name]["default"]["serialized"]
         if old_code is None or new_code is None:
             continue
-        expected = LWJGL2_KEYS.get(old_code)
+        expected = "unknown" if old_code == LWJGL2_UNBOUND_CODE else LWJGL2_KEYS.get(old_code)
         observed = new_name.split("key.keyboard.")[-1] if new_name and new_name.startswith("key.keyboard.") else None
         entry = {"binding": name, "lwjgl2_code": old_code, "glfw_code": new_code,
                  "glfw_name": observed, "reference_table_name": expected}
@@ -3518,18 +3721,20 @@ def keycode_crosscheck(versions: list[dict[str, Any]]) -> dict[str, Any]:
             "method": "Pair every key binding whose translation key exists on both sides of the boundary and "
                       "compare its pre-1.13 LWJGL2 default code with its post-1.13 GLFW default name.",
             "assumption": "Default bindings were not re-assigned across the boundary release; agreement with "
-                          "the independent LWJGL2 reference table is what raises confidence.",
+                          "the independent LWJGL2 reference table is what raises confidence. A binding whose "
+                          "code the table does not cover (the mouse buttons) stays unresolved rather than guessed.",
             "reference_table": {"source": "org.lwjgl.input.Keyboard (LWJGL 2) constants",
                                 "provenance": "external constant table; LWJGL is not bundled in any analysed JAR",
                                 "confidence": "medium"},
             "agreement_count": len(agree), "disagreement_count": len(disagree),
             "unresolved_count": len(unresolved),
-            "confidence": "high" if agree and not disagree else "medium",
+            "confidence": "high" if agree and not disagree and not unresolved else "medium",
             "pairs": pairs,
             "conversion_rule": "A pre-1.13 options.txt stores key_<translation key>:<LWJGL2 integer>. A 1.13+ "
                                "options.txt stores key_<translation key>:key.keyboard.<name> or key.mouse.<name>. "
-                               "Converting between the two requires the LWJGL2 code table above; -1 means "
-                               "explicitly unbound on both sides (key.keyboard.unknown from 1.13).",
+                               "Converting between the two requires the LWJGL2 code table above; an unbound "
+                               f"binding is {LWJGL2_UNBOUND_CODE} before 1.13 and key.keyboard.unknown from "
+                               "1.13.",
             "disagreements": disagree}
 
 
@@ -3540,9 +3745,9 @@ def load_language_cache(cache: Path, versions: list[str]) -> dict[str, dict[str,
         if not path.exists():
             continue
         try:
-            out[version] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
+            out[version] = read_json_object(path, "cached language catalog")
+        except ValueError as error:
+            print(f"[analyzer] {error}; run fetch_language_catalogs.py to fetch it again", file=sys.stderr)
     return out
 
 
@@ -3553,9 +3758,30 @@ def verified_languages(record: dict[str, Any]) -> dict[str, Any] | None:
     return record.get("languages") or {}
 
 
+def lang_key_stability(releases: list[dict[str, Any]]) -> dict[str, Any]:
+    """Whether the `lang` option reads and writes the same way in every analyzed release."""
+    eras = facet_eras(releases, "lang")
+    if not eras:
+        return {"status": "unproven", "detail": "No release was analyzed, so nothing proves how `lang` is stored."}
+    if len(eras) == 1 and eras[0]["type"] is not None:
+        era = eras[0]
+        return {"status": "resolved",
+                "detail": f"The `lang` persisted key is a {era['type']} stored as {era['file_encoding']} "
+                          f"in every analyzed supported release ({releases[0]['minecraft_version']} through "
+                          f"{releases[-1]['minecraft_version']})."}
+    spans = []
+    for era in eras:
+        span = era["from"] if era["from"] == era["through"] else f"{era['from']}-{era['through']}"
+        spans.append(f"{span}: " + ("absent" if era["type"] is None else f"{era['type']}, {era['file_encoding']}"))
+    return {"status": "varies",
+            "detail": "The `lang` persisted key is not stored the same way in every analyzed release ("
+                      + "; ".join(spans) + ")."}
+
+
 def language_output(latest_rec: dict[str, Any], latest_jar: Path, latest_norm: dict[str, Any],
-                    cache: dict[str, dict[str, Any]], versions: list[str]) -> dict[str, Any]:
+                    cache: dict[str, dict[str, Any]], releases: list[dict[str, Any]]) -> dict[str, Any]:
     canonical_version = latest_rec["detected_version"]
+    versions = [release["minecraft_version"] for release in releases]
     entries = []
     with ZipFile(latest_jar) as zf:
         in_jar = "assets/minecraft/lang/en_us.json" in zf.namelist()
@@ -3598,12 +3824,15 @@ def language_output(latest_rec: dict[str, Any], latest_jar: Path, latest_norm: d
             "asset_index_id": (record.get("asset_index") or {}).get("id"),
             "asset_index_sha1": (record.get("asset_index") or {}).get("sha1"),
             "pack_mcmeta_sha1": (record.get("pack_mcmeta") or {}).get("sha1"),
-            "missing_from_canonical": sorted(set(codes) - set(catalog)),
-            "absent_here_but_canonical": sorted(set(catalog) - set(codes)),
+            # Without a verified canonical catalog there is nothing to compare against.
+            "missing_from_canonical": sorted(set(codes) - set(catalog)) if catalog else None,
+            "absent_here_but_canonical": sorted(set(catalog) - set(codes)) if catalog else None,
         }
     setting = next((s for s in latest_norm["settings"] if s["persisted_key"] == "lang"), None)
+    stability = lang_key_stability(releases)
+    unverified = [version for version, entry in per_version.items() if entry["status"] != "ok"]
     return {"schema_version": ANALYSIS_SCHEMA_VERSION, "canonical_version": canonical_version,
-            "complete": bool(entries and verified is not None),
+            "complete": bool(catalog),
             "count": len(entries), "languages": entries,
             "per_version_catalog": per_version,
             "option": {"persisted_key": "lang",
@@ -3644,11 +3873,11 @@ def language_output(latest_rec: dict[str, Any], latest_jar: Path, latest_norm: d
                     {"class": "net/minecraft/client/resources/language/LanguageInfo",
                      "fields": ["region", "name", "bidirectional"]}]},
             "older_compatibility": {
-                "status": "resolved",
-                "detail": "The `lang` persisted key and its plain-string encoding are stable across every "
-                          "analysed supported release; the set of valid codes is version dependent and is "
-                          "enumerated per release in `per_version_catalog`.",
-                "per_code_support": "enumerated",
+                "status": stability["status"],
+                "detail": f"{stability['detail']} The set of valid codes is version dependent and is "
+                          "enumerated per release in `per_version_catalog` where that catalog is verified.",
+                "per_code_support": "enumerated" if not unverified
+                else "not verified for " + ", ".join(unverified),
                 "rule": "A canonical code may be written to an older release only if it appears in that "
                         "release's own catalog; otherwise the client falls back to the default language."}}
 
@@ -3669,10 +3898,61 @@ def count_status(matrix: dict[str, Any], version: str, statuses: tuple[str, ...]
     return sorted(out)
 
 
+def write_authoritative(row: dict[str, Any], entry: dict[str, Any] | None) -> bool:
+    """Whether a matrix entry may be written: identical or mapped, proven at high confidence, and managed."""
+    return bool(entry and entry["status"] in ("identical", "mapped") and entry["confidence"] == "high"
+                and row.get("ephervex_manageable", True))
+
+
+def count_span(low: int, high: int) -> str:
+    return str(low) if low == high else f"{low}-{high}"
+
+
+def fov_file_domain(era: dict[str, Any]) -> tuple[float, float] | None:
+    """The values an fov era writes at the ends of its UI range, after the storage transform."""
+    numeric = era.get("numeric")
+    if not numeric or era.get("transform_resolved") is False:
+        return None
+    ends = [evaluate_formula(era.get("value_to_storage"), "value", numeric[end]) if era.get("value_to_storage")
+            else float(numeric[end]) for end in ("min", "max")]
+    return None if None in ends else (min(ends), max(ends))
+
+
+FOV_EXPERIMENT_SLIDER = (30, 70, 110)
+
+
+def fov_experiment(changes: dict[str, Any] | None) -> str:
+    """The FOV experiment, with the stored values each release's recovered transform predicts."""
+    def expected(version: str) -> list[float] | None:
+        era = next((e for e in (changes or {}).get("fov_eras") or []
+                    if version_key(e["from"]) <= version_key(version) <= version_key(e["through"])), None)
+        if era is None or era["type"] is None or era.get("transform_resolved") is False:
+            return None
+        values = [evaluate_formula(era["value_to_storage"], "value", v) if era.get("value_to_storage")
+                  else float(v) for v in FOV_EXPERIMENT_SLIDER]
+        return None if None in values else values
+
+    def spoken(values: list[float]) -> str:
+        return f"{values[0]!r}, {values[1]!r} and {values[2]!r}"
+
+    first, second = expected("1.18.2"), expected("1.19")
+    text = ("**FOV storage transform boundary.** Minecraft 1.18.2: launch a clean profile; record "
+            "`options.txt`; set FOV to 30, 70 and 110 in the video settings; exit; diff only key `fov`. ")
+    text += (f"Expect {spoken(first)}. " if first else "The analyzer recovered no expected values for 1.18.2. ")
+    if second is None:
+        text += "The analyzer recovered no expected values for 1.19."
+    elif second == first:
+        text += "Repeat on 1.19 and expect the same values."
+    else:
+        text += f"Repeat on 1.19 and expect {spoken(second)}."
+    return "- " + text
+
+
 def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
            normalized: list[dict[str, Any]], languages: dict[str, Any] | None,
            changes: dict[str, Any] | None, matrix: dict[str, Any] | None,
-           crosscheck: dict[str, Any] | None, command: str) -> str:
+           crosscheck: dict[str, Any] | None, command: str,
+           canonical_problem: str | None = None) -> str:
     identified = [x for x in inventory if x.get("detected_version")]
     lines = ["# Minecraft options.txt static research", "",
              "Static analysis only: JARs are read as ZIP/class data and `javap` disassembles the "
@@ -3683,21 +3963,19 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
     if latest:
         settings = latest["settings"]
         typed = [s for s in settings if s["type"] != "unknown"]
-        defaults = [s for s in settings if s.get("default") is not None]
-        domains = [s for s in settings
-                   if s.get("numeric") or (s.get("allowed_values") or {}).get("values")
-                   or s["type"] in ("boolean", "key_binding")]
+        defaults = [s for s in settings if has_known_default(s)]
+        domains = [s for s in settings if has_proven_domain(s)]
         sounds = [s for s in settings if s["category"] == "Sound & Music"]
         keys = [s for s in settings if s["type"] == "key_binding"]
-        key_defaults = sum(1 for s in keys if (s.get("default") or {}).get("serialized"))
+        key_defaults = sum(1 for s in keys if has_known_default(s))
         unmanaged = [s for s in settings if not s.get("ephervex_manageable", True)]
         total = len(settings)
         lines += [f"- Newest stable supported release: **{latest['minecraft_version']}**.",
                   f"- Canonical settings recovered: **{total}**.",
-                  f"- Fully typed: **{len(typed)}/{total}** ({100 * len(typed) / total:.1f}%).",
-                  f"- Known defaults: **{len(defaults)}/{total}** ({100 * len(defaults) / total:.1f}%).",
+                  f"- Fully typed: **{len(typed)}/{total}** ({percent(len(typed), total)}).",
+                  f"- Known defaults: **{len(defaults)}/{total}** ({percent(len(defaults), total)}).",
                   f"- Proven domain (numeric range, enum domain or boolean/key-binding domain): "
-                  f"**{len(domains)}/{total}** ({100 * len(domains) / total:.1f}%).",
+                  f"**{len(domains)}/{total}** ({percent(len(domains), total)}).",
                   f"- Sound & Music settings: **{len(sounds)}**.",
                   f"- Key bindings: **{len(keys)}** with **{key_defaults}/{len(keys)}** resolved default "
                   f"serialisations.",
@@ -3705,20 +3983,20 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                   f"- Language catalog: **{'complete' if (languages or {}).get('complete') else 'incomplete'}**; "
                   f"**{languages['count'] if languages else 0}** codes at "
                   f"{latest['minecraft_version']}, enumerated per release."]
+    elif canonical_problem:
+        lines += [f"- Canonical release: **none**. {canonical_problem}."]
 
     lines += ["", "## 1-4. Canonical coverage", ""]
     if latest:
         settings = latest["settings"]
         total = len(settings)
         typed = [s for s in settings if s["type"] != "unknown"]
-        defaults = [s for s in settings if s.get("default") is not None]
-        domains = [s for s in settings
-                   if s.get("numeric") or (s.get("allowed_values") or {}).get("values")
-                   or s["type"] in ("boolean", "key_binding")]
+        defaults = [s for s in settings if has_known_default(s)]
+        domains = [s for s in settings if has_proven_domain(s)]
         untyped = [s["persisted_key"] for s in settings if s["type"] == "unknown"]
-        no_default = [s["persisted_key"] for s in settings if s.get("default") is None]
+        no_default = [s["persisted_key"] for s in settings if not has_known_default(s)]
         lines += [f"1. Canonical {latest['minecraft_version']} settings: **{total}**.",
-                  f"2. Fully typed: **{len(typed)}** ({100 * len(typed) / total:.1f}%). "
+                  f"2. Fully typed: **{len(typed)}** ({percent(len(typed), total)}). "
                   + ("Remaining untyped: " + ", ".join(f"`{k}`" for k in untyped) + "." if untyped
                      else "No canonical setting is untyped."),
                   f"3. Known defaults: **{len(defaults)}**. Without a statically provable default: "
@@ -3734,9 +4012,12 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
             lines.append(f"| {name} | {by_category[name]} |")
 
     lines += ["", "## 5. Canonical settings safely representable per release", "",
-              "`identical` and `mapped` at high confidence are write-authoritative. `unknown` must never be "
+              "`identical` and `mapped` at high confidence are write-authoritative, provided Ephervex manages "
+              "the setting. The `identical` and `mapped` columns count every row of that status at any "
+              "confidence, so they can exceed the write-authoritative column. `unknown` must never be "
               "written; `unsupported` means the key provably did not exist yet.", "",
-              "| Release | identical | mapped | unsupported | unknown |", "|---|---:|---:|---:|---:|"]
+              "| Release | write-authoritative | identical | mapped | unsupported | unknown |",
+              "|---|---:|---:|---:|---:|---:|"]
     if matrix and normalized:
         for v in normalized:
             name = v["minecraft_version"]
@@ -3745,7 +4026,8 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                 entry = row["versions"].get(name)
                 if entry:
                     counts[entry["status"]] += 1
-            lines.append(f"| {name} | {counts['identical']} | {counts['mapped']} | "
+                    counts["authoritative"] += write_authoritative(row, entry)
+            lines.append(f"| {name} | {counts['authoritative']} | {counts['identical']} | {counts['mapped']} | "
                          f"{counts['unsupported']} | {counts['unknown']} |")
 
     if matrix and normalized and latest:
@@ -3784,7 +4066,8 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
     if changes:
         for era in changes["keybinding_eras"]:
             span = era["from"] if era["from"] == era["through"] else f"{era['from']}–{era['through']}"
-            lines.append(f"- **{span}** - code space `{era['code_space']}`, {era['binding_count']} bindings, "
+            bindings = count_span(era["binding_count_min"], era["binding_count_max"])
+            lines.append(f"- **{span}** - code space `{era['code_space']}`, {bindings} bindings, "
                          f"encoding: {'; '.join(era['file_encodings'])}.")
     if crosscheck and crosscheck.get("status") == "derived":
         lines += ["",
@@ -3807,7 +4090,15 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
             transform = era.get("value_to_storage") or "none (stored directly)"
             numeric, ui = era.get("numeric"), era.get("ui_domain")
             if numeric:
-                domain = f"{numeric['min']}..{numeric['max']} (codec-proven)"
+                file_domain = fov_file_domain(era)
+                if file_domain is None:
+                    domain = (f"unresolved (the {numeric['min']}..{numeric['max']} range is before the "
+                              "storage transform)")
+                elif era.get("value_to_storage"):
+                    domain = (f"{file_domain[0]}..{file_domain[1]} (the {numeric['min']}..{numeric['max']} "
+                              "range through the storage transform)")
+                else:
+                    domain = f"{numeric['min']}..{numeric['max']} (codec-proven)"
             elif ui:
                 domain = (f"{ui['file_min']}..{ui['file_max']} (from the {ui['ui_min']:g}..{ui['ui_max']:g} "
                           "degree slider through the storage transform)")
@@ -3815,7 +4106,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
                 domain = "unresolved"
             lines.append(f"- **{span}** - type `{era['type']}`, encoding {era['file_encoding']}, "
                          f"stored value = {transform}, in-file domain {domain}, "
-                         f"default {era['default']!r}.")
+                         f"default {era['default']!r}{' (UI value)' if era.get('default_space') == 'ui' else ''}.")
 
     lines += ["", "## 10. Sound & Music compatibility", ""]
     if matrix and normalized:
@@ -3825,8 +4116,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
         lines += ["| Canonical setting | Key | Safe from | Notes |", "|---|---|---|---|"]
         for row in sorted(sound_rows, key=lambda r: r["canonical_id"]):
             safe = [v["minecraft_version"] for v in normalized
-                    if row["versions"].get(v["minecraft_version"], {}).get("status") in ("identical", "mapped")
-                    and row["versions"][v["minecraft_version"]]["confidence"] == "high"]
+                    if write_authoritative(row, row["versions"].get(v["minecraft_version"]))]
             unsupported_from = [v["minecraft_version"] for v in normalized
                                 if row["versions"].get(v["minecraft_version"], {}).get("status") == "unsupported"]
             note = ("provably absent up to and including " + unsupported_from[-1]) if unsupported_from else ""
@@ -3865,9 +4155,7 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
               "## 13. Minimal empirical experiments that would resolve them", "",
               "Each experiment is a clean-profile run followed by a single-key diff. None of these were "
               "performed here.", ""]
-    lines += ["- **FOV storage transform boundary.** Minecraft 1.18.2: launch a clean profile; record "
-              "`options.txt`; set FOV to 30, 70 and 110 in the video settings; exit; diff only key `fov`. "
-              "Expect -1.0, 0.0 and 1.0. Repeat on 1.19 and expect the same values.",
+    lines += [fov_experiment(changes),
               "- **Enum id versus token.** Minecraft 26.2: clean profile; set Attack Indicator to Off, "
               "Crosshair and Hotbar; exit after each; diff only key `attackIndicator`. Expect 0, 1, 2. "
               "Repeat with Main Hand and diff only `mainHand`, expecting `left` / `right`.",
@@ -3901,9 +4189,10 @@ def report(inventory: list[dict[str, Any]], latest: dict[str, Any] | None,
         counts = [(v, d.get("count")) for v, d in per.items() if d.get("count") is not None]
         if counts:
             counts.sort(key=lambda x: version_key(x[0]))
+            smallest, largest = min(counts, key=lambda x: x[1]), max(counts, key=lambda x: x[1])
             lines += ["",
-                      f"Per-release catalog sizes range from **{min(c for _, c in counts)}** "
-                      f"({counts[0][0]}) to **{max(c for _, c in counts)}** ({counts[-1][0]}). "
+                      f"Per-release catalog sizes range from **{smallest[1]}** "
+                      f"({smallest[0]}) to **{largest[1]}** ({largest[0]}). "
                       "`languages.json` lists every release's codes together with the asset-index and "
                       "`pack.mcmeta` hashes that prove them, plus which canonical codes are missing from each "
                       "older release.",
@@ -3948,6 +4237,24 @@ def one_record_per_release(inventory: list[dict[str, Any]]) -> list[dict[str, An
     if conflicts:
         raise InputError("more than one JAR was detected for a release (" + "; ".join(conflicts) + ")")
     return list(by_id.values())
+
+
+def canonical_release(inventory: list[dict[str, Any]], normalized: list[dict[str, Any]]
+                      ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+    """The newest stable supported release, its normalized record, and why there is none.
+
+    A release whose persistence path was only partly extracted is never the
+    baseline, and no older release stands in for it.
+    """
+    candidates = [x for x in inventory if supported(x.get("detected_version")) and x.get("stable_release")]
+    if not candidates:
+        return None, None, "No confidently identified stable supported release"
+    newest = max(candidates, key=lambda x: version_key(x["detected_version"]))
+    record = next((x for x in normalized if x["jar_id"] == newest["jar_id"]), None)
+    if record is None or not record.get("extraction_complete"):
+        return None, None, (f"The newest stable supported release {newest['detected_version']} was not "
+                            "completely extracted")
+    return newest, record, None
 
 
 def prune_stale_records(out: Path, jar_ids: set[str]) -> None:
@@ -4011,9 +4318,6 @@ def main() -> int:
     stable_json(out / "inventory.json", {"schema_version": ANALYSIS_SCHEMA_VERSION, "tool_version": TOOL_VERSION,
                                          "root": str(root), "jar_count": len(inventory), "jars": inventory})
 
-    candidates = [x for x in inventory if supported(x.get("detected_version")) and x.get("stable_release")]
-    newest = max(candidates, key=lambda x: version_key(x["detected_version"])) if candidates else None
-
     normalized: list[dict[str, Any]] = []
     for rec in inventory:
         stable_json(out / "raw" / f"{rec['jar_id']}.json", {"schema_version": ANALYSIS_SCHEMA_VERSION, "tool_version": TOOL_VERSION, **rec})
@@ -4023,7 +4327,7 @@ def main() -> int:
 
     normalized_supported = sorted([x for x in normalized if supported(x.get("minecraft_version"))],
                                   key=lambda x: version_key(x["minecraft_version"]))
-    latest_norm = next((x for x in normalized if newest and x["jar_id"] == newest["jar_id"]), None)
+    newest, latest_norm, canonical_problem = canonical_release(inventory, normalized)
 
     languages = None
     matrix = None
@@ -4040,19 +4344,21 @@ def main() -> int:
         stable_json(out / "compatibility-matrix.json", matrix)
         cache = load_language_cache(args.assets_cache.resolve(),
                                     [x["minecraft_version"] for x in normalized_supported])
-        languages = language_output(newest, root / newest["path"], latest_norm, cache,
-                                    [x["minecraft_version"] for x in normalized_supported])
+        languages = language_output(newest, root / newest["path"], latest_norm, cache, normalized_supported)
         stable_json(out / "languages.json", languages)
     else:
-        stable_json(out / "latest-schema.json", {"error": "No confidently identified stable supported release"})
+        stable_json(out / "latest-schema.json", {"error": canonical_problem})
         stable_json(out / "compatibility-matrix.json", {"error": "No canonical release"})
         stable_json(out / "languages.json", {"error": "No canonical release"})
 
-    selected = f" --input-jar {jars[0]}" if args.input_jar is not None else ""
-    cmd = f"python3 {Path(__file__).resolve()} --root {root}{selected} --output {out}"
-    (out / "report.md").write_text(
-        report(inventory, latest_norm, normalized_supported, languages, changes, matrix, crosscheck, cmd),
-        encoding="utf-8")
+    command = ["python3", str(Path(__file__).resolve()), "--root", str(root)]
+    if args.input_jar is not None:
+        command += ["--input-jar", str(jars[0])]
+    command += ["--output", str(out), "--assets-cache", str(args.assets_cache.resolve())]
+    write_atomic(
+        out / "report.md",
+        report(inventory, latest_norm, normalized_supported, languages, changes, matrix, crosscheck,
+               shlex.join(command), canonical_problem))
     prune_stale_records(out, {x["jar_id"] for x in inventory})
     print(f"[analyzer] complete: {out}", flush=True)
     return 0

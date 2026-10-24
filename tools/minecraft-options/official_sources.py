@@ -11,10 +11,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Iterable
+
+from file_io import write_atomic
 
 TOOL_DIR = Path(__file__).resolve().parent
 DEFAULT_CACHE = TOOL_DIR / ".cache"
@@ -115,10 +118,20 @@ def _is_manifest(document: dict[str, Any]) -> bool:
 
 def _read_cached_manifest(path: Path) -> dict[str, Any] | None:
     try:
-        document = json_object(path.read_bytes(), "the cached version manifest")
-    except (OSError, SourceError):
+        body = path.read_bytes()
+    except FileNotFoundError:
         return None
-    return document if _is_manifest(document) else None
+    except OSError as error:
+        print(f"[cache] cannot read {path}: {error}; fetching the version manifest again", file=sys.stderr)
+        return None
+    try:
+        document = json_object(body, "the cached version manifest")
+    except SourceError:
+        document = None
+    if document is None or not _is_manifest(document):
+        print(f"[cache] {path} is damaged; fetching the version manifest again", file=sys.stderr)
+        return None
+    return document
 
 
 def load_manifest(
@@ -143,6 +156,5 @@ def load_manifest(
     document = json_object(body, "Mojang's version manifest")
     if not _is_manifest(document):
         raise SourceError("Mojang's version manifest is malformed")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(body)
+    write_atomic(path, body)
     return document

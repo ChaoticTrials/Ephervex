@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import dataset
+from file_io import read_json_object, read_text_or_empty, write_atomic
 
 # Bumped only when the document's own shape changes.
 FORMAT_VERSION = 1
@@ -236,14 +237,68 @@ def _validate_default_type(did: str, kind: str, default: Any) -> None:
         raise PreferenceCatalogError(f"`{did}` default `{default}` is not a valid `{kind}` default")
 
 
+def _require_dataset_shape(dataset_document: Any) -> None:
+    """Refuses a compatibility dataset missing the structure this module indexes.
+
+    Only presence and types are checked. Whether the data is consistent is the
+    job of `dataset.validate` and of `validate` below.
+    """
+
+    def malformed(what: str) -> PreferenceCatalogError:
+        return PreferenceCatalogError(f"the compatibility dataset is malformed: {what}")
+
+    if not isinstance(dataset_document, dict):
+        raise malformed("it is not a JSON object")
+    if not isinstance(dataset_document.get("canonical_minecraft_version"), str):
+        raise malformed("it names no canonical release")
+    for name in ("releases", "schemas", "representations", "setting_registry", "current_canonical_setting_ids"):
+        if not isinstance(dataset_document.get(name), list):
+            raise malformed(f"`{name}` is missing or not a list")
+    if not all(isinstance(cid, str) for cid in dataset_document["current_canonical_setting_ids"]):
+        raise malformed("`current_canonical_setting_ids` holds an entry that is not an id")
+    for name, key in (("releases", "minecraft_version"), ("schemas", "id"), ("setting_registry", "id")):
+        for entry in dataset_document[name]:
+            if not isinstance(entry, dict) or not isinstance(entry.get(key), str):
+                raise malformed(f"an entry of `{name}` has no `{key}`")
+    registry = {entry["id"]: entry for entry in dataset_document["setting_registry"]}
+    for cid in dataset_document["current_canonical_setting_ids"]:
+        if cid not in registry:
+            raise malformed(f"current setting `{cid}` is absent from the registry")
+    for entry in registry.values():
+        if "manageable" not in entry or "type" not in entry:
+            raise malformed(f"registry setting `{entry['id']}` lacks its `manageable` or `type`")
+    schema = _canonical_schema(dataset_document)
+    supported = schema.get("supported")
+    if not isinstance(supported, dict):
+        raise malformed(f"schema `{schema['id']}` lists no supported settings")
+    representations = dataset_document["representations"]
+    for position in supported.values():
+        if (
+            isinstance(position, bool)
+            or not isinstance(position, int)
+            or not 0 <= position < len(representations)
+            or not isinstance(representations[position], dict)
+            or not isinstance(representations[position].get("codec"), dict)
+        ):
+            raise malformed(f"schema `{schema['id']}` refers to a representation that does not exist")
+
+
 def _canonical_schema(dataset_document: dict[str, Any]) -> dict[str, Any]:
     version = dataset_document["canonical_minecraft_version"]
     schema_id = next(
-        release["schema"]
-        for release in dataset_document["releases"]
-        if release["minecraft_version"] == version
+        (
+            release.get("schema")
+            for release in dataset_document["releases"]
+            if release["minecraft_version"] == version
+        ),
+        None,
     )
-    return next(schema for schema in dataset_document["schemas"] if schema["id"] == schema_id)
+    schema = next((schema for schema in dataset_document["schemas"] if schema["id"] == schema_id), None)
+    if schema is None:
+        raise PreferenceCatalogError(
+            f"the compatibility dataset is malformed: canonical release `{version}` has no schema"
+        )
+    return schema
 
 
 def _codec_by_id(dataset_document: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -511,6 +566,7 @@ def build(dataset_document: dict[str, Any], rich_settings: dict[str, dict[str, A
     A manageable current setting the canonical release has no codec for is
     excluded with `UNPROVEN_CODEC_REASON` instead of exposed.
     """
+    _require_dataset_shape(dataset_document)
     registry = {entry["id"]: entry for entry in dataset_document["setting_registry"]}
     current_ids = set(dataset_document["current_canonical_setting_ids"])
     codec_by_id = _codec_by_id(dataset_document)
@@ -561,6 +617,7 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
     if document.get("canonical_minecraft_version") != dataset_document.get("canonical_minecraft_version"):
         raise PreferenceCatalogError("the catalog's canonical release does not match the compatibility dataset")
 
+    _require_dataset_shape(dataset_document)
     registry = {entry["id"]: entry for entry in dataset_document["setting_registry"]}
     current_ids = set(dataset_document["current_canonical_setting_ids"])
 
@@ -785,15 +842,29 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    dataset_document = json.loads(args.dataset.read_text(encoding="utf-8"))
     rich_settings: dict[str, dict[str, Any]] = {}
     try:
+        try:
+            dataset_document = read_json_object(args.dataset, "the compatibility dataset")
+        except ValueError as error:
+            raise PreferenceCatalogError(f"{error}; regenerate it with update.py or restore it") from error
+        _require_dataset_shape(dataset_document)
         if args.from_analysis:
-            rich_settings = rich_settings_by_canonical_id(
-                _load_normalized_record(args.from_analysis, dataset_document)
-            )
-        document = build(dataset_document, rich_settings)
-        validate(document, dataset_document)
+            record = _load_normalized_record(args.from_analysis, dataset_document)
+            try:
+                rich_settings = rich_settings_by_canonical_id(record)
+            except (KeyError, IndexError, TypeError, AttributeError) as error:
+                raise PreferenceCatalogError(
+                    f"the analyzer output under {args.from_analysis} is malformed "
+                    f"({type(error).__name__}: {error}); run the analyzer again"
+                ) from error
+        try:
+            document = build(dataset_document, rich_settings)
+            validate(document, dataset_document)
+        except (KeyError, IndexError, TypeError, AttributeError) as error:
+            raise PreferenceCatalogError(
+                f"the compatibility dataset is malformed ({type(error).__name__}: {error})"
+            ) from error
     except PreferenceCatalogError as error:
         print(f"[preferences] {error}", file=sys.stderr)
         return 1
@@ -804,7 +875,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     text = dumps(document)
     if args.check:
-        current = args.out.read_text(encoding="utf-8") if args.out.exists() else ""
+        try:
+            current = read_text_or_empty(args.out)
+        except OSError as error:
+            print(f"[preferences] cannot read {args.out}: {error}", file=sys.stderr)
+            return 1
         if current != text:
             print(
                 f"[preferences] the bundled catalog does not match what these inputs regenerate{unenriched}",
@@ -816,8 +891,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if unenriched:
         print(f"[preferences] writing a catalog without enrichment{unenriched}", file=sys.stderr)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(text, encoding="utf-8")
+    try:
+        write_atomic(args.out, text)
+    except OSError as error:
+        print(f"[preferences] could not write {args.out}: {error}", file=sys.stderr)
+        return 1
     exposed = sum(len(descriptor["fields"]) for descriptor in document["descriptors"])
     print(f"{len(document['descriptors'])} product preference(s), {exposed} canonical field(s) exposed")
     print(f"{len(document['exclusions'])} canonical setting(s) explicitly excluded")
