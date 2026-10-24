@@ -527,3 +527,24 @@ fn install_i18n(ui: &AppWindow) {
         .into()
     });
 }
+
+#[test]
+fn a_server_for_an_instance_is_titled_as_a_linked_server() {
+    let ui = window();
+    ui.set_create_server_client_id("client".into());
+    ui.set_modal("create-server".into());
+    settle(&ui);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-create-linked-server"))
+            .any(|element| element.size().width > 0.0),
+        "the dialog says it creates a linked server"
+    );
+
+    ui.set_create_server_client_id("".into());
+    settle(&ui);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-modal-new-server"))
+            .any(|element| element.size().width > 0.0),
+        "a standalone server keeps its own title"
+    );
+}
