@@ -630,6 +630,8 @@ export struct ServerPropertyGroup {
 export struct MinecraftPreferenceRow {
     id: string,
     label: string,
+    // One sentence saying what the setting controls; empty for most rows.
+    description: string,
     technical-id: string,
     // Non-empty on the first row of a group, so one flat list still reads
     // as sections.

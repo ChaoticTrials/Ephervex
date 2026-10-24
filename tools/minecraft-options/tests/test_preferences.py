@@ -82,7 +82,7 @@ EXTRA_SETTINGS = [
         setting("incompatibleResourcePacks", kind="special"), category="Gameplay", ephervex_manageable=False
     ),
     overriding(setting("resourcePacks", kind="special"), category="Gameplay", ephervex_manageable=False),
-    overriding(setting("joinedFirstServer"), category="Gameplay", ephervex_manageable=False),
+    overriding(setting("joinedFirstServer"), category="Gameplay"),
     overriding(setting("lastServer", "lastMpIp", kind="string"), category="Gameplay", ephervex_manageable=False),
     overriding(setting("soundDevice", kind="string"), category="Sound & Music", ephervex_manageable=False),
     overriding(setting("startedCleanly"), category="Gameplay", ephervex_manageable=False),
@@ -91,10 +91,9 @@ EXTRA_SETTINGS = [
             "tutorialStep",
             kind="enum",
             domain_confidence="high",
-            allowed={"persisted_form": "string_token", "values": [{"persisted": "none"}]},
+            allowed={"persisted_form": "string_token", "values": [{"persisted": "movement"}, {"persisted": "none"}]},
         ),
         category="Gameplay",
-        ephervex_manageable=False,
     ),
 ]
 
@@ -198,7 +197,7 @@ class Accounting(unittest.TestCase):
 
         self.assertEqual(exposed | excluded, current)
         self.assertEqual(exposed & excluded, set())
-        self.assertEqual(len(excluded), 7)
+        self.assertEqual(len(excluded), 5)
         registry = {entry["id"]: entry for entry in document["setting_registry"]}
         self.assertTrue(all(registry[cid]["manageable"] for cid in exposed))
         self.assertTrue(all(not registry[cid]["manageable"] for cid in excluded))
@@ -214,11 +213,11 @@ class Accounting(unittest.TestCase):
         )
 
     def test_a_setting_no_longer_current_needs_no_exclusion(self):
-        without_tutorial = [s for s in REQUIRED + EXTRA_SETTINGS if s["persisted_key"] != "tutorialStep"]
+        without_tutorial = [s for s in REQUIRED + EXTRA_SETTINGS if s["persisted_key"] != "startedCleanly"]
         document, _ = dataset.merge(None, [release("26.2", without_tutorial)])
         catalog = preferences.build(document)
         preferences.validate(catalog, document)
-        self.assertNotIn("tutorialStep", {e["canonical_id"] for e in catalog["exclusions"]})
+        self.assertNotIn("startedCleanly", {e["canonical_id"] for e in catalog["exclusions"]})
 
 
 class CanonicalCodecAccounting(unittest.TestCase):
@@ -1290,6 +1289,16 @@ class OfferedSettings(unittest.TestCase):
         registered = {entry["id"] for entry in self.dataset_document["setting_registry"]}
         self.assertEqual(self.current, preferences.OFFERED_SETTINGS)
         self.assertEqual(registered, preferences.OFFERED_SETTINGS | dataset.ALWAYS_RETAINED)
+
+    def test_the_first_launch_markers_have_a_category_of_their_own(self):
+        by_field = {d["fields"][0]["canonical_id"]: d for d in self.catalog["descriptors"]}
+        for marker in preferences.ONBOARDING_SETTINGS:
+            self.assertEqual(by_field[marker]["category"], preferences.ONBOARDING_CATEGORY, marker)
+        others = {cid: d for cid, d in by_field.items() if cid not in preferences.ONBOARDING_SETTINGS}
+        self.assertTrue(all(d["category"] != preferences.ONBOARDING_CATEGORY for d in others.values()))
+
+    def test_every_first_launch_marker_is_offered(self):
+        self.assertEqual(preferences.ONBOARDING_SETTINGS - preferences.OFFERED_SETTINGS, set())
 
     def test_a_setting_the_policy_excludes_is_never_offered(self):
         self.assertEqual(set(preferences.EXCLUSIONS) & preferences.OFFERED_SETTINGS, set())

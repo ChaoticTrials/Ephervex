@@ -158,7 +158,7 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     callback captured-mouse(string, string);
     callback retry-languages();
     property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
-    property <length> detail-lines: ((root.item.invalid ? 22px : 0px) + (root.item.notice == "" ? 0px : 22px) + (root.item.status-detail == "" ? 0px : 22px)) * Theme.text-scale;
+    property <length> detail-lines: ((root.item.invalid ? 22px : 0px) + (root.item.description == "" ? 0px : 22px) + (root.item.notice == "" ? 0px : 22px) + (root.item.status-detail == "" ? 0px : 22px)) * Theme.text-scale;
     // The window size row spends a second line on the ratio it projects
     // with, which is the one editor that does not fit on one.
     property <length> editor-lines: root.item.editor == "window" ? 42px * Theme.text-scale : 0px;
@@ -357,6 +357,7 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                         clicked => { root.forget(root.item.id); }
                     }
                 }
+                if root.item.description != "" : Text { text: root.item.description; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
                 if root.item.invalid : Text { text: root.item.validation; color: Theme.danger; font-size: Theme.caption-size; overflow: elide; }
                 if root.item.notice != "" : Text { text: root.item.notice; color: Theme.warning; font-size: Theme.caption-size; overflow: elide; }
                 if root.item.status-detail != "" : Text { text: root.item.status-detail; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }

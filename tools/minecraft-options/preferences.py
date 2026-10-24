@@ -60,6 +60,19 @@ CATEGORIES = {
     "Language / Accessibility": "language_and_accessibility",
 }
 
+# The category for client-owned first-launch markers. They come from the
+# analyzer under Gameplay or Accessibility, but a user sets them for one reason:
+# a disposable instance should open without first-launch screens and hints in
+# the way, so they get a tab of their own.
+ONBOARDING_CATEGORY = "onboarding"
+ONBOARDING_SETTINGS = frozenset({
+    "joinedFirstServer",
+    "onboardAccessibility",
+    "skipMultiplayerWarning",
+    "tutorialStep",
+})
+PRODUCT_CATEGORIES = frozenset(CATEGORIES.values()) | {ONBOARDING_CATEGORY}
+
 # Presentation kind -> the canonical setting types it may legitimately cover.
 # A descriptor whose kind does not match its own field's registry type is
 # refused: this is what stops a generator regression from quietly turning a
@@ -127,12 +140,10 @@ EXCLUSIONS = {
     "incompatibleResourcePacks": (
         "resource-pack compatibility state belongs to resource/pack management, not a global preference"
     ),
-    "joinedFirstServer": "the first-multiplayer-join marker is client-owned session state, not a preference",
     "lastMpIp": "the last-server address is session/history state, not a portable preference",
     "resourcePacks": "resource-pack selection belongs to resource/pack management, not a global preference",
     "soundDevice": "the selected sound device is machine and environment specific, not portable",
     "startedCleanly": "the clean-startup marker is client-owned crash-recovery state",
-    "tutorialStep": "tutorial progress is client-owned state, not a portable global preference",
 }
 
 # The settings Ephervex offers as global defaults, and the only ones the
@@ -157,6 +168,7 @@ OFFERED_SETTINGS = frozenset({
     "gamma",
     "graphicsPreset",
     "guiScale",
+    "joinedFirstServer",
     LANGUAGE_CANONICAL_ID,
     "onboardAccessibility",
     "overrideHeight",
@@ -164,6 +176,7 @@ OFFERED_SETTINGS = frozenset({
     "renderDistance",
     "simulationDistance",
     "skipMultiplayerWarning",
+    "tutorialStep",
     # Sound and music.
     "directionalAudio",
     "musicFrequency",
@@ -604,7 +617,7 @@ def _simple_descriptor(
     value_type = entry["type"]
     return {
         "id": stable_id(cid),
-        "category": CATEGORIES[entry["category"]],
+        "category": ONBOARDING_CATEGORY if cid in ONBOARDING_SETTINGS else CATEGORIES[entry["category"]],
         "section": _section(cid, value_type, rich),
         "tier": _tier(value_type, rich),
         "translation_key": entry.get("translation_key"),
@@ -708,7 +721,7 @@ def validate(document: dict[str, Any], dataset_document: dict[str, Any]) -> None
     exposed_ids: set[str] = set()
     for descriptor in descriptors:
         did = descriptor["id"]
-        if descriptor["category"] not in CATEGORIES.values():
+        if descriptor["category"] not in PRODUCT_CATEGORIES:
             raise PreferenceCatalogError(f"`{did}` uses an unknown category `{descriptor['category']}`")
         if descriptor["tier"] not in KNOWN_TIERS:
             raise PreferenceCatalogError(f"`{did}` uses an unknown presentation tier `{descriptor['tier']}`")

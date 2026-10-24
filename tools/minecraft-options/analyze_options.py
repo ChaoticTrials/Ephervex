@@ -3063,18 +3063,17 @@ SPECIAL_KEYS = {
     "fullscreenResolution": ("free-form monitor/video-mode descriptor string",
                              "Serialised VideoMode descriptor tied to the local monitor; the exact value is "
                              "hardware dependent and is re-derived by the client."),
-    "tutorialStep": ("tutorial state token", "Client tutorial progress state, not a user preference."),
+    "tutorialStep": ("tutorial state token", "Client tutorial progress; none turns the tutorial hints off."),
     "lastServer": ("free-form server address", "Last multiplayer address; session state, not a preference."),
     "startedCleanly": ("lowercase true/false", "Crash-detection flag owned by the client."),
-    "joinedFirstServer": ("lowercase true/false", "One-shot onboarding flag owned by the client."),
+    "joinedFirstServer": ("lowercase true/false", "One-shot flag the client sets after the first multiplayer join."),
     "version": ("data version integer", "Schema marker written by the client."),
     "soundDevice": ("free-form audio device name or empty for the system default",
                     "Device identity is environment dependent."),
 }
 
 UNSAFE_FOR_EPHERVEX = {"resourcePacks", "incompatibleResourcePacks", "fullscreenResolution",
-                       "tutorialStep", "lastServer", "startedCleanly", "joinedFirstServer",
-                       "version", "soundDevice"}
+                       "lastServer", "startedCleanly", "version", "soundDevice"}
 
 
 def category_for(key: str, field: str | None) -> str:

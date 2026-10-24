@@ -296,6 +296,21 @@ accounted for exactly once, as either:
   or a manageable setting the canonical release has no codec for, which the
   generator excludes by itself because a row for it could never be applied.
 
+Descriptors are grouped into a closed set of categories (`PRODUCT_CATEGORIES` in
+`preferences.py`, mirrored by `PreferenceCategory` in `crates/options`): video,
+sound and music, controls, gameplay, language and accessibility, and onboarding.
+The first five come from the analyzer's own grouping (`CATEGORIES`); onboarding
+is assigned by id through `ONBOARDING_SETTINGS`.
+Onboarding holds the client-owned first-launch markers a user may set so a
+disposable instance opens without first-launch screens or hints in the way:
+`tutorialStep` (`none` turns the tutorial hints off), `onboardAccessibility`
+(true opens the accessibility setup screen at the next start),
+`joinedFirstServer` (false shows the social interactions hint on the first
+multiplayer join) and `skipMultiplayerWarning` (true opens Multiplayer without
+the safety warning). `startedCleanly` stays excluded: it is crash-recovery state,
+not something to set. The markers are listed in `ONBOARDING_SETTINGS`, and the
+settings screen shows a one-line description for each.
+
 `preferences.py --check` (or the Rust `MinecraftPreferenceCatalog::bundled`
 constructor, which every options-crate test runs against) refuses a catalog
 that leaves a current manageable setting unaccounted for, that claims a

@@ -76,6 +76,9 @@ pub enum PreferenceCategory {
     Controls,
     Gameplay,
     LanguageAndAccessibility,
+    /// Client-owned first-launch markers a user may set so a disposable
+    /// instance opens without first-launch screens and hints in the way.
+    Onboarding,
 }
 
 impl PreferenceCategory {
@@ -88,6 +91,7 @@ impl PreferenceCategory {
             Self::Controls => "controls",
             Self::Gameplay => "gameplay",
             Self::LanguageAndAccessibility => "language_and_accessibility",
+            Self::Onboarding => "onboarding",
         }
     }
 }
@@ -898,6 +902,7 @@ mod tests {
             PreferenceCategory::Controls,
             PreferenceCategory::Gameplay,
             PreferenceCategory::LanguageAndAccessibility,
+            PreferenceCategory::Onboarding,
         ] {
             assert!(
                 catalog.descriptors.iter().any(|d| d.category == category),
@@ -929,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn the_seven_unsafe_settings_are_never_exposed() {
+    fn the_unsafe_settings_are_never_exposed() {
         let catalog = MinecraftPreferenceCatalog::bundled().expect("valid");
         let exposed: BTreeSet<&str> = catalog
             .descriptors
@@ -938,12 +943,10 @@ mod tests {
             .collect();
         for unsafe_id in [
             "incompatibleResourcePacks",
-            "joinedFirstServer",
             "lastMpIp",
             "resourcePacks",
             "soundDevice",
             "startedCleanly",
-            "tutorialStep",
         ] {
             assert!(
                 !exposed.contains(unsafe_id),

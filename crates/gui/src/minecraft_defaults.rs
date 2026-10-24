@@ -43,12 +43,13 @@ use crate::ui::MinecraftPreferenceRow;
 ///
 /// The catalog's own categories, listed once here so the tab strip and the row
 /// filter cannot disagree about which tab a preference belongs on.
-pub const CATEGORIES: [PreferenceCategory; 5] = [
+pub const CATEGORIES: [PreferenceCategory; 6] = [
     PreferenceCategory::Gameplay,
     PreferenceCategory::Video,
     PreferenceCategory::SoundAndMusic,
     PreferenceCategory::Controls,
     PreferenceCategory::LanguageAndAccessibility,
+    PreferenceCategory::Onboarding,
 ];
 
 /// One background question, and the single answer that would still be an
@@ -112,6 +113,7 @@ pub fn category_label(category: PreferenceCategory) -> String {
         PreferenceCategory::SoundAndMusic => "gui-minecraft-category-sound",
         PreferenceCategory::Controls => "gui-minecraft-category-controls",
         PreferenceCategory::LanguageAndAccessibility => "gui-minecraft-category-language",
+        PreferenceCategory::Onboarding => "gui-minecraft-category-onboarding",
     })
 }
 
@@ -132,8 +134,10 @@ pub fn category_label(category: PreferenceCategory) -> String {
 /// lands somewhere deterministic.
 fn section_order(category: PreferenceCategory) -> &'static [Option<&'static str>] {
     match category {
-        // Neither category has ever carried a section.
-        PreferenceCategory::Video | PreferenceCategory::LanguageAndAccessibility => &[None],
+        // None of these categories carries a section.
+        PreferenceCategory::Video
+        | PreferenceCategory::LanguageAndAccessibility
+        | PreferenceCategory::Onboarding => &[None],
         PreferenceCategory::SoundAndMusic => &[Some("volume"), None],
         PreferenceCategory::Gameplay => &[None, Some("skin_parts")],
         PreferenceCategory::Controls => &[
@@ -167,6 +171,8 @@ const ZERO_IS_AUTOMATIC: &[&str] = &["gui_scale"];
 
 /// The `ephervex-i18n` id prefix curated preference labels live under.
 const LABEL_MESSAGE_PREFIX: &str = "gui-minecraft-preference-";
+/// The `ephervex-i18n` id prefix curated preference descriptions live under.
+const DESCRIPTION_MESSAGE_PREFIX: &str = "gui-minecraft-description-";
 /// The `ephervex-i18n` id prefix curated section labels live under.
 const SECTION_MESSAGE_PREFIX: &str = "gui-minecraft-section-";
 
@@ -348,6 +354,24 @@ fn is_normalized_volume(
 }
 
 // -------------------------------------------------------------------- labels
+
+/// One sentence saying what a preference controls, or an empty string when no
+/// curated text exists.
+///
+/// Only settings whose effect is not evident from the label carry one, so the
+/// absence of text is normal and a row without it shows nothing extra.
+#[must_use]
+pub fn preference_description(descriptor: &MinecraftPreferenceDescriptor) -> String {
+    let message = format!(
+        "{DESCRIPTION_MESSAGE_PREFIX}{}",
+        descriptor.id.replace('_', "-")
+    );
+    if ephervex_i18n::has(&message) {
+        lookup(&message)
+    } else {
+        String::new()
+    }
+}
 
 /// The readable name for one preference.
 ///
@@ -2300,6 +2324,7 @@ impl MinecraftDefaultsModel {
         let mut row = MinecraftPreferenceRow {
             id: descriptor.id.as_str().into(),
             label: preference_label(descriptor).into(),
+            description: preference_description(descriptor).into(),
             technical_id: descriptor.id.as_str().into(),
             section_heading: section_heading.into(),
             editor: editor.as_str().into(),
@@ -2595,6 +2620,47 @@ mod tests {
             reachable.len(),
             catalog.descriptors.len(),
             "every shipped descriptor is a product row"
+        );
+    }
+
+    #[test]
+    fn every_onboarding_preference_has_a_curated_label_and_a_description() {
+        let catalog = MinecraftPreferenceCatalog::bundled_shared().expect("the bundled catalog");
+        let markers: Vec<_> = catalog
+            .descriptors
+            .iter()
+            .filter(|descriptor| descriptor.category == PreferenceCategory::Onboarding)
+            .collect();
+
+        assert!(!markers.is_empty());
+        for descriptor in markers {
+            assert!(
+                ephervex_i18n::has(&format!(
+                    "{LABEL_MESSAGE_PREFIX}{}",
+                    descriptor.id.replace('_', "-")
+                )),
+                "`{}` has no curated label",
+                descriptor.id
+            );
+            assert!(
+                !preference_description(descriptor).is_empty(),
+                "`{}` does not say what it controls",
+                descriptor.id
+            );
+        }
+    }
+
+    #[test]
+    fn a_row_carries_its_description_and_most_rows_have_none() {
+        let mut model = loaded_model();
+        model.select_category(5);
+        let row = status_row(&model, "tutorial_step");
+        assert!(row.description.contains("tutorial"), "{}", row.description);
+
+        model.select_category(1);
+        assert!(
+            model.rows().iter().all(|row| row.description.is_empty()),
+            "video settings carry no description"
         );
     }
 
@@ -3374,6 +3440,7 @@ mod tests {
         assert_eq!(headings(0), ["General"], "gameplay");
         assert_eq!(headings(1), ["General"], "video");
         assert_eq!(headings(4), ["General"], "language and accessibility");
+        assert_eq!(headings(5), ["General"], "onboarding");
         assert_eq!(
             headings(3),
             ["General", "Movement", "Gameplay", "Inventory"],

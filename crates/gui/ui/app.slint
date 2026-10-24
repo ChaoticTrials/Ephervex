@@ -1972,9 +1972,7 @@ export component AppWindow inherits Window {
                             if root.minecraft-unusable-notice != "" : Rectangle { height: max(46px, unusable-text.preferred-height + 22px); border-radius: 6px; border-width: 1px; border-color: Theme.warning.with-alpha(0.55); background: Theme.surface;
                                 unusable-text := BodyText { x: 12px; width: parent.width - 24px; text: root.minecraft-unusable-notice; color: Theme.warning; wrap: word-wrap; }
                             }
-                            // The five stable catalog categories. They wrap
-                            // rather than shrink, so a narrow window keeps
-                            // every tab readable and reachable.
+                            // The stable catalog categories, one tab each.
                             Rectangle { height: category-tabs.preferred-height; vertical-stretch: 0; background: transparent;
                                 category-tabs := HorizontalLayout { spacing: 4px; alignment: start;
                                     for category[index] in root.minecraft-categories : WorkspaceTab {
