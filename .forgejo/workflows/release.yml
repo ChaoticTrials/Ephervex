@@ -103,7 +103,7 @@ jobs:
 
       - name: Verify the tooling datasets
         run: |
-          python3 -m py_compile tools/minecraft-options/*.py tools/licenses/*.py
+          python3 -m py_compile tools/minecraft-options/*.py tools/minecraft-options/tests/*.py tools/licenses/*.py
           python3 -m unittest discover -s tools/minecraft-options
           python3 -m unittest discover -s tools/licenses
 

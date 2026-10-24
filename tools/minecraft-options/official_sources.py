@@ -24,7 +24,6 @@ DEFAULT_CACHE = TOOL_DIR / ".cache"
 
 MANIFEST_NAME = "version_manifest_v2.json"
 MANIFEST_URL = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"
-RESOURCES_URL = "https://resources.download.minecraft.net"
 USER_AGENT = "ephervex-minecraft-options/1 (static options.txt analysis)"
 
 _SHA1 = re.compile(r"[0-9a-f]{40}")

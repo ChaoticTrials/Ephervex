@@ -20,8 +20,8 @@ import official_sources
 import preferences
 import update
 from official_sources import SourceError
-from test_dataset import REQUIRED, release, setting
-from test_official_sources import FakeMojang, encode, manifest_document, sha1
+from .test_dataset import REQUIRED, release, setting
+from .test_official_sources import FakeMojang, encode, manifest_document, sha1
 
 
 def manifest_body(*versions: str) -> bytes:
@@ -86,11 +86,10 @@ class CommandLine(unittest.TestCase):
     def fake_release_pipeline(
         self,
         version: str = "26.2",
-        catalog_error: str | None = None,
         verify_download: bool = False,
         analyzer_exit: int | None = None,
     ):
-        """Stands in for the JAR download, catalog refresh and analyzer, recording their order.
+        """Stands in for the JAR download and analyzer, recording their order.
 
         `verify_download` keeps the real hash-verified download, and `analyzer_exit` keeps the
         real analyzer step with its subprocess ending in that status.
@@ -100,17 +99,11 @@ class CommandLine(unittest.TestCase):
             self.calls.append("jar")
             return cache / "jars" / f"mc-{entry['id']}.jar"
 
-        def catalogs(cache, versions, refresh_manifest=False):
-            self.calls.append("catalog")
-            if catalog_error:
-                raise update.WorkflowError(catalog_error)
-            return {v: {"language_count": 143} for v in versions}
-
         def analyzer(cache, jar):
             self.calls.append("analyzer")
             return self.write_analysis(cache / "analysis" / jar.stem, version)
 
-        replacements = {"refresh_language_catalogs": catalogs}
+        replacements = {}
         if not verify_download:
             replacements["client_jar"] = client_jar
         if analyzer_exit is None:
@@ -145,6 +138,11 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(self.run_main("--latest", "--offline")[0], 2)
         self.assertEqual(self.run_main("--check", "--latest", "--refresh-manifest")[0], 2)
         self.assertEqual(self.run_main("--from-analysis", str(self.root), "--offline", "--refresh-manifest")[0], 2)
+
+    def test_a_manifest_refresh_is_refused_where_no_manifest_is_read(self):
+        status, error = self.run_main("--from-analysis", str(self.root), "--refresh-manifest")
+        self.assertEqual(status, 2)
+        self.assertIn("--refresh-manifest has nothing to refresh", error)
 
     def test_check_with_a_release_selection_reads_the_cache_and_never_the_network(self):
         self.cache_manifest("26.1", "26.2")
@@ -199,36 +197,8 @@ class CommandLine(unittest.TestCase):
         self.mojang.bodies[official_sources.MANIFEST_URL] = manifest_body("26.1", "26.2")
         self.fake_release_pipeline()
         self.assertEqual(self.run_main("--latest")[0], 0)
-        self.assertEqual(self.calls, ["jar", "catalog", "analyzer"])
+        self.assertEqual(self.calls, ["jar", "analyzer"])
         self.assertTrue(self.bundled.exists())
-
-    def test_the_catalog_is_fetched_before_the_analyzer_runs(self):
-        self.cache_manifest("26.2")
-        self.fake_release_pipeline()
-        self.assertEqual(self.run_main("--version", "26.2")[0], 0)
-        self.assertEqual(self.calls, ["jar", "catalog", "analyzer"])
-
-    def test_a_missing_language_catalog_fails_the_run_before_analysis_and_writes_nothing(self):
-        self.cache_manifest("26.2")
-        self.fake_release_pipeline(catalog_error="the language catalog could not be produced (26.2: boom)")
-        status, error = self.run_main("--version", "26.2")
-        self.assertEqual(status, 1)
-        self.assertIn("could not be produced", error)
-        self.assertEqual(self.calls, ["jar", "catalog"])
-        self.assertFalse(self.bundled.exists())
-
-    def test_from_analysis_refreshes_the_catalog_of_every_folded_release(self):
-        analysis = self.write_analysis(self.root / "analysis")
-        asked: list[list[str]] = []
-
-        def catalogs(cache, versions, refresh_manifest=False):
-            asked.append(versions)
-            return {v: {"language_count": 143} for v in versions}
-
-        with mock.patch.object(update, "refresh_language_catalogs", catalogs):
-            self.assertEqual(self.run_main("--from-analysis", str(analysis))[0], 0)
-            self.assertEqual(self.run_main("--from-analysis", str(analysis), "--offline")[0], 0)
-        self.assertEqual(asked, [["26.2"]])
 
     def test_a_damaged_bundled_dataset_is_reported_and_left_alone(self):
         analysis = self.write_analysis(self.root / "analysis")
@@ -421,13 +391,13 @@ class CommandLine(unittest.TestCase):
         self.assertFalse(self.bundled.exists())
         self.assertFalse((self.cache / "feed").exists())
 
-    def test_a_verified_client_jar_is_downloaded_once_into_the_cache_before_the_catalog_and_analysis(self):
+    def test_a_verified_client_jar_is_downloaded_once_into_the_cache_before_analysis(self):
         jar_url = self.publish_client()
         self.fake_release_pipeline(verify_download=True)
         self.assertEqual(self.run_main("--version", "26.2")[0], 0)
         self.assertEqual(self.mojang.requests.count(jar_url), 1)
         self.assertEqual((self.cache.resolve() / "jars" / "mc-26.2.jar").read_bytes(), b"jar bytes")
-        self.assertEqual(self.calls, ["catalog", "analyzer"])
+        self.assertEqual(self.calls, ["analyzer"])
         self.assertIn("[update] selected release 26.2", self.printed())
 
     def test_an_unreachable_official_source_is_a_message_and_writes_nothing(self):
@@ -444,10 +414,10 @@ class CommandLine(unittest.TestCase):
         status, error = self.run_main("--version", "26.2")
         self.assertEqual(status, 1)
         self.assertIn("the static analyzer failed", error)
-        self.assertEqual(self.calls, ["jar", "catalog"])
+        self.assertEqual(self.calls, ["jar"])
         cache = self.cache.resolve()
         self.analyzer_process.assert_called_once_with(
-            update.analyzer_command(cache / "jars" / "mc-26.2.jar", cache / "analysis" / "mc-26.2", cache / "assets-cache"),
+            update.analyzer_command(cache / "jars" / "mc-26.2.jar", cache / "analysis" / "mc-26.2"),
             check=False,
         )
         self.assertFalse(self.bundled.exists())
@@ -478,7 +448,10 @@ class CommandLine(unittest.TestCase):
         catalog.write_text(preferences.dumps(preferences.build(json.loads(self.bundled.read_text()))))
         before = catalog.read_bytes()
         analysis = self.write_analysis(self.root / "analysis", "1.20.2", REQUIRED + [setting("newCurrentOption")])
-        with mock.patch.object(update, "BUNDLED_PREFERENCE_CATALOG", catalog):
+        with (
+            mock.patch.object(update, "BUNDLED_PREFERENCE_CATALOG", catalog),
+            mock.patch.object(update, "OFFERED", update.OFFERED | {"newCurrentOption"}),
+        ):
             status, _ = self.run_main("--from-analysis", str(analysis), "--offline")
         self.assertEqual(status, 0)
         self.assertTrue(
@@ -487,6 +460,15 @@ class CommandLine(unittest.TestCase):
         self.assertIn("newCurrentOption", json.loads(self.bundled.read_text())["current_canonical_setting_ids"])
         self.assertEqual(catalog.read_bytes(), before)
         self.assertEqual([path.name for path in catalog.parent.iterdir()], [catalog.name])
+
+    def test_a_setting_nobody_offers_is_not_carried_into_the_dataset(self):
+        analysis = self.write_analysis(self.root / "analysis", "26.2", REQUIRED + [setting("neverOffered")])
+
+        self.assertEqual(self.run_main("--from-analysis", str(analysis), "--offline")[0], 0)
+
+        document = json.loads(self.bundled.read_text())
+        self.assertNotIn("neverOffered", {entry["id"] for entry in document["setting_registry"]})
+        self.assertNotIn("neverOffered", document["current_canonical_setting_ids"])
 
     def test_the_run_reports_what_it_wrote_and_then_that_nothing_changed(self):
         analysis = self.write_analysis(self.root / "analysis")
@@ -586,36 +568,6 @@ class SelectingARelease(unittest.TestCase):
                 document = manifest_document(manifest_entry(version))
                 with self.assertRaisesRegex(update.WorkflowError, "is not a release identifier"):
                     update.select_release(document, version)
-
-
-class CatalogRefreshThroughTheWorkflowManifest(unittest.TestCase):
-    def test_a_release_the_cached_manifest_lacks_is_refreshed_from_the_current_manifest(self):
-        mojang = FakeMojang()
-        entry = mojang.publish_release("26.3")
-        mojang.bodies[official_sources.MANIFEST_URL] = encode(manifest_document(entry))
-        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            cache = Path(directory)
-            (cache / official_sources.MANIFEST_NAME).write_bytes(manifest_body("26.2"))
-            with mock.patch.object(official_sources, "fetch", mojang.fetch):
-                records = update.refresh_language_catalogs(cache, ["26.3"])
-            self.assertEqual(records["26.3"]["status"], "ok")
-            self.assertEqual(mojang.requests.count(official_sources.MANIFEST_URL), 1)
-
-    def test_any_release_without_a_catalog_raises_with_its_reason(self):
-        mojang = FakeMojang()
-        mojang.bodies[official_sources.MANIFEST_URL] = manifest_body("26.2")
-        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
-            with mock.patch.object(official_sources, "fetch", mojang.fetch):
-                with self.assertRaisesRegex(update.WorkflowError, "26.3: not in the version manifest"):
-                    update.refresh_language_catalogs(Path(directory), ["26.3"])
-
-    def test_the_summary_reports_the_newest_refreshed_catalog_of_several(self):
-        document, _ = dataset.merge(None, [release("1.20.1", REQUIRED), release("26.2", REQUIRED)])
-        records = [release("1.20.1", REQUIRED), release("26.2", REQUIRED)]
-        summary = update.summarize(
-            document, None, [], records, {"1.20.1": {"language_count": 130}, "26.2": {"language_count": 143}}
-        )
-        self.assertIn("language catalog refreshed (2 releases, newest 26.2): 143 codes", summary)
 
 
 class ClientJarDownload(unittest.TestCase):

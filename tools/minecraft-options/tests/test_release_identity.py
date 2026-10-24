@@ -19,7 +19,7 @@ import analyze_options as analyzer
 import dataset
 import update
 from release_identity import is_release, version_key
-from test_dataset import REQUIRED, release
+from .test_dataset import REQUIRED, release
 
 
 def detect(version_json: dict | None, filename: str = "client.jar") -> dict:
@@ -61,7 +61,6 @@ class AnalyzerVersionDetection(unittest.TestCase):
         detected = detect({"id": "1.21.6-rc1", "name": "1.21.6 Release Candidate 1", "release_target": "1.21.6"})
         self.assertEqual(detected["version"], "1.21.6-rc1")
         self.assertFalse(detected["stable_release"])
-        self.assertFalse(analyzer.supported(detected["version"]))
 
     def test_a_snapshot_is_not_a_release_of_its_target(self):
         detected = detect({"id": "19w14a", "name": "19w14a", "release_target": "1.14"})
@@ -79,7 +78,6 @@ class AnalyzerVersionDetection(unittest.TestCase):
         self.assertFalse(detected["stable_release"])
         detected = detect({"id": "1.21.5", "name": "1.21.6"})
         self.assertFalse(detected["stable_release"])
-        self.assertFalse(analyzer.supported(detected["version"]))
 
     def test_a_release_names_itself_the_same_in_name_and_id(self):
         detected = detect({"id": "1.21.6", "name": "1.21.6", "release_target": None})
@@ -98,11 +96,10 @@ class AnalyzerVersionDetection(unittest.TestCase):
         detected = detect({"id": "1.14.2 / a8f78b0d43c74598a199d6d80cda413f", "name": "1.14.1"})
         self.assertFalse(detected["stable_release"])
 
-    def test_a_look_alike_identifier_is_not_a_supported_release(self):
+    def test_a_look_alike_identifier_is_not_a_stable_release(self):
         for identifier in ("10.5", "19.3", "1.²"):
             detected = detect({"id": identifier, "name": identifier})
             self.assertFalse(detected["stable_release"], identifier)
-            self.assertFalse(analyzer.supported(detected["version"]), identifier)
 
     def test_a_filename_cannot_name_a_look_alike_release(self):
         detected = detect(None, filename="mc-10.5.jar")

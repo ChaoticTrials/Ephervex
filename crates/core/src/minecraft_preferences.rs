@@ -457,8 +457,8 @@ mod tests {
         app.save_global_minecraft_preferences(&[
             PreferenceEdit::manage(id("fullscreen"), MinecraftPreferenceValue::Boolean(false)),
             PreferenceEdit::manage(
-                id("attack_indicator"),
-                MinecraftPreferenceValue::Enum("2".to_owned()),
+                id("cloud_status"),
+                MinecraftPreferenceValue::Enum("fast".to_owned()),
             ),
         ])
         .expect("save");
@@ -688,7 +688,7 @@ mod tests {
                     }),
                 ),
                 PreferenceEdit::remember(
-                    id("keybind_advancements"),
+                    id("keybind_inventory"),
                     MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Button5)),
                 ),
             ])
@@ -717,7 +717,7 @@ mod tests {
 
         let binding = loaded
             .preferences
-            .get(&id("keybind_advancements"))
+            .get(&id("keybind_inventory"))
             .expect("still configured");
         assert_eq!(
             binding.value,
@@ -732,19 +732,13 @@ mod tests {
         let mut app = app_rooted_at(base.path());
         app.save_global_minecraft_preferences(&[
             PreferenceEdit::manage(id("fullscreen"), MinecraftPreferenceValue::Boolean(false)),
-            PreferenceEdit::remember(
-                id("ambient_occlusion"),
-                MinecraftPreferenceValue::Boolean(false),
-            ),
+            PreferenceEdit::remember(id("auto_jump"), MinecraftPreferenceValue::Boolean(false)),
         ])
         .expect("save");
 
         let loaded = app.configured_minecraft_preferences().expect("configured");
         let applied = loaded.preferences.get(&id("fullscreen")).expect("stored");
-        let remembered = loaded
-            .preferences
-            .get(&id("ambient_occlusion"))
-            .expect("stored");
+        let remembered = loaded.preferences.get(&id("auto_jump")).expect("stored");
 
         assert_eq!(applied.value, remembered.value, "the same value");
         assert_eq!(
@@ -761,7 +755,7 @@ mod tests {
         let record = create(&app, "Toggles", "1.20.1");
         let options = options_of(&record).expect("options");
         assert!(options.contains("fullscreen:false"));
-        assert!(!options.contains("ao:"), "{options}");
+        assert!(!options.contains("autoJump:"), "{options}");
     }
 
     #[test]
@@ -876,7 +870,7 @@ mod tests {
         let base = tempfile::tempdir().expect("temp dir");
         let edits = [
             PreferenceEdit::manage(
-                id("keybind_advancements"),
+                id("keybind_inventory"),
                 MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::F3)),
             ),
             PreferenceEdit::manage(

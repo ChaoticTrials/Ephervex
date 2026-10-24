@@ -7767,6 +7767,7 @@ fn render_minecraft_in_place(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDef
 fn render_minecraft_summary(ui: &AppWindow, minecraft: &Rc<RefCell<MinecraftDefaultsModel>>) {
     let state = minecraft.borrow();
     ui.set_minecraft_category_index(to_i32(state.category_index()));
+    ui.set_minecraft_has_advanced(state.has_advanced_rows());
     ui.set_minecraft_show_advanced(state.show_advanced());
     ui.set_minecraft_only_overridden(state.only_overridden());
     ui.set_minecraft_preview_release(state.preview_release().into());

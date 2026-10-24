@@ -63,6 +63,10 @@ REQUIRED_CANONICAL_IDS = (
     "renderDistance",
     "simulationDistance",
 )
+# Settings the dataset always keeps, whatever else it is limited to: the ones the
+# application cannot work without, and the data-version marker every created file
+# carries.
+ALWAYS_RETAINED = frozenset(REQUIRED_CANONICAL_IDS) | {VERSION_MARKER_SETTING_ID}
 
 # `lang` holds a language code whose validity is a property of the target
 # release's language catalog, not of options.txt. It gets its own codec so the
@@ -351,16 +355,10 @@ def schema_for(record: dict[str, Any], settings: list[dict[str, Any]]) -> dict[s
         if codec is not None:
             supported[entry["id"]] = {"key": setting["persisted_key"], "codec": codec}
 
-    # Keys this release has that the canonical release does not know about are
-    # deliberately dropped: a canonical setting definition is the only thing
-    # that gives an id meaning, and inventing one here would create a setting
-    # no application build could interpret.
-    unknown_to_canonical = sorted(set(extracted) - set(by_key))
-    schema = {
-        "supported": supported,
-        "unsupported": sorted(unsupported),
-        "extra_keys": unknown_to_canonical,
-    }
+    # A key the registry does not define is deliberately left out: a registry
+    # entry is the only thing that gives a setting an id, and inventing one here
+    # would create a setting no application build could interpret.
+    schema = {"supported": supported, "unsupported": sorted(unsupported)}
     preset = startup_preset_for(record, by_key, supported)
     if preset is not None:
         schema["startup_preset"] = preset
@@ -475,7 +473,6 @@ def expand(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
                 setting_id: table[position] for setting_id, position in schema["supported"].items()
             },
             "unsupported": list(schema["unsupported"]),
-            "extra_keys": [],
             **({"startup_preset": copy.deepcopy(schema["startup_preset"])}
                if schema.get("startup_preset") is not None else {}),
         }
@@ -485,23 +482,56 @@ def expand(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
 def merge(
     previous: dict[str, Any] | None,
     analysed: list[dict[str, Any]],
+    retain: frozenset[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Folds newly analysed releases into the committed dataset.
+
+    `retain` limits the dataset to those canonical ids: nothing else is
+    registered, and anything else the previous dataset held is dropped, so the
+    document carries only what an application build can act on. `None` keeps
+    every setting.
 
     A previous dataset or analyzer record that lacks the structure the fold
     reads is refused with a `DatasetError`, never a lookup traceback.
     """
     try:
-        return _merge(previous, analysed)
+        return _merge(previous, analysed, retain)
     except (KeyError, IndexError, TypeError, AttributeError, ValueError) as error:
         raise DatasetError(
             f"the dataset or analyzer records are malformed ({type(error).__name__}: {error})"
         ) from error
 
 
+def _restrict(
+    schemas: dict[str, dict[str, Any]], mapping: dict[str, str], retained: set[str]
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Drops every setting outside `retained` from existing families.
+
+    A family is identified by its content, so each one that lost something gets a
+    new id and the releases that used it are remapped; families that become
+    identical merge.
+    """
+    restricted: dict[str, dict[str, Any]] = {}
+    renamed: dict[str, str] = {}
+    for schema_id, schema in schemas.items():
+        pruned: dict[str, Any] = {
+            "supported": {key: value for key, value in schema["supported"].items() if key in retained},
+            "unsupported": [entry for entry in schema["unsupported"] if entry in retained],
+        }
+        preset = schema.get("startup_preset")
+        if preset is not None and preset["setting"] in retained:
+            controls = [control for control in preset["controls"] if control in retained]
+            if controls:
+                pruned["startup_preset"] = {**preset, "controls": controls}
+        renamed[schema_id] = fingerprint(pruned)
+        restricted[renamed[schema_id]] = pruned
+    return restricted, {version: renamed[schema_id] for version, schema_id in mapping.items()}
+
+
 def _merge(
     previous: dict[str, Any] | None,
     analysed: list[dict[str, Any]],
+    retain: frozenset[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """The fold behind `merge`, which assumes well-formed structure.
 
@@ -546,6 +576,13 @@ def _merge(
         else {}
     )
 
+    if retain is not None:
+        setting_registry = [entry for entry in setting_registry if entry["id"] in retain]
+        current_canonical_setting_ids = [
+            entry for entry in current_canonical_setting_ids if entry in retain
+        ]
+        schemas, mapping = _restrict(schemas, mapping, {entry["id"] for entry in setting_registry})
+
     analysed = sorted(analysed, key=lambda record: version_key(record["minecraft_version"]))
     if analysed:
         newest = analysed[-1]["minecraft_version"]
@@ -559,6 +596,8 @@ def _merge(
         # new setting; an older release has no authority over ids.
         canonical_record = analysed[-1] if refresh_current_definitions else None
         for entry in registry_settings(analysed, canonical_record):
+            if retain is not None and entry["id"] not in retain:
+                continue
             established = by_key.get(entry["key"])
             if established is not None:
                 # An id, once committed, is what every schema already refers to.

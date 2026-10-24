@@ -11,14 +11,14 @@ from pathlib import Path
 import dataset
 import preferences
 import update
-from test_dataset import REQUIRED, release, setting
+from .test_dataset import REQUIRED, release, setting
 
 
 class AnalyzerSelection(unittest.TestCase):
     def test_normal_updates_pass_only_the_selected_jar_to_the_analyzer(self):
         cache = Path("/tmp/ephervex-options-test-cache")
         jar = cache / "jars" / "mc-26.2.jar"
-        command = update.analyzer_command(jar, cache / "analysis" / jar.stem, cache / "assets-cache")
+        command = update.analyzer_command(jar, cache / "analysis" / jar.stem)
         self.assertEqual(command[0], sys.executable)
         self.assertEqual(command[command.index("--input-jar") + 1], str(jar))
         self.assertEqual(command[command.index("--root") + 1], str(jar.parent))
@@ -107,7 +107,7 @@ class MaintainerSummary(unittest.TestCase):
         self.assertIn("newCurrentOption", document["current_canonical_setting_ids"])
         self.assertEqual(update.application_review_reasons(records, document), [])
         summary = update.summarize(document, None, [], records, None)
-        self.assertTrue(any("recorded as data only" in line for line in summary))
+        self.assertTrue(any("covers only the settings Ephervex offers" in line for line in summary))
 
 
 class ProductCatalogReview(unittest.TestCase):
@@ -122,7 +122,7 @@ class ProductCatalogReview(unittest.TestCase):
         records = [release("1.20.2", REQUIRED + [setting("newCurrentOption")])]
         document, changes = dataset.merge(previous, records)
 
-        summary = update.summarize(document, previous, changes, records, None, preference_catalog)
+        summary = update.summarize(document, previous, changes, records, preference_catalog)
         self.assertTrue(
             any(
                 "newCurrentOption" in line and "need application review" in line
@@ -136,13 +136,13 @@ class ProductCatalogReview(unittest.TestCase):
         records = [release("1.20.2", REQUIRED)]
         document, changes = dataset.merge(previous, records)
 
-        summary = update.summarize(document, previous, changes, records, None, preference_catalog)
+        summary = update.summarize(document, previous, changes, records, preference_catalog)
         self.assertFalse(any("need application review" in line for line in summary))
 
     def test_no_bundled_catalog_yet_means_no_review_notice(self):
         records = [release("26.2", REQUIRED)]
         document, _ = dataset.merge(None, records)
-        summary = update.summarize(document, None, [], records, None, None)
+        summary = update.summarize(document, None, [], records, None)
         self.assertFalse(any("need application review" in line for line in summary))
 
 

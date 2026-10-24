@@ -332,6 +332,8 @@ export component AppWindow inherits Window {
     in-out property <[string]> minecraft-aspect-labels;
     in-out property <int> minecraft-category-index: 0;
     in-out property <string> minecraft-query;
+    // Whether the catalog has developer-facing rows for the switch to reveal.
+    in-out property <bool> minecraft-has-advanced: false;
     in-out property <bool> minecraft-show-advanced: false;
     in-out property <bool> minecraft-only-overridden: false;
     // The row waiting for a key or mouse press, by product id. Kept out of
@@ -1997,8 +1999,8 @@ export component AppWindow inherits Window {
                                 Rectangle { horizontal-stretch: 1; min-width: 4px; }
                                 BodyText { text: GuiI18n.text("gui-minecraft-only-overridden"); horizontal-stretch: 0; }
                                 Toggle { accessible-name: GuiI18n.text("gui-minecraft-only-overridden"); checked: root.minecraft-only-overridden; toggled(value) => { root.minecraft-set-only-overridden(value); } }
-                                BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
-                                Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
+                                if root.minecraft-has-advanced : BodyText { text: GuiI18n.text("gui-minecraft-show-advanced"); horizontal-stretch: 0; }
+                                if root.minecraft-has-advanced : Toggle { accessible-name: GuiI18n.text("gui-minecraft-show-advanced"); checked: root.minecraft-show-advanced; toggled(value) => { root.minecraft-set-show-advanced(value); } }
                             }
                             HorizontalLayout { spacing: 10px; cross-axis-alignment: center; vertical-stretch: 0;
                                 VerticalLayout { horizontal-stretch: 1; spacing: 2px;

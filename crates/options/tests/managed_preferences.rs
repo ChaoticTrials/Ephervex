@@ -161,50 +161,11 @@ fn a_release_nobody_has_analyzed_is_unknown_for_every_preference() {
 // ------------------------------------------------------------ representability
 
 #[test]
-fn an_authoritative_release_that_cannot_express_the_value_stays_its_own_answer() {
-    // 1.20.1 stores ambient occlusion as a boolean and 1.16.5 as an
-    // enumeration. Both releases have the setting; only one of them can hold
-    // a toggle, and the difference must not be reported as "unsupported".
-    let on = MinecraftPreferenceValue::Boolean(true);
-    assert_eq!(
-        disposition("1.20.1", "ambient_occlusion", on.clone()),
-        PreferenceDisposition::Writable
-    );
-    assert_eq!(
-        disposition("1.16.5", "ambient_occlusion", on),
-        PreferenceDisposition::NotRepresentable(SkipReason::TypeMismatch),
-        "the release has the setting; it just does not store a boolean there"
-    );
-}
-
-#[test]
-fn a_number_outside_a_releases_proven_domain_is_refused_rather_than_clamped() {
+fn a_number_no_release_bounded_is_written_as_chosen_rather_than_clamped() {
     // A clamp writes a value the user never chose into every instance created
-    // afterwards. The field of view is the one refused here because it is a
-    // domain every release actually proves: a render distance maximum is
-    // chosen by runtime branches, so no release proves one and there is
-    // nothing to refuse against.
-    // A value this build offers that one release will not take: the menu
-    // background blur runs to ten here, and 1.20.5 accepted only zero to one.
-    let beyond = MinecraftPreferenceValue::Integer(6);
-    assert_eq!(
-        disposition("1.20.5", "menu_background_blurriness", beyond.clone()),
-        PreferenceDisposition::NotRepresentable(SkipReason::OutOfRange),
-        "1.20.5 proved a 0..1 domain"
-    );
-    assert!(
-        !applied_text(
-            "1.20.5",
-            &managed(&[("menu_background_blurriness", beyond.clone())])
-        )
-        .contains("menuBackgroundBlurriness"),
-        "nothing at all is written for a value the release refuses"
-    );
-    assert_eq!(
-        disposition("26.2", "menu_background_blurriness", beyond),
-        PreferenceDisposition::Writable,
-        "a later release widened the domain, so the same number is writable there"
-    );
+    // afterwards. Where a release proved no bound there is nothing to refuse
+    // against, so the number is written exactly as chosen. A render distance
+    // maximum is chosen by runtime branches, so no release proves one.
     assert_eq!(
         disposition(
             "1.20.1",
@@ -229,25 +190,23 @@ fn a_number_outside_a_releases_proven_domain_is_refused_rather_than_clamped() {
 }
 
 #[test]
-fn an_enumeration_accepts_only_what_the_exact_release_enumerates() {
-    let crosshair = MinecraftPreferenceValue::Enum("1".to_owned());
-    assert_eq!(
-        disposition("1.20.1", "attack_indicator", crosshair.clone()),
-        PreferenceDisposition::Writable
-    );
-    assert!(
-        applied_text("1.20.1", &managed(&[("attack_indicator", crosshair)]))
-            .contains("attackIndicator:1")
-    );
-    assert_eq!(
-        disposition(
-            "1.12.2",
-            "attack_indicator",
-            MinecraftPreferenceValue::Enum("1".to_owned())
-        ),
-        PreferenceDisposition::NotRepresentable(SkipReason::TypeMismatch),
-        "1.12.2 stores a plain number there, not a proven enumeration"
-    );
+fn an_enumeration_is_written_in_the_form_the_exact_release_stores() {
+    let fast = MinecraftPreferenceValue::Enum("fast".to_owned());
+    for (version, expected) in [
+        ("1.12.2", "renderClouds:fast"),
+        ("1.16.5", "renderClouds:fast"),
+        ("26.2", "renderClouds:\"fast\""),
+    ] {
+        assert_eq!(
+            disposition(version, "cloud_status", fast.clone()),
+            PreferenceDisposition::Writable,
+            "{version}"
+        );
+        assert!(
+            applied_text(version, &managed(&[("cloud_status", fast.clone())])).contains(expected),
+            "{version} stores the token as `{expected}`"
+        );
+    }
 }
 
 #[test]
@@ -268,11 +227,11 @@ fn a_value_the_product_does_not_enumerate_is_reported_as_not_in_domain() {
         assert_eq!(
             disposition(
                 version,
-                "attack_indicator",
+                "cloud_status",
                 MinecraftPreferenceValue::Enum("7".to_owned())
             ),
             PreferenceDisposition::NotRepresentable(SkipReason::NotInDomain),
-            "{version}: 7 is not an attack indicator choice"
+            "{version}: 7 is not a cloud status choice"
         );
     }
 }
@@ -340,16 +299,16 @@ fn a_binding_reaches_each_era_in_that_eras_own_spelling() {
     // file copied between them.
     let binding =
         MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::LeftShift));
-    let preferences = managed(&[("keybind_advancements", binding)]);
+    let preferences = managed(&[("keybind_inventory", binding)]);
 
     assert!(
-        applied_text("1.12.2", &preferences).contains("key_key.advancements:42"),
+        applied_text("1.12.2", &preferences).contains("key_key.inventory:42"),
         "1.12.2 stores the LWJGL 2 scan code"
     );
     for version in ["1.16.5", "1.20.1", "26.2"] {
         assert!(
             applied_text(version, &preferences)
-                .contains("key_key.advancements:key.keyboard.left.shift"),
+                .contains("key_key.inventory:key.keyboard.left.shift"),
             "{version} stores the serialized key name"
         );
     }
@@ -360,14 +319,14 @@ fn a_mouse_binding_and_an_unbound_key_reach_the_releases_that_establish_them() {
     for (value, expected) in [
         (
             MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Middle)),
-            "key_key.advancements:key.mouse.middle",
+            "key_key.inventory:key.mouse.middle",
         ),
         (
             MinecraftPreferenceValue::KeyBinding(InputBinding::Unbound),
-            "key_key.advancements:key.keyboard.unknown",
+            "key_key.inventory:key.keyboard.unknown",
         ),
     ] {
-        let preferences = managed(&[("keybind_advancements", value.clone())]);
+        let preferences = managed(&[("keybind_inventory", value.clone())]);
         assert!(
             applied_text("1.20.1", &preferences).contains(expected),
             "1.20.1 {expected}"
@@ -377,7 +336,7 @@ fn a_mouse_binding_and_an_unbound_key_reach_the_releases_that_establish_them() {
         // same field, but Ephervex's compatibility research establishes
         // neither, so nothing is written rather than something plausible.
         assert_eq!(
-            disposition("1.12.2", "keybind_advancements", value),
+            disposition("1.12.2", "keybind_inventory", value),
             PreferenceDisposition::NotRepresentable(SkipReason::InputUnavailable)
         );
     }
@@ -391,18 +350,15 @@ fn a_key_the_pre_1_13_era_has_no_code_for_is_refused_rather_than_approximated() 
     let value =
         MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::KeypadEqual));
     assert_eq!(
-        disposition("1.12.2", "keybind_advancements", value.clone()),
+        disposition("1.12.2", "keybind_inventory", value.clone()),
         PreferenceDisposition::NotRepresentable(SkipReason::InputUnavailable)
     );
     assert!(
-        !applied_text(
-            "1.12.2",
-            &managed(&[("keybind_advancements", value.clone())])
-        )
-        .contains("key_key.advancements"),
+        !applied_text("1.12.2", &managed(&[("keybind_inventory", value.clone())]))
+            .contains("key_key.inventory"),
     );
     assert_eq!(
-        disposition("1.20.1", "keybind_advancements", value),
+        disposition("1.20.1", "keybind_inventory", value),
         PreferenceDisposition::Writable,
         "the modern era names it"
     );
@@ -533,8 +489,8 @@ fn nothing_is_reported_as_applied_that_was_not_written() {
     let preferences = managed(&[
         ("simulation_distance", MinecraftPreferenceValue::Integer(10)),
         (
-            "menu_background_blurriness",
-            MinecraftPreferenceValue::Integer(6),
+            "sound_volume_master",
+            MinecraftPreferenceValue::decimal(1.5).expect("a number"),
         ),
         ("gui_scale", MinecraftPreferenceValue::Integer(2)),
     ]);
@@ -553,14 +509,14 @@ fn nothing_is_reported_as_applied_that_was_not_written() {
     assert!(report.unsupported.is_empty());
     assert!(report.unknown.is_empty());
     assert_eq!(report.skipped.len(), 1);
-    assert_eq!(report.skipped[0].id, id("menu_background_blurriness"));
+    assert_eq!(report.skipped[0].id, id("sound_volume_master"));
     assert_eq!(report.skipped[0].reason, SkipReason::OutOfRange);
 
     let text = std::fs::read_to_string(base.path().join(OPTIONS_FILE_NAME)).expect("read");
     assert!(text.contains("guiScale:2"));
     assert!(text.contains("simulationDistance:10"));
     assert!(
-        !text.contains("menuBackgroundBlurriness"),
+        !text.contains("soundCategory_master"),
         "a refused value leaves no trace"
     );
 }

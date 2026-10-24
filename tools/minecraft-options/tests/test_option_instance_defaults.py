@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 import analyze_options as analyzer
-from test_option_analysis import OPTION, OPTIONS, VALUE_OF, XMAP_CODEC, listing
+from .test_option_analysis import OPTION, OPTIONS, VALUE_OF, XMAP_CODEC, listing
 
 RANGED = f"{OPTION}$Ranged"
 ENUM = "net/minecraft/client/Mode"

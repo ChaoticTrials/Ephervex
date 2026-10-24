@@ -26,9 +26,9 @@ from unittest import mock
 import dataset
 import file_io
 import preferences
-from test_dataset import REQUIRED, release, setting
+from .test_dataset import REQUIRED, release, setting
 
-REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 BUNDLED_DATASET = REPO_ROOT / "crates" / "options" / "data" / "minecraft-options.json"
 BUNDLED_CATALOG = REPO_ROOT / "crates" / "options" / "data" / "minecraft-preferences.json"
 
@@ -1274,6 +1274,39 @@ class MaintainerCommand(unittest.TestCase):
         self.assertIn("does not match", err)
 
 
+class OfferedSettings(unittest.TestCase):
+    """The curated set of settings the shipped catalog offers."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dataset_document = json.loads(BUNDLED_DATASET.read_text(encoding="utf-8"))
+        cls.catalog = preferences.build(cls.dataset_document)
+        cls.current = set(cls.dataset_document["current_canonical_setting_ids"])
+
+    def test_every_offered_setting_is_a_current_canonical_setting(self):
+        self.assertEqual(preferences.OFFERED_SETTINGS - self.current, set())
+
+    def test_the_shipped_dataset_covers_the_offered_settings_and_nothing_else(self):
+        registered = {entry["id"] for entry in self.dataset_document["setting_registry"]}
+        self.assertEqual(self.current, preferences.OFFERED_SETTINGS)
+        self.assertEqual(registered, preferences.OFFERED_SETTINGS | dataset.ALWAYS_RETAINED)
+
+    def test_a_setting_the_policy_excludes_is_never_offered(self):
+        self.assertEqual(set(preferences.EXCLUSIONS) & preferences.OFFERED_SETTINGS, set())
+
+    def test_exactly_the_offered_settings_are_exposed(self):
+        exposed = {f["canonical_id"] for d in self.catalog["descriptors"] for f in d["fields"]}
+        compound = {cid for spec in preferences.COMPOUND_DESCRIPTORS for _, cid in spec["fields"]}
+        self.assertEqual(exposed, preferences.OFFERED_SETTINGS | compound)
+
+    def test_the_committed_catalog_offers_the_same_preferences(self):
+        committed = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {d["id"] for d in committed["descriptors"]},
+            {d["id"] for d in self.catalog["descriptors"]},
+        )
+
+
 class RealCanonicalShape(unittest.TestCase):
     """Checks the shape the plan describes against the dataset actually
     checked into the repository, so an unexplained drift is visible here
@@ -1338,29 +1371,12 @@ class RealCanonicalShape(unittest.TestCase):
         bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
         preferences.validate(bundled, self.dataset_document)
 
-    def test_the_mouse_wheel_range_is_not_the_slider_positions_of_its_helper(self):
-        document = self.dataset_document
-        registry = {entry["id"]: entry for entry in document["setting_registry"]}
-        self.assertEqual(registry["mouseWheelSensitivity"]["type"], "number")
-        for schema in document["schemas"]:
-            position = schema["supported"].get("mouseWheelSensitivity")
-            if position is None:
-                continue
-            codec = document["representations"][position]["codec"]
-            self.assertNotEqual((codec.get("min"), codec.get("max")), (-200, 100))
-
     def test_the_bundled_catalog_steps_match_what_the_game_stores(self):
         bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
         steps = {d["id"]: d["presentation"].get("step") for d in bundled["descriptors"]}
-        self.assertEqual(steps["chat_delay"], 0.1)
-        self.assertEqual(steps["chunk_section_fade_in_time"], 0.05)
-        self.assertEqual(steps["entity_distance_scaling"], 0.25)
-        self.assertEqual(steps["notification_display_time"], 0.1)
-        wheel = next(d for d in bundled["descriptors"] if d["id"] == "mouse_wheel_sensitivity")
-        self.assertEqual(
-            {key: wheel["presentation"][key] for key in ("min", "max", "step")},
-            {"min": None, "max": None, "step": None},
-        )
+        # The field of view is whole degrees; a sound volume is a free fraction.
+        self.assertEqual(steps["fov"], 1.0)
+        self.assertIsNone(steps["sound_volume_master"])
 
     def test_regenerating_from_the_same_dataset_is_deterministic(self):
         again = preferences.build(json.loads(BUNDLED_DATASET.read_text(encoding="utf-8")))

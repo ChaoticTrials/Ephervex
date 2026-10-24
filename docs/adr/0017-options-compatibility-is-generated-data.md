@@ -101,6 +101,13 @@ JARs, committed as data, and distributed separately from the application**.
    applied, because claiming support Ephervex cannot verify writes a code the
    game silently falls back from.
 
+9. **The dataset covers what the build offers.** `update.py` limits the dataset
+   to the settings the product catalog offers plus the few the application
+   cannot work without. Remote data cannot create product surface, so a
+   setting the catalog never offers would only be carried and published for
+   nothing. Offering one later means analyzing the releases again, because the
+   dataset no longer holds their conclusions for it.
+
 ## Consequences
 
 - A typical Minecraft hotfix needs a regenerated feed and no build. A release
@@ -108,7 +115,12 @@ JARs, committed as data, and distributed separately from the application**.
   preference, still needs one.
 - The historical client JARs are needed only to establish a release the first
   time. The committed dataset carries the conclusions, so regenerating for a new
-  release does not require re-analyzing the old ones.
+  release does not require re-analyzing the old ones, unless a setting is newly
+  offered (decision 9).
+- A feed revision describes the current build's offered settings. A build
+  released earlier that offers more adopts it and treats the settings it no
+  longer carries as unknown, so they stop being written until that build is
+  updated.
 - A setting discovered after an older release was analyzed stays *unknown* for
   that older release rather than being retroactively declared unsupported. That
   is the honest state and is never written.

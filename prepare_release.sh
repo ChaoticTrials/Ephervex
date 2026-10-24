@@ -124,7 +124,7 @@ fi
 # The same checks the release workflows run, in the same order, so a failure
 # here is the failure a tag would have produced.
 step "tooling tests"
-python3 -m py_compile tools/minecraft-options/*.py tools/licenses/*.py
+python3 -m py_compile tools/minecraft-options/*.py tools/minecraft-options/tests/*.py tools/licenses/*.py
 python3 -m unittest discover -s tools/minecraft-options
 python3 -m unittest discover -s tools/licenses
 "${REPO_ROOT}/packaging/test-linux-architectures.sh" >/dev/null

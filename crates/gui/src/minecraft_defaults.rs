@@ -1835,6 +1835,15 @@ impl MinecraftDefaultsModel {
         self.capturing = None;
     }
 
+    /// Whether the catalog has any developer-facing row, which is all the
+    /// advanced switch reveals.
+    #[must_use]
+    pub fn has_advanced_rows(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.descriptor.tier == PresentationTier::Advanced)
+    }
+
     /// Whether developer-facing rows are shown alongside the ordinary ones.
     #[must_use]
     pub const fn show_advanced(&self) -> bool {
@@ -2534,6 +2543,20 @@ mod tests {
         model
     }
 
+    /// The shipped catalog with one row promoted to the advanced tier, because
+    /// the shipped catalog has none and the switch needs a row to reveal.
+    fn model_with_advanced_row(name: &str) -> MinecraftDefaultsModel {
+        let mut snapshot = bundled_snapshot();
+        for entry in &mut snapshot.entries {
+            if entry.id() == name {
+                entry.descriptor.tier = PresentationTier::Advanced;
+            }
+        }
+        let mut model = MinecraftDefaultsModel::new();
+        model.apply_snapshot(snapshot);
+        model
+    }
+
     fn id(text: &str) -> PreferenceId {
         PreferenceId::parse(text).expect("a well-formed id")
     }
@@ -2576,22 +2599,27 @@ mod tests {
     }
 
     #[test]
-    fn the_deliberately_excluded_settings_never_become_rows() {
+    fn no_row_exists_for_a_setting_the_catalog_does_not_offer() {
         let mut model = loaded_model();
         let catalog = MinecraftPreferenceCatalog::bundled_shared().expect("the bundled catalog");
-        let reachable: BTreeSet<String> = all_rows(&mut model).into_iter().collect();
+        let offered: BTreeSet<&str> = catalog
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.id.as_str())
+            .collect();
 
-        assert!(!catalog.exclusions.is_empty());
-        for exclusion in &catalog.exclusions {
+        let reachable = all_rows(&mut model);
+
+        assert!(!reachable.is_empty());
+        for row in &reachable {
             assert!(
-                !reachable.contains(&exclusion.canonical_id),
-                "`{}` is excluded and must not be editable",
-                exclusion.canonical_id
+                offered.contains(row.as_str()),
+                "`{row}` is not an offered preference"
             );
         }
         assert!(
-            !reachable.contains("soundDevice"),
-            "the excluded sound device must stay out of Sound & Music"
+            !reachable.iter().any(|row| row == "sound_device"),
+            "the machine-specific sound device must stay out of Sound & Music"
         );
     }
 
@@ -2832,7 +2860,7 @@ mod tests {
 
     #[test]
     fn advanced_rows_stay_available_without_crowding_the_default_view() {
-        let mut model = loaded_model();
+        let mut model = model_with_advanced_row("keybind_use");
         model.select_category(3);
 
         model.set_show_advanced(false);
@@ -2937,20 +2965,35 @@ mod tests {
 
     #[test]
     fn an_advanced_row_edited_and_then_hidden_is_still_saved() {
-        let mut model = loaded_model();
+        let mut model = model_with_advanced_row("keybind_use");
         model.select_category(3);
         model.set_show_advanced(true);
-        let overlay = id("keybind_debug_overlay");
-        model.set_binding(&overlay, InputBinding::Keyboard(PhysicalKey::F4));
+        assert!(
+            model
+                .visible_entries()
+                .iter()
+                .any(|entry| entry.id() == "keybind_use"),
+            "the advanced row is reachable before it is hidden"
+        );
+        model.set_binding(&id("keybind_use"), InputBinding::Keyboard(PhysicalKey::F4));
 
         model.set_show_advanced(false);
         assert!(
             !model
                 .visible_entries()
                 .iter()
-                .any(|entry| entry.id() == "keybind_debug_overlay")
+                .any(|entry| entry.id() == "keybind_use")
         );
         assert_eq!(model.edits().len(), 1, "hidden is not discarded");
+    }
+
+    #[test]
+    fn the_advanced_switch_is_offered_only_when_the_catalog_has_advanced_rows() {
+        assert!(
+            !loaded_model().has_advanced_rows(),
+            "the shipped catalog marks nothing advanced, so the switch would do nothing"
+        );
+        assert!(model_with_advanced_row("keybind_use").has_advanced_rows());
     }
 
     // -------------------------------------------------------- save and discard
@@ -3101,7 +3144,7 @@ mod tests {
         model.set_boolean(&id("fullscreen"), false);
         model.set_number_text(&id("render_distance"), "16");
         model.set_number(&id("sound_volume_master"), 40.0);
-        model.set_enumeration(&id("attack_indicator"), 2);
+        model.set_enumeration(&id("cloud_status"), 2);
         model.set_window_size(&id("window_size"), "1280", "720");
         model.set_binding(
             &id("keybind_sneak"),
@@ -3238,7 +3281,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(editor_of("attack_indicator"), PreferenceEditor::Enumeration);
+        assert_eq!(editor_of("cloud_status"), PreferenceEditor::Enumeration);
         assert_eq!(editor_of("language"), PreferenceEditor::Language);
         assert_eq!(editor_of("keybind_attack"), PreferenceEditor::KeyBinding);
         assert_eq!(editor_of("window_size"), PreferenceEditor::WindowSize);
@@ -3328,22 +3371,12 @@ mod tests {
     #[test]
     fn each_category_orders_its_sections_for_itself() {
         assert_eq!(headings(2), ["Volume", "General"], "sound and music");
-        assert_eq!(headings(0), ["General", "Skin parts"], "gameplay");
+        assert_eq!(headings(0), ["General"], "gameplay");
         assert_eq!(headings(1), ["General"], "video");
         assert_eq!(headings(4), ["General"], "language and accessibility");
         assert_eq!(
             headings(3),
-            [
-                "General",
-                "Movement",
-                "Gameplay",
-                "Inventory",
-                "Multiplayer",
-                "Creative",
-                "Spectator",
-                "Miscellaneous",
-                "Debug",
-            ],
+            ["General", "Movement", "Gameplay", "Inventory"],
             "controls"
         );
     }
@@ -4732,13 +4765,13 @@ mod tests {
         );
 
         // Every other preference stays editable and saveable.
-        model.set_boolean(&id("chat_colors"), false);
+        model.set_boolean(&id("auto_jump"), false);
         assert!(model.can_save());
         assert!(
             model
                 .edits()
                 .iter()
-                .any(|edit| edit.id.as_str() == "chat_colors")
+                .any(|edit| edit.id.as_str() == "auto_jump")
         );
         assert_eq!(
             model.language_availability(),

@@ -14,7 +14,7 @@ import unittest
 
 import analyze_options as analyzer
 import dataset
-import test_dataset as fixtures
+from . import test_dataset as fixtures
 
 OPTION = "net/minecraft/client/OptionInstance"
 ROOT = "net/minecraft/client/Options"

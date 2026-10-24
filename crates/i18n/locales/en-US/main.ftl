@@ -3040,8 +3040,8 @@ gui-minecraft-language-loading = Loading the language list...
 gui-minecraft-language-unavailable = The language list could not be resolved. Every other setting stays editable.
 gui-minecraft-language-retry = Retry
 gui-minecraft-preserved-notice = { $count ->
-    [one] 1 Minecraft default was created by a newer Ephervex version and is being preserved.
-   *[other] { $count } Minecraft defaults were created by a newer Ephervex version and are being preserved.
+    [one] 1 saved Minecraft default is not offered by this version and is kept unchanged, not applied.
+   *[other] { $count } saved Minecraft defaults are not offered by this version and are kept unchanged, not applied.
 }
 gui-minecraft-unusable-notice = { $count ->
     [one] 1 configured Minecraft default could not be read and is not applied.

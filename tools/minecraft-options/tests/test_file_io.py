@@ -14,7 +14,7 @@ from unittest import mock
 
 import file_io
 
-TOOL_DIR = Path(__file__).resolve().parent
+TOOL_DIR = Path(__file__).resolve().parent.parent
 
 
 class AtomicWrite(unittest.TestCase):
@@ -119,7 +119,7 @@ class EveryOutputIsWrittenAtomically(unittest.TestCase):
     def test_no_script_writes_a_file_directly(self):
         offenders = []
         for source in sorted(TOOL_DIR.glob("*.py")):
-            if source.name.startswith("test_") or source.name == "file_io.py":
+            if source.name == "file_io.py":
                 continue
             offenders += [f"{source.name} {found}" for found in direct_writes(source.read_text(encoding="utf-8"))]
         self.assertEqual(offenders, [], "write through file_io.write_atomic instead")

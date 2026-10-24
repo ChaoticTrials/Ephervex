@@ -31,10 +31,9 @@ python3 tools/minecraft-options/update.py --version 26.2
 
 That single command reads Mojang's version manifest, picks a **release** (never
 a snapshot or release candidate), downloads and SHA-1 verifies the official
-client JAR and version metadata into an untracked development cache, refreshes
-that release's official language catalog, analyzes the JAR statically, folds
-the result into the committed dataset, and writes the exact JSON to publish to
-the remote feed. It prints a short summary of what actually changed.
+client JAR and version metadata into an untracked development cache, analyzes
+the JAR statically, folds the result into the committed dataset, and writes the
+exact JSON to publish to the remote feed. It prints a short summary of what actually changed.
 
 A build counts as a release only when its `version.json` `name` and `id` agree
 on a release identifier (`1.N`, `1.N.P`, or `YY.N[.P]` from 26.1). A
@@ -46,8 +45,7 @@ Exactly one of `--latest`, `--version` and `--from-analysis` selects the input.
 `--latest` always re-reads the manifest, and a `--version` the cached manifest
 does not list re-reads it once before failing. Every downloaded document and
 file is checked against the SHA-1 Mojang published for it; a mismatch or a
-missing hash stops the run, and the language catalog must be produced for the
-release or the run fails. The version metadata, assets, and catalogs all come
+missing hash stops the run. The version metadata and the client JAR both come
 from that one manifest.
 
 Two supporting modes:
@@ -81,10 +79,19 @@ are refused too, because the mapping for that release would be undecided; copies
 one JAR count once. A successful run removes the `raw/` and `normalized/` records of
 JARs it did not analyze, so the output holds exactly that run's analysis, and
 `update.py` and `preferences.py` refuse analyzer output that holds different records for
-one release.
+one release. The analyzer writes `inventory.json`, `raw/` and `normalized/` and nothing
+else; `normalized/` is the only part the rest of the tooling reads.
 
 Publication is manual and deliberate. `update.py` never edits the remote feed
 and never needs GitHub credentials; it writes the file and prints its path.
+
+The feed covers the settings the current build offers and nothing else. An
+already-released build adopts any feed with a higher revision than its bundled
+one, and a setting that build offers but the feed no longer carries becomes
+*unknown* for it and is never written. So a revision generated after
+`OFFERED_SETTINGS` shrank takes those preferences away from older builds until
+their users upgrade; publish it knowing that, or keep the set a superset of what
+supported releases offer.
 
 Before anything is written, `dataset.validate` applies the same structural checks
 the application applies when it loads a dataset (codec parameters, option keys,
@@ -102,8 +109,17 @@ manageable setting is not yet covered by the bundled product catalog:
   preferences.py before they can appear on a settings screen
 ```
 
-That notice is read-only. Growing the product catalog is a separate,
-deliberate step:
+That notice is read-only. Ephervex offers only the canonical ids listed in
+`OFFERED_SETTINGS` in `preferences.py`, and `update.py` limits the compatibility
+dataset to that set plus the few ids the application cannot work without
+(`dataset.ALWAYS_RETAINED`). Remote data cannot invent a setting, so a setting
+the catalog never offers would only be carried and published for nothing; the
+analyzer still reads every setting of a release, so offering one later means
+adding its canonical id to `OFFERED_SETTINGS`, analyzing every cached release again
+and folding the complete analysis with `--from-analysis` (the committed dataset no
+longer holds the older releases' conclusions for it, so a fold of only the newest
+release would leave the others unknown), and regenerating the catalog.
+Growing the product catalog is a separate, deliberate step:
 
 ```bash
 python3 tools/minecraft-options/preferences.py --from-analysis tools/minecraft-options/.cache/analysis
@@ -151,13 +167,12 @@ compiled into the binaries and are never fetched at build time. See
 |---|---|
 | `analyze_options.py` | Static options.txt analyzer: reads a client JAR's bytecode and reports how each option is stored |
 | `official_sources.py` | Downloads from Mojang's published sources: https-only, SHA-1 verified, with validated identifiers and the shared version manifest cache |
-| `fetch_language_catalogs.py` | Fetches a release's language catalog from its own `pack.mcmeta` asset object |
 | `file_io.py` | Every file the scripts generate or cache is written through a temporary file in the same directory and renamed into place, so an interrupted run leaves the previous file. Damaged inputs are reported with their path |
 | `release_identity.py` | What counts as a release identifier, and how releases are ordered |
 | `dataset.py` | Turns analyzer output into the compatibility dataset, and validates it |
 | `preferences.py` | Turns the compatibility dataset (plus optional analyzer enrichment) into the bundled product preference catalog, and validates it |
 | `update.py` | The maintainer workflow: fetches, analyzes, folds into the compatibility dataset, and reports whether the product catalog needs review |
-| `test_dataset.py`, `test_preferences.py`, `test_update.py`, `test_release_identity.py`, `test_official_sources.py`, `test_update_command.py`, `test_file_io.py` | Offline tests: `python3 -m unittest discover -s tools/minecraft-options` |
+| `tests/` | Offline tests for all of the above, one `test_*.py` per subject: `python3 -m unittest discover -s tools/minecraft-options`, or one module with `python3 -m unittest tests.test_dataset` from this directory |
 | `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output, generated feed |
 
 Analyzer output is the input to every fingerprint in the committed dataset, so
@@ -175,7 +190,7 @@ other's job:
 | Owner | `dataset.py` | `preferences.py` |
 | Remote-updatable | yes, via the options feed | no - bundled only |
 | A new Minecraft release | may extend it without a new Ephervex release | never changes it by itself |
-| A new canonical setting | recorded as data automatically | requires a reviewed regeneration and an Ephervex release before it is user-facing |
+| A new canonical setting | recorded only if the build already offers it; any other setting is not carried | requires a reviewed regeneration and an Ephervex release before it is user-facing |
 
 That asymmetry is the load-bearing part: the compatibility feed may say "this
 release stores this setting this way", but it can never decide "this Ephervex

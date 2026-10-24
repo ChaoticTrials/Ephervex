@@ -135,6 +135,80 @@ EXCLUSIONS = {
     "tutorialStep": "tutorial progress is client-owned state, not a portable global preference",
 }
 
+# The settings Ephervex offers as global defaults, and the only ones the
+# compatibility dataset covers (`update.py` limits the dataset to this set plus a
+# few the application cannot work without), so the catalog offers every
+# manageable setting the dataset can write. The set is limited to settings whose
+# storage has stayed the same across the supported releases and that people set
+# as a default for every instance: display and interface, field of view and
+# distances, sound and music, the mouse, and the movement, gameplay and
+# inventory key bindings. To offer another one, add its canonical id here and
+# regenerate both documents. A configuration entry for a setting that is no
+# longer offered is kept in the configuration file and not applied.
+OFFERED_SETTINGS = frozenset({
+    # Display, interface and language.
+    "advancedItemTooltips",
+    "autoJump",
+    "cloudStatus",
+    "darkMojangStudiosBackground",
+    "enableVsync",
+    "fov",
+    "fullscreen",
+    "gamma",
+    "graphicsPreset",
+    "guiScale",
+    LANGUAGE_CANONICAL_ID,
+    "onboardAccessibility",
+    "overrideHeight",
+    "overrideWidth",
+    "renderDistance",
+    "simulationDistance",
+    "skipMultiplayerWarning",
+    # Sound and music.
+    "directionalAudio",
+    "musicFrequency",
+    "musicToast",
+    "showSubtitles",
+    "sound.volume.ambient",
+    "sound.volume.block",
+    "sound.volume.hostile",
+    "sound.volume.master",
+    "sound.volume.music",
+    "sound.volume.neutral",
+    "sound.volume.player",
+    "sound.volume.record",
+    "sound.volume.ui",
+    "sound.volume.voice",
+    "sound.volume.weather",
+    # Mouse.
+    "invertXMouse",
+    "invertYMouse",
+    "sensitivity",
+    # Movement, gameplay and inventory key bindings.
+    "keybind.attack",
+    "keybind.back",
+    "keybind.drop",
+    "keybind.forward",
+    "keybind.hotbar.1",
+    "keybind.hotbar.2",
+    "keybind.hotbar.3",
+    "keybind.hotbar.4",
+    "keybind.hotbar.5",
+    "keybind.hotbar.6",
+    "keybind.hotbar.7",
+    "keybind.hotbar.8",
+    "keybind.hotbar.9",
+    "keybind.inventory",
+    "keybind.jump",
+    "keybind.left",
+    "keybind.pickItem",
+    "keybind.right",
+    "keybind.sneak",
+    "keybind.sprint",
+    "keybind.swapOffhand",
+    "keybind.use",
+})
+
 # Why a manageable current setting is left out when the canonical release has no
 # codec for it: a row for it could never be applied.
 UNPROVEN_CODEC_REASON = (

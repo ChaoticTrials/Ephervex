@@ -239,6 +239,59 @@ class CodecDerivation(unittest.TestCase):
         self.assertIn("contradictory evidence", dataset.representation_issue(contradictory, "glfw"))
 
 
+class RetainedSettings(unittest.TestCase):
+    EXTRA = setting("extraOption")
+    KEPT = frozenset({entry["logical_id"] for entry in REQUIRED})
+
+    def test_only_retained_settings_are_registered(self):
+        document, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA])], self.KEPT)
+
+        self.assertEqual({entry["id"] for entry in document["setting_registry"]}, set(self.KEPT))
+        self.assertNotIn("extraOption", document["current_canonical_setting_ids"])
+        self.assertNotIn("extraOption", document["schemas"][0]["supported"])
+        dataset.validate(document)
+
+    def test_without_a_retention_set_every_setting_is_kept(self):
+        document, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA])])
+
+        self.assertIn("extraOption", document["current_canonical_setting_ids"])
+
+    def test_a_smaller_retention_set_prunes_what_the_previous_dataset_held(self):
+        full, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA])])
+
+        pruned, _ = dataset.merge(full, [], self.KEPT)
+
+        self.assertEqual({entry["id"] for entry in pruned["setting_registry"]}, set(self.KEPT))
+        self.assertEqual(set(pruned["current_canonical_setting_ids"]), set(self.KEPT))
+        self.assertNotIn("extraOption", pruned["schemas"][0]["supported"])
+        dataset.validate(pruned)
+
+    def test_pruning_re_identifies_a_family_by_its_new_content(self):
+        full, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA])])
+
+        pruned, _ = dataset.merge(full, [], self.KEPT)
+
+        self.assertNotEqual(full["releases"][0]["schema"], pruned["releases"][0]["schema"])
+        self.assertEqual([schema["id"] for schema in pruned["schemas"]], [pruned["releases"][0]["schema"]])
+
+    def test_releases_that_differed_only_in_a_dropped_setting_share_a_family(self):
+        other = release("26.3", REQUIRED + [setting("extraOption", kind="integer")])
+        full, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA]), other])
+        self.assertEqual(len(full["schemas"]), 2)
+
+        pruned, _ = dataset.merge(full, [], self.KEPT)
+
+        self.assertEqual(len(pruned["schemas"]), 1)
+        self.assertEqual(len({entry["schema"] for entry in pruned["releases"]}), 1)
+
+    def test_a_pruned_dataset_advances_its_revision(self):
+        full, _ = dataset.merge(None, [release("26.2", REQUIRED + [self.EXTRA])])
+
+        pruned, _ = dataset.merge(full, [], self.KEPT)
+
+        self.assertEqual(pruned["revision"], full["revision"] + 1)
+
+
 class Fingerprints(unittest.TestCase):
     def test_identical_content_yields_one_family_and_different_content_does_not(self):
         base = release("1.20.1", REQUIRED)

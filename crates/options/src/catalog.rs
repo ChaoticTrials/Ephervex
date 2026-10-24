@@ -929,13 +929,8 @@ mod tests {
     }
 
     #[test]
-    fn the_seven_unsafe_current_settings_are_never_exposed() {
+    fn the_seven_unsafe_settings_are_never_exposed() {
         let catalog = MinecraftPreferenceCatalog::bundled().expect("valid");
-        let excluded: BTreeSet<&str> = catalog
-            .exclusions
-            .iter()
-            .map(|exclusion| exclusion.canonical_id.as_str())
-            .collect();
         let exposed: BTreeSet<&str> = catalog
             .descriptors
             .iter()
@@ -950,10 +945,6 @@ mod tests {
             "startedCleanly",
             "tutorialStep",
         ] {
-            assert!(
-                excluded.contains(unsafe_id),
-                "`{unsafe_id}` must be excluded"
-            );
             assert!(
                 !exposed.contains(unsafe_id),
                 "`{unsafe_id}` must not be exposed"

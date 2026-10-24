@@ -8,7 +8,7 @@ import unittest
 
 import dataset
 import update
-from test_dataset import REQUIRED, release, setting
+from .test_dataset import REQUIRED, release, setting
 
 
 def schema_of(document: dict, version: str) -> str:

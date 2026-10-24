@@ -11,8 +11,7 @@ This is the one maintainer workflow for this subsystem.
 
 It reads Mojang's published version manifest, selects a release (never a
 snapshot), fetches and hash-verifies that release's official client JAR into an
-untracked development cache, refreshes the release's official language catalog,
-analyzes the JAR statically without ever executing Minecraft, folds the result
+untracked development cache, analyzes the JAR statically without ever executing Minecraft, folds the result
 into the committed dataset, and writes the exact JSON to publish to the remote
 options feed.
 
@@ -35,12 +34,16 @@ from pathlib import Path
 from typing import Any
 
 import dataset
-import fetch_language_catalogs
 import official_sources
 import preferences
 from file_io import read_json_object, read_text_or_empty, write_atomic
 from official_sources import SourceError
 from release_identity import is_release
+
+# The dataset covers the settings the application offers and nothing else: remote
+# data cannot invent a setting, so a setting the catalog never offers would only
+# be carried and published for nothing.
+OFFERED = preferences.OFFERED_SETTINGS
 
 TOOL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOL_DIR.parent.parent
@@ -125,7 +128,7 @@ def client_jar(entry: dict[str, Any], cache: Path) -> Path:
 # ------------------------------------------------------------------ analysing
 
 
-def analyzer_command(jar: Path, output: Path, assets_cache: Path) -> list[str]:
+def analyzer_command(jar: Path, output: Path) -> list[str]:
     """The deterministic command for analyzing exactly one selected client JAR."""
     return [
         sys.executable,
@@ -136,8 +139,6 @@ def analyzer_command(jar: Path, output: Path, assets_cache: Path) -> list[str]:
         str(jar),
         "--output",
         str(output),
-        "--assets-cache",
-        str(assets_cache),
     ]
 
 
@@ -146,33 +147,12 @@ def run_analyzer(cache: Path, jar: Path) -> Path:
     output = cache / "analysis" / jar.stem
     output.mkdir(parents=True, exist_ok=True)
     completed = subprocess.run(  # noqa: S603
-        analyzer_command(jar, output, cache / "assets-cache"),
+        analyzer_command(jar, output),
         check=False,
     )
     if completed.returncode != 0:
         raise WorkflowError("the static analyzer failed; see its output above")
     return output
-
-
-def refresh_language_catalogs(
-    cache: Path, versions: list[str], refresh_manifest: bool = False
-) -> dict[str, dict[str, Any]]:
-    """Brings each release's official language catalog in the cache up to date.
-
-    Uses the workflow's one version manifest, fetching it again when it does not
-    list a requested release. Raises unless every release has a verified catalog.
-    """
-    document = official_sources.load_manifest(
-        cache / official_sources.MANIFEST_NAME,
-        online=True,
-        refresh=refresh_manifest,
-        needs=versions,
-    )
-    records, failures = fetch_language_catalogs.refresh(cache / "assets-cache", document, versions)
-    if failures:
-        detail = "; ".join(f"{version}: {reason}" for version, reason in sorted(failures.items()))
-        raise WorkflowError(f"the language catalog could not be produced ({detail})")
-    return records
 
 
 def normalized_records(analysis: Path, only: set[str] | None) -> list[dict[str, Any]]:
@@ -274,7 +254,6 @@ def summarize(
     previous: dict[str, Any] | None,
     changes: list[dict[str, str]],
     records: list[dict[str, Any]],
-    catalogs: dict[str, dict[str, Any]] | None,
     preference_catalog: dict[str, Any] | None = None,
 ) -> list[str]:
     lines: list[str] = []
@@ -309,11 +288,6 @@ def summarize(
         else:
             lines.append(f"  new schema {schema_id}")
             established.add(schema_id)
-        extra = schema_for_extras(record, document)
-        if extra:
-            lines.append(
-                f"  {len(extra)} options.txt key(s) with no canonical definition: {', '.join(extra[:8])}"
-            )
 
     introduced = sorted(settings_now - settings_before)
     if introduced:
@@ -321,7 +295,7 @@ def summarize(
             f"{len(introduced)} canonical setting(s) newly recorded: {', '.join(introduced[:8])}"
         )
         lines.append(
-            "  recorded as data only; exposing one as an Ephervex preference needs an application release"
+            "  the dataset covers only the settings Ephervex offers; regenerate the product catalog if one is not exposed yet"
         )
 
     candidates = preference_catalog_candidates(document, preference_catalog)
@@ -334,11 +308,6 @@ def summarize(
             "  the bundled preference catalog does not expose or exclude them yet; review with "
             "preferences.py before they can appear on a settings screen"
         )
-
-    if catalogs:
-        newest = max(catalogs, key=dataset.version_key)
-        scope = newest if len(catalogs) == 1 else f"{len(catalogs)} releases, newest {newest}"
-        lines.append(f"language catalog refreshed ({scope}): {catalogs[newest].get('language_count')} codes")
 
     review = application_review_reasons(records, document)
     changed = previous is not None and previous["revision"] != document["revision"]
@@ -376,12 +345,6 @@ def redefined_settings(previous: dict[str, Any] | None, document: dict[str, Any]
         for entry in document["setting_registry"]
         if entry["id"] in before and before[entry["id"]] != entry
     )
-
-
-def schema_for_extras(record: dict[str, Any], document: dict[str, Any]) -> list[str]:
-    """Persisted keys this release has that no canonical definition covers."""
-    known = {entry["key"] for entry in document["setting_registry"]}
-    return sorted({setting["persisted_key"] for setting in record["settings"]} - known)
 
 
 def application_review_reasons(
@@ -450,12 +413,13 @@ def main() -> int:
 
     if args.refresh_manifest and (args.check or args.offline):
         parser.error("--refresh-manifest needs the network, which --check and --offline never use")
+    if args.refresh_manifest and args.from_analysis:
+        parser.error("--refresh-manifest has nothing to refresh with --from-analysis, which reads no manifest")
     if args.offline and not args.check and not args.from_analysis:
         parser.error("analyzing a release needs the network; use --from-analysis")
     online = not (args.check or args.offline)
 
     cache: Path = args.cache.resolve()
-    catalogs: dict[str, dict[str, Any]] | None = None
 
     try:
         previous = read_bundled()
@@ -463,10 +427,6 @@ def main() -> int:
         if args.from_analysis:
             analysis = args.from_analysis.resolve()
             records = normalized_records(analysis, None)
-            if online:
-                catalogs = refresh_language_catalogs(
-                    cache, [record["minecraft_version"] for record in records], args.refresh_manifest
-                )
         else:
             document = official_sources.load_manifest(
                 cache / official_sources.MANIFEST_NAME,
@@ -486,11 +446,10 @@ def main() -> int:
             else:
                 print(f"[update] selected release {entry['id']}", flush=True)
                 jar = client_jar(entry, cache)
-                catalogs = refresh_language_catalogs(cache, [entry["id"]])
                 analysis = run_analyzer(cache, jar)
             records = normalized_records(analysis, {entry["id"]})
 
-        merged, changes = dataset.merge(previous, records)
+        merged, changes = dataset.merge(previous, records, OFFERED | dataset.ALWAYS_RETAINED)
         dataset.validate(merged)
     except (WorkflowError, SourceError, dataset.DatasetError) as error:
         print(f"[update] {error}", file=sys.stderr)
@@ -513,7 +472,7 @@ def main() -> int:
         return 0
 
     try:
-        summary = summarize(merged, previous, changes, records, catalogs, preference_catalog)
+        summary = summarize(merged, previous, changes, records, preference_catalog)
     except WorkflowError as error:
         print(f"[update] {error}", file=sys.stderr)
         return 1

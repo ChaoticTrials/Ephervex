@@ -712,7 +712,7 @@ mod tests {
 
     #[test]
     fn a_preference_id_is_a_validated_identity_rather_than_free_text() {
-        for good in ["fov", "gui_scale", "keybind_advancements", "window_size"] {
+        for good in ["fov", "gui_scale", "keybind_inventory", "window_size"] {
             assert_eq!(PreferenceId::parse(good).expect("valid").as_str(), good);
         }
         for bad in ["", "Fov", "gui scale", "gui-scale", "fov!", "fov\n"] {
@@ -781,8 +781,8 @@ mod tests {
             ("render_distance", PreferenceValueShape::Integer),
             ("fov", PreferenceValueShape::Decimal),
             ("language", PreferenceValueShape::LanguageCode),
-            ("attack_indicator", PreferenceValueShape::Enum),
-            ("keybind_advancements", PreferenceValueShape::KeyBinding),
+            ("cloud_status", PreferenceValueShape::Enum),
+            ("keybind_inventory", PreferenceValueShape::KeyBinding),
             ("window_size", PreferenceValueShape::WindowSize),
         ];
         for (name, shape) in expected {
@@ -836,7 +836,7 @@ mod tests {
             .expect_err("outside the proven slider");
         assert_eq!(error.problem, PreferenceValueProblem::OutOfDomain);
 
-        let error = descriptor("attack_indicator")
+        let error = descriptor("cloud_status")
             .validate_value(&MinecraftPreferenceValue::Enum("7".to_owned()))
             .expect_err("not a value this setting enumerates");
         assert_eq!(error.problem, PreferenceValueProblem::NotEnumerated);
@@ -910,11 +910,11 @@ mod tests {
             ("fov", "82.5"),
             ("fov", "90"),
             ("language", "de_de"),
-            ("attack_indicator", "2"),
+            ("cloud_status", "fast"),
             ("window_size", "1920x1080"),
-            ("keybind_advancements", "key:left.shift"),
-            ("keybind_advancements", "mouse:middle"),
-            ("keybind_advancements", "unbound"),
+            ("keybind_inventory", "key:left.shift"),
+            ("keybind_inventory", "mouse:middle"),
+            ("keybind_inventory", "unbound"),
         ];
         for (name, text) in cases {
             let value = descriptor(name)
@@ -958,7 +958,7 @@ mod tests {
                     ordinal: None,
                 }],
             },
-            ..descriptor("attack_indicator").clone()
+            ..descriptor("cloud_status").clone()
         };
         let value = enum_preference
             .parse_stored_value(" foo ")
@@ -1017,7 +1017,7 @@ mod tests {
             ("render_distance", "sixteen"),
             ("fov", "wide"),
             ("window_size", "1920"),
-            ("keybind_advancements", "W"),
+            ("keybind_inventory", "W"),
         ] {
             let error = descriptor(name)
                 .parse_stored_value(text)
@@ -1110,8 +1110,8 @@ mod tests {
             ("fullscreen", true, "false"),
             ("fov", true, "82.5"),
             ("window_size", false, "1920x1080"),
-            ("attack_indicator", true, "2"),
-            ("keybind_advancements", true, "key:left.shift"),
+            ("cloud_status", true, "fast"),
+            ("keybind_inventory", true, "key:left.shift"),
         ];
         let loaded = ConfiguredPreferences::from_settings(catalog(), original);
         assert!(loaded.rejected.is_empty());
@@ -1138,7 +1138,7 @@ mod tests {
 
     #[test]
     fn a_key_binding_value_keeps_its_release_neutral_model() {
-        let binding = descriptor("keybind_advancements")
+        let binding = descriptor("keybind_inventory")
             .parse_stored_value("mouse:4")
             .expect("valid");
         assert_eq!(
@@ -1146,7 +1146,7 @@ mod tests {
             MinecraftPreferenceValue::KeyBinding(InputBinding::Mouse(MouseButton::Button4))
         );
         assert_eq!(
-            descriptor("keybind_advancements")
+            descriptor("keybind_inventory")
                 .parse_stored_value("key:f3")
                 .expect("valid"),
             MinecraftPreferenceValue::KeyBinding(InputBinding::Keyboard(PhysicalKey::F3))
