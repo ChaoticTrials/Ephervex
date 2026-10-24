@@ -2447,7 +2447,10 @@ gui-delete-instance-while-running = Delete Instance (stop the game first)
 gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
 gui-delete-server-detail = Remove "{ $value }" from Ephervex?
-gui-delete-choice-detail = Keeping files only removes the Ephervex record. Deleting files permanently removes the managed game or server directory.
+gui-delete-keep-title = Keep files
+gui-delete-keep-detail = Removes it from Ephervex. Its folder stays on disk.
+gui-delete-files-title = Delete files
+gui-delete-files-detail = Deletes its folder, including worlds, mods, and logs. This cannot be undone.
 gui-delete-host-snapshots =
     { $count ->
         [one] Deleting files also deletes 1 retained snapshot.

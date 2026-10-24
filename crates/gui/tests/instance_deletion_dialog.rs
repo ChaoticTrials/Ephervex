@@ -145,3 +145,37 @@ fn install_i18n(ui: &AppWindow) {
         lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
     });
 }
+
+#[test]
+fn both_outcomes_are_offered_as_cards_with_their_consequences() {
+    let ui = window();
+    deletion_dialog(&ui, 0, 0);
+
+    for key in [
+        "gui-delete-keep-title",
+        "gui-delete-keep-detail",
+        "gui-delete-files-title",
+        "gui-delete-files-detail",
+    ] {
+        assert!(widest(&ui, &lookup(key)).is_some(), "{key}");
+    }
+}
+
+#[test]
+fn the_cancel_button_stays_inside_the_dialog_whatever_notes_it_carries() {
+    let ui = window();
+    for (stoppable, unstoppable) in [(0, 0), (1, 0), (0, 1)] {
+        deletion_dialog(&ui, stoppable, unstoppable);
+        let cancel = widest(&ui, &lookup("gui-cancel")).expect("Cancel");
+        let delete = widest(&ui, &lookup("gui-delete-files-title")).expect("the card");
+        assert!(
+            cancel.absolute_position().y > delete.absolute_position().y,
+            "Cancel sits under the cards"
+        );
+        let window_height = f64::from(ui.window().size().height);
+        assert!(
+            f64::from(cancel.absolute_position().y + cancel.size().height) < window_height,
+            "Cancel is inside the window"
+        );
+    }
+}
