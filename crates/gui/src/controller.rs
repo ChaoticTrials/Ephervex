@@ -11245,8 +11245,10 @@ fn apply_mod_install_plan(
     // planned would replace what they are looking at, and would leave the
     // linked-server rows describing a different operation than the one on
     // screen.
+    // The Add mods dialog is where the request was made, so the confirmation
+    // takes its place.
     let modal = ui.get_modal();
-    if !modal.is_empty() && modal != "mod-plan" {
+    if !modal.is_empty() && modal != "mod-plan" && modal != "add-mods" {
         let name = if plan.title.is_empty() {
             plan.project.as_str()
         } else {
@@ -11269,14 +11271,21 @@ fn apply_mod_install_plan(
 
 /// Shows what one finished operation did to each target that took part.
 fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
+    // The Add mods dialog asked for the operation, and a report that needs
+    // nothing from the reader leaves it open for the next mod.
+    let in_catalog = ui.get_modal() == "add-mods";
     let owns_modal = {
         let modal = ui.get_modal();
-        modal.is_empty() || result.scope.covers(modal.as_str())
+        modal.is_empty() || in_catalog || result.scope.covers(modal.as_str())
     };
     let needs_review =
         presentation::linked_result_needs_review(result.rows.iter().map(|row| row.tone.as_str()));
     let summary = result.summary.clone();
     ui.set_mod_action_pending(false);
+    if in_catalog && !needs_review {
+        ui.invoke_present_toast(summary.into(), false);
+        return;
+    }
     if !owns_modal {
         // The dialog on screen is not this operation's to replace, so the
         // outcome is said in one line instead of the per-target report.
@@ -19253,6 +19262,8 @@ mod tests {
         let (ui, workspace, commands, server) = server_mods_window();
         register_browser_install(&ui, &workspace.commands, &workspace);
         register_mod_browser(&ui, &workspace.commands, &workspace);
+        ui.set_add_mods_host(0);
+        ui.set_modal("add-mods".into());
         let id = server.id();
         ui.invoke_search_mods(
             "server".into(),
@@ -20236,6 +20247,43 @@ mod tests {
 
         apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
 
+        assert_eq!(ui.get_modal(), "mod-result");
+    }
+
+    #[test]
+    fn an_install_confirmation_replaces_the_add_mods_dialog_it_was_asked_from() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        ui.set_modal("add-mods".into());
+        ui.invoke_install_from_browser(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        commands.try_iter().for_each(drop);
+
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[("quiet-lib", "Quiet Library")]),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+    }
+
+    #[test]
+    fn a_report_that_needs_nothing_leaves_the_add_mods_dialog_open() {
+        let ui = test_window();
+        ui.set_modal("add-mods".into());
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "ok"));
+        assert_eq!(ui.get_modal(), "add-mods");
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
         assert_eq!(ui.get_modal(), "mod-result");
     }
 

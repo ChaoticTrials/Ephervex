@@ -156,12 +156,12 @@ export component LinkedTargetsPanel inherits Rectangle {
     }
 }
 
-// One row of the Managed Mods list.
+// One row of the Managed Mods list: the mod, what is worth saying about it,
+// its version, whose it is, and the two things done to it often.
 //
-// Two lines of text and one badge. The provenance badge is the only badge:
-// everything else that distinguishes a row - an unknown version, a missing
-// file, the artwork's tone — is said in the place it belongs rather than
-// added as another chip.
+// The provenance chip is the one badge. Everything else that distinguishes a
+// row, such as an unknown version, a missing file or a crash that points at
+// it, is said in the place it belongs rather than added as another chip.
 export component ModCard inherits Rectangle {
     in property <ModRow> item;
     // Whether this list lets a mod be turned off in place.
@@ -180,78 +180,90 @@ export component ModCard inherits Rectangle {
     callback toggle(string, bool);
     callback delete-file(string, string);
     callback restore-file(string);
-    height: 86px;
-    border-radius: Theme.card-radius;
-    border-width: Theme.strong-border-width;
-    border-color: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.7) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.6) : touch.has-hover && root.item.can-manage ? Theme.accent.with-alpha(0.7) : Theme.border-strong;
-    background: Theme.background;
+    // A narrow pane drops the version and the chips as columns: the version
+    // joins the line under the name, so the switch and the bin stay in reach.
+    // Decided by the pane, not by this row's own width, which the columns
+    // themselves would then feed back into.
+    in property <bool> compact;
+    height: 62px;
+    background: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.12) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.12) : touch.has-hover && root.item.can-manage ? Theme.elevated : transparent;
     touch := TouchArea {
         enabled: root.item.can-manage;
         mouse-cursor: pointer;
         clicked => { root.manage(root.item.logical-path); }
     }
     HorizontalLayout {
-        padding: 10px; spacing: 11px;
+        padding-left: 14px; padding-right: 14px; spacing: 12px;
         VerticalLayout { alignment: center; ModArtwork { icon: root.item.icon; origin-kind: root.item.origin-kind; } }
         VerticalLayout {
-            alignment: center; spacing: 3px; horizontal-stretch: 1;
-            HorizontalLayout {
-                spacing: 8px;
-                Text {
-                    text: root.item.title;
-                    color: root.item.enabled ? Theme.text : Theme.text-muted;
-                    font-size: Theme.row-heading-size;
-                    font-weight: 600;
-                    overflow: elide;
-                    horizontal-stretch: 1;
-                    vertical-alignment: center;
-                }
-            }
+            alignment: center; spacing: 2px; horizontal-stretch: 1;
+            // Text takes no more than it needs, so without this the free
+            // width would go to the columns beside it.
+            max-width: 10000px;
             Text {
-                text: root.item.provider-kind == "" ? root.item.version + " | " + root.item.provider : root.item.version;
-                color: root.item.version-known ? Theme.text-secondary : Theme.text-muted;
-                font-size: Theme.label-size;
+                text: root.item.title;
+                color: root.item.enabled ? Theme.text : Theme.text-muted;
+                font-size: Theme.row-heading-size;
+                font-weight: 600;
                 overflow: elide;
             }
             Text {
                 // What the crash says outranks the descriptive line: a
                 // reader looking at a crashed server is looking for this.
-                text: root.item.suspect-reason != "" ? root.item.suspect-reason : root.item.deleted ? GuiI18n.text("gui-mod-file-deleted") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility != "" ? root.item.compatibility : root.item.file-name;
+                text: (root.compact && root.item.version != "" ? root.item.version + " | " : "") + (root.item.suspect-reason != "" ? root.item.suspect-reason : root.item.deleted ? GuiI18n.text("gui-mod-file-deleted") : !root.item.enabled ? GuiI18n.text("gui-mod-disabled") : root.item.compatibility);
                 color: root.item.suspect-confidence == "high" ? Theme.danger : root.item.suspect-confidence != "" ? Theme.warning : Theme.text-muted;
                 font-size: Theme.caption-size;
                 overflow: elide;
             }
         }
-        // The row's own trailing column: what this mod is on top, what can
-        // be done to it underneath. Kept out of the title row so the badges
-        // line up down the list however long a title runs, and so the bin
-        // sits under the badge that says whose file it is.
-        VerticalLayout {
-            alignment: center;
-            spacing: 6px;
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: end;
-                Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : root.item.origin-kind == "hand-placed" ? Theme.warning : Theme.accent; }
-                // Which catalog the mod came from, in that catalog's own
-                // color. Absent for an entry with no catalog identity,
-                // where the version line already says so.
-                if root.item.provider-kind != "" : Pill { text: root.item.provider; tone-color: root.item.provider-kind == "curseforge" ? Theme.curseforge : Theme.modrinth; }
+        if !root.compact : Rectangle {
+            min-width: 130px * Theme.text-scale;
+            max-width: 130px * Theme.text-scale;
+            horizontal-stretch: 0;
+            Text {
+                width: parent.width;
+                height: parent.height;
+                text: root.item.version;
+                color: root.item.version-known ? Theme.text-secondary : Theme.text-muted;
+                font-family: Theme.mono-family;
+                font-size: Theme.label-size;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
             }
-            // Both controls on one line under the badges, because they are
-            // the two things a reader does to a row and looking for them in
-            // two places is worse than either position.
-            //
-            // Declared after the card's own touch area so they take their
-            // own clicks instead of opening the mod manager behind them.
-            if root.togglable || root.item.can-delete-file || root.item.can-remove : HorizontalLayout {
+        }
+        if !root.compact : Rectangle {
+            min-width: 230px * Theme.text-scale;
+            max-width: 230px * Theme.text-scale;
+            horizontal-stretch: 0;
+            HorizontalLayout {
+                spacing: 6px;
                 alignment: end;
-                spacing: 8px;
-                // Nothing to turn on or throw away while the jar is gone.
-                // The one thing left is putting it back.
-                if root.item.deleted : AppButton { text: GuiI18n.text("gui-restore-mod"); clicked => { root.restore-file(root.item.logical-path); } }
-                if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
-                if !root.item.deleted && (root.item.can-delete-file || root.item.can-remove) : IconButton {
+                VerticalLayout {
+                    alignment: center;
+                    Pill { text: root.item.origin; tone-color: root.item.origin-kind == "pack" ? Theme.accent-secondary : root.item.origin-kind == "dependency" ? Theme.text-muted : root.item.origin-kind == "hand-placed" ? Theme.warning : Theme.accent; }
+                }
+                // Which catalog the mod came from, in that catalog's own
+                // color. Absent for an entry with no catalog identity.
+                if root.item.provider-kind != "" : VerticalLayout {
+                    alignment: center;
+                    Pill { text: root.item.provider; tone-color: root.item.provider-kind == "curseforge" ? Theme.curseforge : Theme.modrinth; }
+                }
+            }
+        }
+        // Declared after the card's own touch area so they take their own
+        // clicks instead of opening the mod manager behind them.
+        if root.togglable || root.item.can-delete-file || root.item.can-remove : HorizontalLayout {
+            alignment: end;
+            horizontal-stretch: 0;
+            spacing: 8px;
+            // Nothing to turn on or throw away while the jar is gone.
+            // The one thing left is putting it back.
+            if root.item.deleted : VerticalLayout { alignment: center; padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-restore-mod"); compact: true; clicked => { root.restore-file(root.item.logical-path); } } }
+            if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
+            if !root.item.deleted && (root.item.can-delete-file || root.item.can-remove) : VerticalLayout {
+                alignment: center;
+                IconButton {
                     icon: @image-url("../../../../assets/icons/trash.svg");
                     accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
                     clicked => { root.delete-file(root.item.logical-path, root.item.title); }
@@ -261,17 +273,20 @@ export component ModCard inherits Rectangle {
     }
 }
 
-// A host's mod list beside its catalog browser: one panel for a client and a
-// server, so the two cannot drift apart. Anything a host adds above the list
-// goes in as children.
+// A host's installed mods: a filter, the way to add more, and one list with a
+// row for each. One panel for a client and a server, so the two cannot drift
+// apart. Anything a host adds above the list goes in as children.
 export component ManagedModsPanel inherits Rectangle {
     in property <HostView> host;
-    // What this host's list holds, said under the title.
-    in property <string> detail;
     // What an empty list says when no filter hides anything.
     in property <string> empty-detail;
     in property <bool> mods-are-the-users;
+    // Whether the catalogs can be searched for this host.
+    in property <bool> can-add: true;
+    // Whether the pane is too narrow for the version and chip columns.
+    in property <bool> compact;
     callback filter(string);
+    callback add-mods();
     callback add-jars();
     callback refresh();
     callback manage(string);
@@ -279,17 +294,13 @@ export component ManagedModsPanel inherits Rectangle {
     callback restore-file(string);
     // The row, its path, and its title, for the confirmation the bin opens.
     callback delete-file(ModRow, string, string);
-    border-radius: Theme.card-radius;
-    border-width: Theme.strong-border-width;
-    border-color: Theme.border-strong;
-    background: Theme.surface;
     VerticalLayout {
-        padding: 16px;
-        spacing: 10px;
+        spacing: 12px;
+        alignment: start;
         HorizontalLayout {
-            spacing: 8px;
-            cross-axis-alignment: center;
-            Heading { text: GuiI18n.text("gui-managed-mods"); horizontal-stretch: 1; }
+            spacing: 10px;
+            padding-right: Theme.shadow-room;
+            padding-bottom: Theme.shadow-room;
             TextField {
                 property <string> host-query: root.host.mods-query;
                 changed host-query => { self.text = self.host-query; }
@@ -297,13 +308,13 @@ export component ManagedModsPanel inherits Rectangle {
                 placeholder: GuiI18n.text("gui-filter-mods");
                 accessible-label: GuiI18n.text("gui-filter-mods");
                 input-type: InputType.search;
-                width: 200px;
+                horizontal-stretch: 1;
                 edited(text) => { root.filter(text); }
             }
             AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.add-jars(); } }
-            IconButton { icon: @image-url("../../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); clicked => { root.refresh(); } }
+            IconButton { icon: @image-url("../../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); lift: Theme.shadow-offset-card; clicked => { root.refresh(); } }
+            if root.can-add : AppButton { text: GuiI18n.text("gui-add-mods"); tone: "primary"; icon: @image-url("../../../../assets/icons/add.svg"); clicked => { root.add-mods(); } }
         }
-        BodyText { text: root.detail; wrap: word-wrap; }
         @children
         if root.host.mods-notice != "" : BodyText { text: root.host.mods-notice; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
         if root.host.mods.length == 0 : EmptyState {
@@ -311,20 +322,39 @@ export component ManagedModsPanel inherits Rectangle {
             title: root.host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods");
             message: root.host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.host.mods-query) : root.empty-detail;
         }
-        if root.host.mods.length > 0 : ScrollView {
-            viewport-width: self.width;
-            VerticalLayout {
-                spacing: 8px;
-                for mod in root.host.mods : ModCard {
-                    item: mod;
-                    togglable: true;
-                    mods-are-the-users: root.mods-are-the-users;
-                    manage(path) => { root.manage(path); }
-                    toggle(path, on) => { root.toggle(path, on); }
-                    restore-file(path) => { root.restore-file(path); }
-                    delete-file(path, title) => { root.delete-file(mod, path, title); }
+        if root.host.mods.length > 0 : Rectangle {
+            // As tall as its rows, and shorter than that when the page is.
+            preferred-height: list.preferred-height + 2 * Theme.strong-border-width;
+            vertical-stretch: 0;
+            min-height: 120px;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
+            background: Theme.surface;
+            clip: true;
+            ScrollView {
+                viewport-width: self.width;
+                list := VerticalLayout {
+                    for mod[index] in root.host.mods : VerticalLayout {
+                        if index > 0 : Rectangle { height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
+                        ModCard {
+                            item: mod;
+                            compact: root.compact;
+                            togglable: true;
+                            mods-are-the-users: root.mods-are-the-users;
+                            manage(path) => { root.manage(path); }
+                            toggle(path, on) => { root.toggle(path, on); }
+                            restore-file(path) => { root.restore-file(path); }
+                            delete-file(path, title) => { root.delete-file(mod, path, title); }
+                        }
+                    }
                 }
             }
+        }
+        if root.host.mods.length > 0 : BodyText {
+            text: GuiI18n.count("gui-mods-shown", root.host.mods.length);
+            color: Theme.text-muted;
+            font-size: Theme.caption-size;
         }
     }
 }

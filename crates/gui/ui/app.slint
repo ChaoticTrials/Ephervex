@@ -506,6 +506,8 @@ export component AppWindow inherits Window {
     // The workspace's panes, in reading order, and the host each one shows.
     in-out property <[WorkspacePaneRow]> workspace-panes;
     in-out property <bool> quick-view-fullscreen;
+    // Which host view the Add mods dialog searches for.
+    in-out property <int> add-mods-host: -1;
     in-out property <bool> quick-view-open;
     callback open-quick-view(string, string);
     callback close-quick-view();
@@ -2421,35 +2423,19 @@ export component AppWindow inherits Window {
                                         } }
                                     }
                                 }
-                                if host.available && host.kind == "client" && pane.surface == "Mods" : HorizontalLayout {
-                                    spacing: 16px;
-                                    ManagedModsPanel {
-                                        width: 46%;
-                                        host: host;
-                                        detail: GuiI18n.text("gui-managed-mods-detail");
-                                        empty-detail: GuiI18n.text("gui-no-managed-mods-detail");
-                                        mods-are-the-users: host.allow-pack-mod-changes;
-                                        filter(text) => { root.filter-mods("client", host.id, text); }
-                                        add-jars => { root.pick-local-mods("client", host.id); }
-                                        refresh => { root.refresh-mods("client", host.id); }
-                                        manage(path) => { root.open-mod-manager("client", host.id, path); }
-                                        toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); }
-                                        restore-file(path) => { root.restore-mod-file("client", host.id, path); }
+                                if host.available && host.kind == "client" && pane.surface == "Mods" : ManagedModsPanel {
+                                    host: host;
+                                    compact: (pane.overlay ? root.quick-view-width : root.pane-column-width) < 760px * Theme.text-scale;
+                                    empty-detail: GuiI18n.text("gui-no-managed-mods-detail");
+                                    mods-are-the-users: host.allow-pack-mod-changes;
+                                    filter(text) => { root.filter-mods("client", host.id, text); }
+                                    add-mods => { root.add-mods-host = pane.host; root.modal-error = ""; root.modal = "add-mods"; }
+                                    add-jars => { root.pick-local-mods("client", host.id); }
+                                    refresh => { root.refresh-mods("client", host.id); }
+                                    manage(path) => { root.open-mod-manager("client", host.id, path); }
+                                    toggle(path, on) => { root.set-mod-enabled("client", host.id, path, on); }
+                                    restore-file(path) => { root.restore-mod-file("client", host.id, path); }
                                         delete-file(mod, path, title) => { root.pending-action-kind = "client"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.allow-pack-mod-changes && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal("client", host.id, path); } }
-                                    }
-                                    ModBrowser {
-                                        horizontal-stretch: 1;
-                                        host: host;
-                                        page-sizes: root.mod-page-sizes;
-                                        page-size-label: root.mod-page-size-label;
-                                        switch-catalog(provider) => { root.switch-mod-catalog(host.kind, host.id, provider); }
-                                        search(provider, text) => { root.search-mods(host.kind, host.id, provider, text); }
-                                        load-more(provider, text, offset) => { root.load-more-mods(host.kind, host.id, provider, text, offset); }
-                                        install(project) => { root.install-from-browser(host.kind, host.id, host.browser-provider, project); }
-                                        set-include-incompatible(on) => { root.set-mod-include-incompatible(host.kind, host.id, on); }
-                                        set-page-size(label) => { root.set-mod-page-size(label); }
-                                                open-provider-settings => { root.open-settings("Providers & APIs"); }
-                                    }
                                 }
                                 if host.available && pane.surface == "Isolation" : IsolationSurface {
                                     phase: host.isolation-phase == "" ? "none" : host.isolation-phase;
@@ -2628,36 +2614,21 @@ export component AppWindow inherits Window {
                                         send(command) => { root.server-console(host.id, command); }
                                     }
                                 }
-                                if host.available && host.kind == "server" && pane.surface == "Mods" : HorizontalLayout {
-                                    spacing: 16px;
-                                    ManagedModsPanel {
-                                        width: host.server.installed && host.server.loader-kind != "vanilla" ? 46% : 100%;
-                                        host: host;
-                                        detail: GuiI18n.text("gui-server-mods-detail");
-                                        empty-detail: GuiI18n.text("gui-no-server-mods-detail");
-                                        mods-are-the-users: host.mods-are-the-users;
-                                        filter(text) => { root.filter-mods("server", host.id, text); }
-                                        add-jars => { root.pick-local-mods("server", host.id); }
-                                        refresh => { root.refresh-mods("server", host.id); }
-                                        manage(path) => { root.open-mod-manager("server", host.id, path); }
-                                        toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); }
-                                        restore-file(path) => { root.restore-mod-file("server", host.id, path); }
+                                if host.available && host.kind == "server" && pane.surface == "Mods" : ManagedModsPanel {
+                                    host: host;
+                                    compact: (pane.overlay ? root.quick-view-width : root.pane-column-width) < 760px * Theme.text-scale;
+                                    can-add: host.server.installed && host.server.loader-kind != "vanilla";
+                                    empty-detail: GuiI18n.text("gui-no-server-mods-detail");
+                                    mods-are-the-users: host.mods-are-the-users;
+                                    filter(text) => { root.filter-mods("server", host.id, text); }
+                                    add-mods => { root.add-mods-host = pane.host; root.modal-error = ""; root.modal = "add-mods"; }
+                                    add-jars => { root.pick-local-mods("server", host.id); }
+                                    refresh => { root.refresh-mods("server", host.id); }
+                                    manage(path) => { root.open-mod-manager("server", host.id, path); }
+                                    toggle(path, on) => { root.set-mod-enabled("server", host.id, path, on); }
+                                    restore-file(path) => { root.restore-mod-file("server", host.id, path); }
                                         delete-file(mod, path, title) => { root.pending-action-kind = "server"; root.pending-action-id = host.id; root.pending-action-name = title; root.mod-action-path = path; root.mod-action-name = title; root.mod-action-is-hand-placed = mod.origin-kind == "hand-placed"; root.modal-error = ""; root.mod-remove-returns-to-manager = false; if mod.can-delete-file && !(host.mods-are-the-users && mod.can-remove) { root.modal = "delete-mod"; } else { root.plan-mod-removal("server", host.id, path); } }
                                         if host.crash-report != "" : CrashNotice { report: host.crash-report; failure: host.crash-failure; client-code-on-server: host.crash-client-code-on-server; suggested: host.crash-suggested; beside-the-mods: true; disable-suggested => { root.disable-suggested-mods(host.id); } routes: host.run-failure-title == "" || host.run-eula-refused; open-crash-report => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "crashes"); root.log-open-file(pane.id, host.crash-report); } }
-                                    }
-                                    if host.server.installed && host.server.loader-kind != "vanilla" : ModBrowser {
-                                        horizontal-stretch: 1;
-                                        host: host;
-                                        page-sizes: root.mod-page-sizes;
-                                        page-size-label: root.mod-page-size-label;
-                                        switch-catalog(provider) => { root.switch-mod-catalog(host.kind, host.id, provider); }
-                                        search(provider, text) => { root.search-mods(host.kind, host.id, provider, text); }
-                                        load-more(provider, text, offset) => { root.load-more-mods(host.kind, host.id, provider, text, offset); }
-                                        install(project) => { root.install-from-browser(host.kind, host.id, host.browser-provider, project); }
-                                        set-include-incompatible(on) => { root.set-mod-include-incompatible(host.kind, host.id, on); }
-                                        set-page-size(label) => { root.set-mod-page-size(label); }
-                                                open-provider-settings => { root.open-settings("Providers & APIs"); }
-                                    }
                                 }
                                 if host.available && host.kind == "server" && pane.surface == "Properties" : ServerPropertiesForm {
                                     host: host;
@@ -2847,8 +2818,8 @@ export component AppWindow inherits Window {
         background: Theme.scrim;
         TouchArea { clicked => { } }
         Plate {
-            width: root.modal == "create-instance" || root.modal == "create-server" ? min(900px, parent.width - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "create-instance" ? min(860px, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" || root.modal == "launcher-bundle" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
+            width: root.modal == "create-instance" || root.modal == "create-server" || root.modal == "add-mods" ? min(900px, parent.width - 80px) : root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
+            height: root.modal == "create-instance" ? min(860px, parent.height - 80px) : root.modal == "add-mods" ? min(780px, parent.height - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" || root.modal == "launcher-bundle" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             radius: Theme.dialog-radius;
@@ -2856,7 +2827,7 @@ export component AppWindow inherits Window {
             fill: Theme.elevated;
             // A header in the color of what is being made, for the dialogs
             // that make something.
-            if root.modal == "create-instance" || root.modal == "create-server" : Rectangle {
+            if root.modal == "create-instance" || root.modal == "create-server" || root.modal == "add-mods" : Rectangle {
                 x: Theme.strong-border-width;
                 y: Theme.strong-border-width;
                 width: parent.width - 2 * Theme.strong-border-width;
@@ -2866,13 +2837,26 @@ export component AppWindow inherits Window {
                     width: parent.width;
                     height: parent.height + Theme.dialog-radius;
                     border-radius: Theme.dialog-radius;
-                    background: root.modal == "create-server" ? Theme.state-stopped : Theme.background;
+                    background: root.modal == "create-server" ? Theme.state-stopped : root.modal == "add-mods" ? Theme.state-running : Theme.background;
                 }
             }
             modal-body := VerticalLayout { padding: 22px; spacing: 13px;
                 title-row := HorizontalLayout { cross-axis-alignment: center; spacing: 12px; // A name or a version is long and unpredictable, so those titles stay in the body face and elide.
-                    property <string> title-text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "microsoft-sign-in" ? GuiI18n.text("gui-modal-microsoft-sign-in") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? (root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server") : GuiI18n.text("gui-modal-new-server")) : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "launcher-bundle" ? GuiI18n.text("gui-launcher-bundle-save-title") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "mod-stand-in" ? GuiI18n.text("gui-modal-mod-stand-in") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "storage-cleanup" ? GuiI18n.text("gui-storage-cleanup-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); property <bool> dynamic-title: root.modal == "mod-impact" || (root.modal == "third-party" && root.third-party-open >= 0); if !title-row.dynamic-title : DisplayHeading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } if title-row.dynamic-title : Heading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else if root.modal == "mod-stand-in" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
+                    property <string> title-text: root.modal == "add-mods" ? GuiI18n.value("gui-modal-add-mods-for", root.host-views[root.add-mods-host].kind == "server" ? root.host-views[root.add-mods-host].server.name : root.host-views[root.add-mods-host].client.name) : root.modal == "microsoft-sign-in" ? GuiI18n.text("gui-modal-microsoft-sign-in") : root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? (root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server") : GuiI18n.text("gui-modal-new-server")) : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "launcher-bundle" ? GuiI18n.text("gui-launcher-bundle-save-title") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "mod-stand-in" ? GuiI18n.text("gui-modal-mod-stand-in") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "storage-cleanup" ? GuiI18n.text("gui-storage-cleanup-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); property <bool> dynamic-title: root.modal == "mod-impact" || (root.modal == "third-party" && root.third-party-open >= 0); if !title-row.dynamic-title : DisplayHeading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } if title-row.dynamic-title : Heading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else if root.modal == "mod-stand-in" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } if root.modal == "microsoft-sign-in" { root.cancel-microsoft-sign-in(); } root.modal = ""; root.modal-error = ""; } } } }
                 Divider { }
+                if root.modal == "add-mods" && root.add-mods-host >= 0 : ModBrowser {
+                    vertical-stretch: 1;
+                    host: root.host-views[root.add-mods-host];
+                    page-sizes: root.mod-page-sizes;
+                    page-size-label: root.mod-page-size-label;
+                    switch-catalog(provider) => { root.switch-mod-catalog(self.host.kind, self.host.id, provider); }
+                    search(provider, text) => { root.search-mods(self.host.kind, self.host.id, provider, text); }
+                    load-more(provider, text, offset) => { root.load-more-mods(self.host.kind, self.host.id, provider, text, offset); }
+                    install(project) => { root.install-from-browser(self.host.kind, self.host.id, self.host.browser-provider, project); }
+                    set-include-incompatible(on) => { root.set-mod-include-incompatible(self.host.kind, self.host.id, on); }
+                    set-page-size(label) => { root.set-mod-page-size(label); }
+                    open-provider-settings => { root.modal = ""; root.open-settings("Providers & APIs"); }
+                }
                 if root.modal == "create-instance" : VerticalLayout {
                     spacing: 10px;
                     ScrollView {

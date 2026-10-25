@@ -1534,8 +1534,6 @@ gui-host-change-wait = Another host's files are still being changed. Try again o
 
 operation-diagnosing-host = Diagnosing
 operation-applying-fix = Applying a fix
-gui-diagnosis-title = Diagnostics
-gui-diagnosis-detail = Checks whether this host is configured correctly for what it runs. Nothing changes unless you apply a fix.
 gui-diagnosis-diagnose = Diagnose
 gui-diagnosis-diagnose-again = Diagnose again
 gui-diagnosis-stop = Stop
@@ -2572,8 +2570,6 @@ gui-target-summary = Minecraft { $first } | { $second }
 gui-open-diagnostics = View Diagnostics
 gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Make Persistent moves this one out of it, keeping its name, its mods and its linked servers.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
-gui-managed-mods = Managed Mods
-gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 # Filters the list of mods an instance or server already has, by name.
 gui-filter-mods = Filter mods...
 gui-no-mods-match-title = No matches
@@ -2588,7 +2584,6 @@ gui-restore-mod = Restore
 gui-mod-restored = Put the mod back.
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Every mod on this server: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
@@ -2654,6 +2649,11 @@ gui-mod-remove-no-dependencies = Nothing else was installed only for it.
 gui-mod-remove-dependencies-unprovable = Ephervex could not confirm which mods are still needed, so none will be collected.
 gui-mod-remove-action = Remove Mod
 gui-add-mods = Add Mods
+gui-modal-add-mods-for = Add mods for { $value }
+gui-mods-shown = { $count ->
+    [one] 1 mod shown | drop .jar files on the window to add your own
+   *[other] { $count } mods shown | drop .jar files on the window to add your own
+}
 gui-catalog-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
 gui-mod-catalog = Catalog
 gui-provider-modrinth = Modrinth
