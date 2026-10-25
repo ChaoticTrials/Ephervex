@@ -23,6 +23,10 @@ export component AppShell inherits Rectangle {
     in property <string> side-hide-label;
     in-out property <bool> list-open: false;
     in-out property <bool> side-open: false;
+    // Whether Escape means something else on the page, such as leaving a
+    // quick view, once no drawer is open.
+    in property <bool> escape-leaves;
+    callback escape();
     out property <bool> list-inline: root.width >= Theme.shell-list-inline-width;
     out property <bool> side-inline: root.width >= root.side-inline-from;
     // Whether the side column takes room: beside the page, or as a rail.
@@ -34,6 +38,10 @@ export component AppShell inherits Rectangle {
     out property <length> side-top: root.side-inline || !root.side-rail ? 0px : Theme.control-height + 14px;
     out property <length> page-x: Theme.shell-padding + (root.list-inline ? Theme.list-column-width : Theme.shell-rail-width) + Theme.shell-gap;
     out property <length> page-width: max(0px, root.width - root.page-x - Theme.shell-padding - (root.side-reserved ? (root.side-inline ? Theme.side-column-width : Theme.shell-rail-width) + Theme.shell-gap : 0px));
+    // Moves keyboard focus into the shell, so Escape reaches it.
+    public function focus-keys() {
+        scope.focus();
+    }
     // Opens the side column's drawer.
     public function open-side() {
         root.list-open = false;
@@ -58,10 +66,14 @@ export component AppShell inherits Rectangle {
                 root.side-open = false;
                 return accept;
             }
+            if event.text == Key.Escape && root.escape-leaves {
+                root.escape();
+                return accept;
+            }
             return reject;
         }
         if !root.list-inline : IconButton {
-            z: 12;
+            z: 14;
             x: Theme.shell-padding;
             y: Theme.shell-padding;
             icon: @image-url("../../../../assets/icons/panel-left.svg");
@@ -75,7 +87,7 @@ export component AppShell inherits Rectangle {
             }
         }
         if root.has-side && root.side-rail && !root.side-inline : IconButton {
-            z: 12;
+            z: 14;
             x: root.width - Theme.shell-padding - self.width;
             y: Theme.shell-padding;
             icon: @image-url("../../../../assets/icons/panel-right.svg");
@@ -90,7 +102,7 @@ export component AppShell inherits Rectangle {
         }
         @children
         if (root.list-open && !root.list-inline) || (root.side-open && root.has-side && !root.side-inline) : Rectangle {
-            z: 9;
+            z: 12;
             background: Theme.scrim;
             TouchArea {
                 clicked => {

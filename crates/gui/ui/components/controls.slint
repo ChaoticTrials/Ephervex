@@ -305,12 +305,12 @@ export component FavoriteToggle inherits Rectangle {
     in property <string> host-name;
     in property <length> size: Theme.control-height;
     in property <bool> enabled: true;
+    // Drawn without a plate behind it, as on a list card.
+    in property <bool> flat: false;
     // Why the star cannot be pressed, shown on hover while it is disabled.
     in property <string> hint;
     callback toggled();
     // A press of the secondary button over the control, in window coordinates,
-    // Drawn without a plate behind it, as on a list card.
-    in property <bool> flat: false;
     // for a card that offers its menu wherever it is pressed.
     callback context-requested(x: length, y: length);
     // The star has no caption, so hover says what pressing it does, or why
@@ -1017,14 +1017,14 @@ export component Chip inherits Rectangle {
     in property <string> tone: "neutral";
     // The width the whole text needs. A chip given less elides its text.
     out property <length> natural-width: label.preferred-width + 14px;
-    height: Theme.chip-height;
-    width: root.natural-width;
-    horizontal-stretch: 0;
-    accessible-role: AccessibleRole.text;
     // A press of the chip, passed on while it is cut short, because its hover
     // area then sits over whatever the chip is drawn on.
     callback pressed();
     callback context-requested(x: length, y: length);
+    height: Theme.chip-height;
+    width: root.natural-width;
+    horizontal-stretch: 0;
+    accessible-role: AccessibleRole.text;
     accessible-label: root.text;
     border-radius: Theme.chip-radius;
     border-width: Theme.chip-border-width;
@@ -1051,10 +1051,6 @@ export component Chip inherits Rectangle {
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-}
-
-// The tone of a host's lifecycle state, the same wherever the host is
-// drawn. A settled state takes `rest`.
     // A chip that is cut says its whole text on hover.
     if label.preferred-width > label.width : Rectangle {
         area := ContextTouchArea {
@@ -1063,6 +1059,10 @@ export component Chip inherits Rectangle {
         }
         HoverNote { text: root.text; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
     }
+}
+
+// The tone of a host's lifecycle state, the same wherever the host is
+// drawn. A settled state takes `rest`.
 export global StateTone {
     pure public function of-or(state-kind: string, rest: color) -> color {
         if (state-kind == "running") {

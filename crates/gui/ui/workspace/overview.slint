@@ -1,0 +1,124 @@
+// The summary a client's Overview opens with: what it is, how to run it, and
+// the steps to reproduce its bug.
+
+import { AppButton } from "../components/controls.slint";
+import { Panel } from "../components/surface.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { HostView } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { CaseSteps, Timeline } from "case.slint";
+
+// One labeled line of the table. The label sits on a tint of its own and the
+// value wraps, so a long path or link stays inside the card.
+component FactRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    // Sets the value in the monospace face, for a path or a link.
+    in property <bool> mono;
+    // Colors the value as a link that does something when pressed.
+    in property <bool> link;
+    callback pressed();
+    height: cells.preferred-height;
+    if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
+    cells := HorizontalLayout {
+        Rectangle {
+            width: 104px;
+            background: Theme.background;
+            VerticalLayout {
+                padding: 10px;
+                alignment: center;
+                BodyText { text: root.label; color: Theme.text-muted; wrap: word-wrap; }
+            }
+        }
+        VerticalLayout {
+            padding: 10px;
+            padding-left: 14px;
+            alignment: center;
+            horizontal-stretch: 1;
+            BodyText {
+                text: root.value;
+                color: root.link ? Theme.accent : Theme.text;
+                font-family: root.mono ? Theme.mono-family : Theme.body-family;
+                wrap: word-wrap;
+            }
+        }
+    }
+    if root.link : TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.pressed(); }
+    }
+}
+
+export component ClientOverviewSummary inherits Rectangle {
+    in property <HostView> host;
+    // The quick view, which has neither the page header nor the column beside
+    // it, so the run actions are part of the summary there.
+    in property <bool> quick;
+    in property <string> primary-label;
+    in property <string> primary-tone: "primary";
+    in property <bool> primary-enabled;
+    in property <string> primary-hint;
+    callback primary();
+    callback count-reproduced();
+    callback open-issue-link();
+    callback add-step(string);
+    callback set-step-done(int, bool);
+    callback remove-step(int);
+    // The instance's own memory range, empty while it follows the global one.
+    private property <string> memory: root.host.runtime-memory-min == "" && root.host.runtime-memory-max == "" ? ""
+        : (root.host.runtime-memory-min != "" ? root.host.runtime-memory-min : "-") + " - " + (root.host.runtime-memory-max != "" ? root.host.runtime-memory-max : "-") + " " + GuiI18n.text("gui-java-memory-unit");
+    // Two columns when the page can hold both: the facts and the actions on
+    // the left, the steps and what happened on the right. Placed by hand,
+    // because the right one moves under the left when the page is narrow.
+    property <bool> wide: self.width >= 900px;
+    property <length> gap: 24px;
+    property <length> left-width: self.wide ? (self.width - self.gap) * 0.5 : self.width;
+    height: self.wide ? max(left.preferred-height, right.preferred-height) : left.preferred-height + self.gap + right.preferred-height;
+    left := VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.left-width;
+        height: self.preferred-height;
+        spacing: 14px;
+        alignment: start;
+        padding-right: Theme.shadow-room;
+    Panel {
+        lift: 0px;
+        height: facts.preferred-height + 2 * Theme.strong-border-width;
+        facts := VerticalLayout {
+            if root.host.client.issue-link != "" : FactRow { label: GuiI18n.text("gui-overview-issue"); value: root.host.client.issue-link; mono: true; link: true; pressed => { root.open-issue-link(); } }
+            FactRow { label: GuiI18n.text("gui-source"); value: root.host.client.storage + " | " + root.host.client.source; }
+            if root.host.java-runtime != "" : FactRow { label: GuiI18n.text("gui-overview-java"); value: root.host.java-runtime; mono: true; }
+            if root.memory != "" : FactRow { label: GuiI18n.text("gui-overview-memory"); value: root.memory; mono: true; }
+            FactRow { label: GuiI18n.text("gui-folder"); value: root.host.client.path; mono: true; }
+        }
+    }
+    if root.quick : HorizontalLayout {
+        spacing: 10px;
+        alignment: start;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled; hint: root.primary-hint; clicked => { root.primary(); } }
+        AppButton { text: GuiI18n.text("gui-case-reproduced-it"); tone: "primary"; clicked => { root.count-reproduced(); } }
+    }
+    }
+    right := VerticalLayout {
+        x: parent.wide ? parent.left-width + parent.gap : 0px;
+        y: parent.wide ? 0px : left.preferred-height + parent.gap;
+        width: parent.wide ? parent.width - parent.left-width - parent.gap : parent.width;
+        height: self.preferred-height;
+        spacing: 22px;
+        alignment: start;
+        padding-right: Theme.shadow-room;
+    CaseSteps {
+            host-id: root.host.id;
+            steps: root.host.client.case-steps;
+            done-count: root.host.client.case-done;
+            add-step(text) => { root.add-step(text); }
+            set-step-done(id, done) => { root.set-step-done(id, done); }
+            remove-step(id) => { root.remove-step(id); }
+        }
+        Timeline { events: root.host.events; }
+    }
+}

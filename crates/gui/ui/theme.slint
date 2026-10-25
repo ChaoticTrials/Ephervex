@@ -240,6 +240,8 @@ export global Theme {
     // gap, and a text column wide enough for all four badges at the longest
     // status. Narrower rows stack.
     out property <length> preference-row-split-width: preference-control-column-width + 400px * text-scale + 34px;
+    // The least width the quick view takes while it is not fullscreen.
+    out property <length> quick-view-min-width: 520px;
     // One row of a popup menu and the padding around its rows. Named because
     // a menu opened upward has to know how tall it will be.
     out property <length> menu-row-height: 30px * text-scale;

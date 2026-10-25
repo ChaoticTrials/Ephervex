@@ -47,6 +47,7 @@ fn placed(
         can_split_beside: false,
         can_split_below: !stacked,
         can_close: true,
+        overlay: false,
     }
 }
 

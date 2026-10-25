@@ -10,7 +10,7 @@ import {
     WorkspaceHostChoice,
     WorkspaceSurfaceRow
 } from "../models.slint";
-import { Panel, Plate } from "../components/surface.slint";
+import { Panel, Plate, Scrim } from "../components/surface.slint";
 import { IssueLinkRow } from "issue-link.slint";
 import { Theme } from "../theme.slint";
 
@@ -339,8 +339,8 @@ export component HostWorkspace inherits Rectangle {
         : GuiI18n.text("gui-restart-stage-starting");
     // What the primary action waits for. A side that is already running can
     // still be stopped during a pair start, which is how one is ended.
-    property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
-    property <string> primary-reason: root.primary-waits ? root.occupied-text : root.primary-hint;
+    out property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
+    out property <string> primary-reason: root.primary-waits ? root.occupied-text : root.primary-hint;
     property <string> restart-reason: root.occupied ? root.occupied-text : root.restart-hint;
     callback back();
     callback open-folder();
@@ -354,6 +354,15 @@ export component HostWorkspace inherits Rectangle {
     // One of several panes: the header shrinks to what tells the panes
     // apart and the host's own actions, and the pane gets a frame.
     in property <bool> compact;
+    // The pane is the quick view over the window: its own header says where
+    // it can go, and its body keeps the page's surfaces.
+    in property <bool> quick;
+    in property <bool> quick-fullscreen;
+    // Another host's quick view is over this pane.
+    in property <bool> dimmed;
+    callback close-dimmed();
+    callback open-quick-as-page();
+    callback toggle-quick-fullscreen();
     in property <string> pane-label;
     // "Client" or "Server", beside the host's name in a compact header.
     in property <string> host-kind-label;
@@ -444,6 +453,10 @@ export component HostWorkspace inherits Rectangle {
     accessible-label: root.pane-label;
     Panel {
         radius: root.compact ? Theme.card-radius : Theme.dialog-radius;
+        // The drawer casts its shadow toward the page it covers, and the
+        // fullscreen quick view, which has no page beside it, casts it down and right.
+        lift: root.quick ? Theme.shadow-offset-dialog : Theme.shadow-offset-card;
+        shadow-left: root.quick && !root.quick-fullscreen;
         VerticalLayout {
             // The header runs edge to edge over the page color; the
             // body under it keeps its own padding.
@@ -578,7 +591,9 @@ export component HostWorkspace inherits Rectangle {
                 }
             }
             VerticalLayout {
-                padding: root.compact ? 12px : 22px;
+                padding: root.compact ? 12px : root.quick ? 16px : 22px;
+                // The quick view's surfaces scroll to its bottom edge rather than stopping short of it.
+                padding-bottom: root.compact ? 12px : root.quick ? 0px : 22px;
                 spacing: root.compact ? 10px : 14px;
                 // The host on one row: which it is, its state, and its actions.
                 // The view below: which surface, and the layout controls.
@@ -685,6 +700,8 @@ export component HostWorkspace inherits Rectangle {
             }
         }
     }
+    // Over everything the pane shows while another host's quick view is open.
+    if root.dimmed : Scrim { x: 0px; y: 0px; width: root.width; height: root.height; border-radius: root.compact ? Theme.card-radius : Theme.dialog-radius; pressed => { root.close-dimmed(); } }
 }
 
 // One host in the host picker. A client's card also offers its linked

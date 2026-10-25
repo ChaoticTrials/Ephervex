@@ -2479,18 +2479,22 @@ fn host_panes_on_screen(ui: &AppWindow) -> bool {
     ui.get_workspace_open() && !ui.get_settings_open()
 }
 
-fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
-    if !host_panes_on_screen(ui) {
-        return ModsListsOnScreen::None;
-    }
-    let Some(layout) = workspace.layout() else {
-        return ModsListsOnScreen::None;
-    };
-    let mut hosts = layout
-        .panes()
-        .into_iter()
+/// The hosts whose Mods list is visible: the page's panes unless a fullscreen
+/// quick view covers them, and the quick view.
+fn mods_hosts_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> Vec<InstalledHost> {
+    let page = (host_panes_on_screen(ui) && !ui.get_quick_view_fullscreen())
+        .then(|| workspace.layout())
+        .flatten();
+    page.into_iter()
+        .chain(workspace.quick())
+        .flat_map(WorkspaceLayout::panes)
         .filter(|placed| placed.pane.surface() == Surface::Mods)
-        .map(|placed| placed.pane.host());
+        .map(|placed| placed.pane.host())
+        .collect()
+}
+
+fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
+    let mut hosts = mods_hosts_on_screen(ui, workspace).into_iter();
     let Some(host) = hosts.next() else {
         return ModsListsOnScreen::None;
     };
@@ -5392,17 +5396,16 @@ struct Workspace {
 impl Workspace {
     /// Renders the workspace and gives a pane what its new host and surface need.
     fn present(&self, ui: &AppWindow, change: Option<PaneChange>) {
-        let panes = self
-            .state
-            .borrow()
-            .layout()
-            .map_or_else(Vec::new, |layout| {
-                layout
-                    .panes()
-                    .iter()
-                    .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
-                    .collect()
-            });
+        let panes = {
+            let state = self.state.borrow();
+            state
+                .layout()
+                .into_iter()
+                .chain(state.quick())
+                .flat_map(WorkspaceLayout::panes)
+                .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                .collect::<Vec<_>>()
+        };
         let mut logs = self.logs.borrow_mut();
         logs.sync(&panes);
         let entered = self
@@ -5497,6 +5500,20 @@ impl Workspace {
     fn close(&self, ui: &AppWindow) {
         self.state.borrow_mut().close();
         self.present(ui, None);
+    }
+
+    /// Shows `host` over the window on its overview, leaving the workspace as it is.
+    fn open_quick_view(&self, ui: &AppWindow, host: InstalledHost) {
+        let change = self.state.borrow_mut().open_quick(host, Surface::DEFAULT);
+        ui.set_quick_view_fullscreen(false);
+        self.present(ui, Some(change));
+    }
+
+    fn close_quick_view(&self, ui: &AppWindow) {
+        if self.state.borrow_mut().close_quick() {
+            ui.set_quick_view_fullscreen(false);
+            self.present(ui, None);
+        }
     }
 
     fn change_pane(
@@ -5773,8 +5790,50 @@ fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
         });
     });
 
+    register_quick_view(ui, workspace);
     register_pane_layout(ui, workspace);
     register_linked_pair(ui, workspace);
+}
+
+/// Showing a host over the window, and leaving it.
+fn register_quick_view(ui: &AppWindow, workspace: &Workspace) {
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_open_quick_view(move |kind, id| {
+        let (Some(ui), Some(host)) = (weak.upgrade(), workspace::parse_host(&kind, &id)) else {
+            return;
+        };
+        quick.open_quick_view(&ui, host);
+    });
+
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_close_quick_view(move || {
+        if let Some(ui) = weak.upgrade() {
+            quick.close_quick_view(&ui);
+        }
+    });
+
+    // The host the quick view shows becomes the page, on the surface it was on.
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_open_quick_view_as_page(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let content = quick.state.borrow().quick_content();
+        let Some((host, surface)) = content else {
+            return;
+        };
+        // One render, so the host never leaves the workspace's hosts in
+        // between and its feature state is kept.
+        ui.set_quick_view_fullscreen(false);
+        ui.set_settings_open(false);
+        let change = {
+            let mut state = quick.state.borrow_mut();
+            state.close_quick();
+            state.open(host, surface)
+        };
+        quick.present(&ui, Some(change));
+    });
 }
 
 /// Pairing a client with a linked server, showing a pane's paired host, and
@@ -5814,7 +5873,16 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
         ) else {
             return;
         };
-        reveal.reveal_pair(&ui, Some(pane), host, Surface::DEFAULT, true);
+        // A pair is shown side by side in the workspace, so a request from
+        // the quick view makes its host the page first.
+        let from = if pane.is_quick_view() {
+            let content = reveal.state.borrow().quick_content();
+            ui.invoke_open_quick_view_as_page();
+            content.and_then(|(shown, _)| reveal.state.borrow().first_pane_showing(shown))
+        } else {
+            Some(pane)
+        };
+        reveal.reveal_pair(&ui, from, host, Surface::DEFAULT, true);
     });
 
     let weak = ui.as_weak();
@@ -8281,7 +8349,7 @@ fn apply_local_mod_plan(
     };
     // A list still on screen, not merely the one they dropped onto: a plan
     // that arrives after they have navigated away has nowhere to land.
-    if !host_panes_on_screen(ui) || !workspace.shows(host, Surface::Mods) {
+    if !mods_hosts_on_screen(ui, workspace).contains(&host) {
         return;
     }
 
@@ -14800,6 +14868,145 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The pane rows the window draws, with whether each is the quick view.
+    fn pane_overlays(ui: &AppWindow) -> Vec<(i32, bool)> {
+        ui.get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.id, pane.overlay))
+            .collect()
+    }
+
+    #[test]
+    fn the_quick_view_shows_a_host_over_the_workspace_without_changing_it() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Case);
+
+        ui.invoke_open_quick_view(server.kind().into(), server.id().into());
+
+        assert!(ui.get_quick_view_open());
+        assert_eq!(shown(&workspace), [(client, Surface::Case)], "the page");
+        let rows = pane_overlays(&ui);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (1, false));
+        assert!(rows[1].1, "the last row is the quick view");
+        assert_ne!(rows[1].0, 1, "it is named apart from every workspace pane");
+        assert_eq!(ui.get_host_views().row_count(), 2, "one view per host");
+
+        ui.invoke_close_quick_view();
+        assert!(!ui.get_quick_view_open());
+        assert_eq!(pane_overlays(&ui), [(1, false)]);
+    }
+
+    #[test]
+    fn a_quick_view_can_be_open_while_no_workspace_is() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        assert!(ui.get_quick_view_open());
+        assert!(!ui.get_workspace_open());
+        assert_eq!(pane_overlays(&ui).len(), 1);
+
+        ui.invoke_close_quick_view();
+        assert!(!ui.get_quick_view_open());
+        assert_eq!(ui.get_workspace_panes().row_count(), 0);
+        assert!(workspace.state.borrow().layout().is_none());
+    }
+
+    #[test]
+    fn the_quick_views_surface_is_chosen_without_touching_the_pages() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        let quick = pane_overlays(&ui)[1].0;
+
+        ui.invoke_show_pane_surface(quick, "Mods".into());
+
+        assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
+        assert_eq!(
+            workspace.state.borrow().quick_content(),
+            Some((client, Surface::Mods))
+        );
+    }
+
+    #[test]
+    fn opening_the_quick_view_as_a_page_replaces_the_workspace_with_what_it_showed() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_open_quick_view(server.kind().into(), server.id().into());
+        ui.set_quick_view_fullscreen(true);
+
+        ui.invoke_open_quick_view_as_page();
+
+        assert!(!ui.get_quick_view_open());
+        assert!(!ui.get_quick_view_fullscreen());
+        assert_eq!(shown(&workspace), [(server, Surface::Overview)]);
+    }
+
+    #[test]
+    fn a_drop_goes_to_the_mods_list_the_quick_view_shows_and_not_to_one_it_covers() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        let quick = pane_overlays(&ui)[0].0;
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import
+        );
+
+        ui.invoke_show_pane_surface(quick, "Mods".into());
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+
+        // Another host's list on the page makes the aim unclear.
+        workspace.open(&ui, server, Surface::Mods);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Ignored
+        );
+
+        // Fullscreen covers the page, so only the quick view's list is visible.
+        ui.set_quick_view_fullscreen(true);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+    }
+
+    #[test]
+    fn opening_the_quick_view_as_a_page_keeps_what_the_host_reported() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        assert!(workspace.update(client, |view| view.crash_report = "report.txt".into()));
+
+        ui.invoke_open_quick_view_as_page();
+
+        assert_eq!(first_view(&ui).crash_report, "report.txt");
+        assert_eq!(shown(&workspace), [(client, Surface::DEFAULT)]);
+    }
+
+    #[test]
+    fn opening_settings_closes_the_quick_view() {
+        let ui = test_window();
+        let (_workspace, client, _) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        ui.set_quick_view_open(true);
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&closed);
+        ui.on_close_quick_view(move || count.set(count.get() + 1));
+
+        ui.invoke_open_settings("General".into());
+
+        assert!(ui.get_settings_open());
+        assert_eq!(closed.get(), 1);
     }
 
     /// A workspace listing one client and one server, as a snapshot fills it.

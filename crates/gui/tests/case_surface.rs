@@ -12,7 +12,7 @@ use ephervex_gui::ui::{AppWindow, CaseStepRow, InstanceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
-use slint::{ComponentHandle, LogicalPosition};
+use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 use slint::{ModelRc, VecModel};
 
 type Calls = Rc<RefCell<Vec<String>>>;
@@ -162,6 +162,9 @@ fn a_count_of_zero_offers_no_reset() {
 #[test]
 fn the_note_can_be_saved_only_after_it_changed() {
     let (ui, calls) = shown(client(&[], "Only when full", 0));
+    // The page header leaves the note below the fold of a minimum-size window.
+    ui.window().set_size(PhysicalSize::new(1000, 1200));
+    slint::platform::update_timers_and_animations();
 
     let save = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-case-save-note"))
         .find(|element| element.accessible_role() == Some(AccessibleRole::Button))

@@ -140,6 +140,10 @@ impl Surface {
     }
 }
 
+/// The first identity of the quick view's pane. The workspace never numbers
+/// a pane this high.
+const QUICK_VIEW_FIRST_PANE: u32 = 1 << 20;
+
 /// A pane's identity for as long as it exists. Never reused within one layout.
 ///
 /// Composition identity only: no host or feature state is ever keyed by it.
@@ -155,6 +159,12 @@ impl PaneId {
     #[must_use]
     pub const fn from_raw(value: u32) -> Self {
         Self(value)
+    }
+
+    /// Whether this is the quick view's pane rather than one of the workspace's.
+    #[must_use]
+    pub const fn is_quick_view(self) -> bool {
+        self.0 >= QUICK_VIEW_FIRST_PANE
     }
 }
 
@@ -309,14 +319,26 @@ impl WorkspaceLayout {
     /// A single pane showing `host`, on `surface` when the host offers it.
     #[must_use]
     pub fn single(host: InstalledHost, surface: Surface) -> Self {
+        Self::single_from(host, surface, 1)
+    }
+
+    /// The one pane of a quick view: like [`Self::single`], but its identity
+    /// is in a range no workspace pane uses, so a callback naming a pane never
+    /// means the wrong layout.
+    #[must_use]
+    pub fn quick_view(host: InstalledHost, surface: Surface) -> Self {
+        Self::single_from(host, surface, QUICK_VIEW_FIRST_PANE)
+    }
+
+    fn single_from(host: InstalledHost, surface: Surface, first: u32) -> Self {
         let pane = Pane {
-            id: PaneId(1),
+            id: PaneId(first),
             host,
             surface: surface.or_default_for(host),
         };
         Self {
             arrangement: Arrangement::Single(pane),
-            next_id: 2,
+            next_id: first + 1,
             way_back: None,
         }
     }

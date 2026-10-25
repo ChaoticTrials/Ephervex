@@ -61,6 +61,8 @@ export component Outlined inherits Rectangle {
 // ScrollView clips it. Callers bind `lift` on hover and press.
 export component Plate inherits Rectangle {
     in property <length> lift: Theme.shadow-offset-card;
+    // Whether the shadow falls to the left instead of the right.
+    in property <bool> shadow-left: false;
     in property <brush> fill: Theme.surface;
     in property <brush> outline: Theme.border-strong;
     in property <length> radius: Theme.card-radius;
@@ -74,7 +76,7 @@ export component Plate inherits Rectangle {
     out property <length> inner-width: max(0px, root.width - 2 * root.outline-width);
     out property <length> inner-height: max(0px, root.height - 2 * root.outline-width);
     shadow := Rectangle {
-        x: root.lift;
+        x: root.shadow-left ? -root.lift : root.lift;
         y: root.lift;
         width: root.width;
         height: root.height;
@@ -150,4 +152,12 @@ export component GridFloor inherits Rectangle {
         height: 1px;
         background: Theme.grid-line;
     }
+}
+
+// Dims what it is laid over, and says when it is pressed. The quick view puts
+// one over each thing it covers.
+export component Scrim inherits Rectangle {
+    callback pressed();
+    background: Theme.scrim.with-alpha(0.22);
+    TouchArea { clicked => { root.pressed(); } }
 }

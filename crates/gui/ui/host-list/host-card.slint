@@ -1,7 +1,7 @@
 // The cards of the host list: one face, drawn for a client, a server, or a host still being created.
 
 import { Outlined, Plate } from "../components/surface.slint";
-import { Chip, FavoriteToggle, Pill, StateTone } from "../components/controls.slint";
+import { Chip, FavoriteToggle, IconButton, Pill, StateTone } from "../components/controls.slint";
 import { ContextTouchArea, PopupMenu } from "../components/menus.slint";
 import { ElidedHeading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -54,9 +54,13 @@ export component HostCardFace inherits Rectangle {
     // Whether a pane shows this host, which draws the selection style.
     in property <bool> open;
     in property <bool> hovered;
-    // A press on the title or the star, which take presses themselves.
+    // Whether the card offers the quick view of its host.
+    in property <bool> quick-viewable: false;
+    // A press on the title, the star or the quick view button, which take
+    // presses themselves.
     callback title-pressed();
     callback star-pressed();
+    callback quick-view-pressed();
     // A press of the secondary button over a part that takes presses itself.
     callback menu-requested(x: length, y: length);
     private property <length> ink: Theme.strong-border-width;
@@ -261,6 +265,7 @@ export component ClientCard inherits HostCardFace {
     // One row per group the instance can be put in, its id the group's.
     in property <[MenuRow]> group-entries;
     callback open-requested(string);
+    callback quick-view(string);
     callback toggle-favorite(string, bool);
     callback set-group(string, string);
     callback new-group(string);
@@ -313,6 +318,8 @@ export component ClientCard inherits HostCardFace {
     hovered: card-area.has-hover;
     title-pressed => { root.open-requested(root.item.id); }
     menu-requested(x, y) => { root.open-menu(x, y); }
+    quick-viewable: true;
+    quick-view-pressed => { root.quick-view(root.item.id); }
     star-pressed => { root.toggle-favorite(root.item.id, !root.item.favorite); }
     // The repeater hands this card another row when the list changes in
     // place, and an open menu, or the group list opened from it, would then
@@ -394,6 +401,7 @@ export component ClientCard inherits HostCardFace {
 export component ServerCard inherits HostCardFace {
     in property <ServerRow> item;
     callback open-requested(string);
+    callback quick-view(string);
     callback toggle-favorite(string, bool);
     callback pick-icon(string);
     callback clear-icon(string);
@@ -427,6 +435,8 @@ export component ServerCard inherits HostCardFace {
     hovered: card-area.has-hover;
     title-pressed => { root.open-requested(root.item.id); }
     menu-requested(x, y) => { root.open-menu(x, y); }
+    quick-viewable: true;
+    quick-view-pressed => { root.quick-view(root.item.id); }
     star-pressed => { root.toggle-favorite(root.item.id, !root.item.favorite); }
     // See `ClientCard`.
     property <string> menu-owner-id: root.item.id;

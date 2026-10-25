@@ -122,6 +122,7 @@ export component HostList inherits Rectangle {
     callback create-server();
 
     callback open-client(string);
+    callback quick-view-client(string);
     callback toggle-client-favorite(string, bool);
     callback set-client-group(string, string);
     callback new-client-group(string);
@@ -137,6 +138,7 @@ export component HostList inherits Rectangle {
     callback delete-client(InstanceRow);
 
     callback open-server(string);
+    callback quick-view-server(string);
     callback toggle-server-favorite(string, bool);
     callback pick-server-icon(string);
     callback clear-server-icon(string);
@@ -277,6 +279,7 @@ export component HostList inherits Rectangle {
                         }
                     }
                     open-requested(id) => { root.open-client(id); }
+                    quick-view(id) => { root.quick-view-client(id); }
                     toggle-favorite(id, favorite) => { root.toggle-client-favorite(id, favorite); }
                     set-group(id, group) => { root.set-client-group(id, group); }
                     new-group(id) => { root.new-client-group(id); }
@@ -310,6 +313,7 @@ export component HostList inherits Rectangle {
                         }
                     }
                     open-requested(id) => { root.open-server(id); }
+                    quick-view(id) => { root.quick-view-server(id); }
                     toggle-favorite(id, favorite) => { root.toggle-server-favorite(id, favorite); }
                     pick-icon(id) => { root.pick-server-icon(id); }
                     clear-icon(id) => { root.clear-server-icon(id); }

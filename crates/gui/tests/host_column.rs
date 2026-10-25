@@ -360,7 +360,7 @@ fn text_shown(ui: &AppWindow, label: &str) -> bool {
 fn an_overview_beside_the_column_leaves_the_linked_servers_to_it() {
     let ui = window(1300, client_with_server());
     assert!(!text_shown(&ui, &lookup("gui-linked-server")));
-    assert!(text_shown(&ui, &lookup("gui-reproduction-environment")));
+    assert!(text_shown(&ui, &lookup("gui-folder")));
 }
 
 #[test]

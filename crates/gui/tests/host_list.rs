@@ -50,6 +50,7 @@ slint::slint! {
         out property <brush> well: Theme.well;
         out property <brush> fill: Theme.accent-primary;
         out property <string> opened;
+        out property <string> quick-viewed;
         callback open-requested(string);
         background: Theme.background;
         VerticalLayout {
@@ -60,6 +61,7 @@ slint::slint! {
             card-a := ClientCard {
                 item: root.client-a;
                 open-requested(id) => { root.opened = id; root.open-requested(id); }
+                quick-view(id) => { root.quick-viewed = id; }
             }
             card-b := ClientCard {
                 item: root.client-b;
@@ -68,6 +70,7 @@ slint::slint! {
             server-card := ServerCard {
                 item: root.server;
                 open-requested(id) => { root.opened = id; root.open-requested(id); }
+                quick-view(id) => { root.quick-viewed = id; }
             }
             pending-card := PendingCard { item: root.pending; }
         }
@@ -534,6 +537,26 @@ fn pressing_a_card_asks_to_open_it_and_pressing_its_star_does_not() {
     .expect("the star");
     star.invoke_accessible_default_action();
     assert_eq!(opened.borrow().len(), 1, "the star opened the host");
+}
+
+#[test]
+fn a_cards_quick_view_button_asks_for_that_host_without_opening_it() {
+    let ui = card_probe(1.0);
+    render(&ui);
+    let opened: Rc<RefCell<Vec<String>>> = Rc::default();
+    let record = Rc::clone(&opened);
+    ui.on_open_requested(move |id| record.borrow_mut().push(id.to_string()));
+
+    for (name, id) in [("Alpha", "alpha"), ("Survival", "server")] {
+        let button = find_button(
+            &ui,
+            &lookup_args("gui-quick-view-for", [("value", Arg::from(name))]),
+        )
+        .expect("the quick view button");
+        button.invoke_accessible_default_action();
+        assert_eq!(ui.get_quick_viewed(), id);
+    }
+    assert!(opened.borrow().is_empty(), "the button opened the host");
 }
 
 fn click(ui: &CardProbe, position: LogicalPosition) {
