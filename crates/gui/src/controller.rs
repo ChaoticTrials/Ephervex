@@ -3155,6 +3155,7 @@ fn register_callbacks(
 
     let sender = commands.clone();
     ui.on_cancel_operation(move |id| send(&sender, Command::CancelOperation(id.into())));
+    register_microsoft_sign_in(ui, commands);
 }
 
 /// The moment of capture, offered as a snapshot's label when none is typed.
@@ -8358,6 +8359,10 @@ fn apply_event(
         Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
         Event::ModStandInOffered(data) => apply_mod_stand_in(ui, data, workspace),
         Event::ModStandInEnded { id } => end_mod_stand_in(ui, id, workspace),
+        Event::MicrosoftSignInCode { code, address } => {
+            show_microsoft_sign_in(ui, commands, &code, &address);
+        }
+        Event::MicrosoftSignInEnded => end_microsoft_sign_in(ui),
         Event::ModRelations(data) => apply_mod_relations(ui, &data),
         Event::ModRemovalPlan(data) => apply_mod_removal_plan(ui, data, workspace),
         Event::ModResults(results) => apply_mod_results(workspace, results, commands),
@@ -10269,6 +10274,58 @@ fn show_mod_acquisition(ui: &AppWindow, data: &backend::ModAcquisitionData) {
     ui.set_modal("mod-acquire".into());
 }
 
+fn register_microsoft_sign_in(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_cancel_microsoft_sign_in(move || send(&sender, Command::CancelMicrosoftLogin));
+
+    let weak = ui.as_weak();
+    ui.on_open_microsoft_sign_in_page(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let address = ui.get_microsoft_sign_in_address();
+        if is_secure_web_address(&address) && !ephervex_core::open_in_browser(&address) {
+            ui.invoke_present_toast(
+                lookup("gui-microsoft-sign-in-open-page-failed").into(),
+                true,
+            );
+        }
+    });
+}
+
+/// Shows the code a Microsoft sign-in waits for. When another dialog cannot be
+/// replaced, the sign-in is canceled instead of waiting with nothing on screen
+/// to end it from.
+fn show_microsoft_sign_in(ui: &AppWindow, commands: &Sender<Command>, code: &str, address: &str) {
+    if ui.get_modal() != "microsoft-sign-in" && !make_room_for_dialog(ui) {
+        send(commands, Command::CancelMicrosoftLogin);
+        return;
+    }
+    ui.set_microsoft_sign_in_code(code.into());
+    ui.set_microsoft_sign_in_address(address.into());
+    ui.set_microsoft_sign_in_address_openable(is_secure_web_address(address));
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("microsoft-sign-in".into());
+}
+
+/// Takes the sign-in dialog off screen once the sign-in stopped waiting.
+fn end_microsoft_sign_in(ui: &AppWindow) {
+    ui.set_microsoft_sign_in_code(SharedString::default());
+    ui.set_microsoft_sign_in_address(SharedString::default());
+    ui.set_microsoft_sign_in_address_openable(false);
+    if ui.get_modal() == "microsoft-sign-in" {
+        ui.set_modal(SharedString::default());
+        ui.set_modal_error(SharedString::default());
+    }
+}
+
+/// Whether an address the sign-in service sent is one to hand to the browser.
+fn is_secure_web_address(address: &str) -> bool {
+    address.strip_prefix("https://").is_some_and(|rest| {
+        !rest.starts_with('/') && !address.chars().any(|c| c.is_whitespace() || c.is_control())
+    })
+}
+
 /// Lets go of the dialog on screen the way its own close button would, before
 /// something else takes its place: an install confirmation gives its place in
 /// the browser's queue back, and an import stops reading its archive. Without
@@ -10279,6 +10336,7 @@ fn leave_modal(ui: &AppWindow) {
         "mod-plan" => ui.invoke_abandon_browser_install(),
         "import" => ui.invoke_close_import_modal(),
         "open-pack-link" => ui.invoke_cancel_pack_link(),
+        "microsoft-sign-in" => ui.invoke_cancel_microsoft_sign_in(),
         _ => {}
     }
 }
@@ -19882,6 +19940,123 @@ mod tests {
         apply_mod_removal_plan(&ui, removal_plan(request, &host), &workspace);
 
         assert_eq!(ui.get_modal(), "mod-acquire");
+        assert_eq!(
+            toasts.borrow().as_slice(),
+            [(lookup("gui-dialog-not-shown"), true)]
+        );
+    }
+
+    #[test]
+    fn a_sign_in_code_is_shown_in_a_dialog_and_ends_with_the_sign_in() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+
+        show_microsoft_sign_in(
+            &ui,
+            &workspace.commands,
+            "ABCD1234",
+            "https://microsoft.com/devicelogin",
+        );
+
+        assert_eq!(ui.get_modal(), "microsoft-sign-in");
+        assert_eq!(ui.get_microsoft_sign_in_code(), "ABCD1234");
+        assert_eq!(
+            ui.get_microsoft_sign_in_address(),
+            "https://microsoft.com/devicelogin"
+        );
+        assert!(ui.get_microsoft_sign_in_address_openable());
+
+        end_microsoft_sign_in(&ui);
+
+        assert_eq!(ui.get_modal(), "");
+        assert_eq!(ui.get_microsoft_sign_in_code(), "");
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn the_end_of_a_sign_in_leaves_an_unrelated_dialog_open() {
+        let ui = test_window();
+        ui.set_modal("rename".into());
+
+        end_microsoft_sign_in(&ui);
+
+        assert_eq!(ui.get_modal(), "rename");
+    }
+
+    #[test]
+    fn a_sign_in_address_that_is_not_a_secure_web_address_is_never_opened() {
+        assert!(is_secure_web_address("https://microsoft.com/devicelogin"));
+        assert!(!is_secure_web_address("http://microsoft.com/devicelogin"));
+        assert!(!is_secure_web_address("file:///etc/passwd"));
+        assert!(!is_secure_web_address("https:///devicelogin"));
+        assert!(!is_secure_web_address("https://microsoft.com/a b"));
+        assert!(!is_secure_web_address(""));
+        let ui = test_window();
+        let (workspace, _commands) = test_workspace_sending(&ui);
+        show_microsoft_sign_in(&ui, &workspace.commands, "ABCD1234", "javascript:alert(1)");
+        assert!(!ui.get_microsoft_sign_in_address_openable());
+    }
+
+    #[test]
+    fn the_sign_in_dialogs_cancel_action_asks_the_backend_to_stop_the_sign_in() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_microsoft_sign_in(&ui, &workspace.commands);
+        show_microsoft_sign_in(
+            &ui,
+            &workspace.commands,
+            "ABCD1234",
+            "https://microsoft.com/devicelogin",
+        );
+
+        ui.invoke_cancel_microsoft_sign_in();
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelMicrosoftLogin)
+        ));
+    }
+
+    #[test]
+    fn a_dialog_that_replaces_the_sign_in_dialog_cancels_the_sign_in() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_microsoft_sign_in(&ui, &workspace.commands);
+        show_microsoft_sign_in(
+            &ui,
+            &workspace.commands,
+            "ABCD1234",
+            "https://microsoft.com/devicelogin",
+        );
+
+        assert!(make_room_for_dialog(&ui));
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelMicrosoftLogin)
+        ));
+    }
+
+    #[test]
+    fn a_sign_in_code_never_replaces_a_manual_download_prompt() {
+        let ui = test_window();
+        let toasts = toasts(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_acquisition(&ui, acquisition_prompt(1, &host), &workspace);
+
+        show_microsoft_sign_in(
+            &ui,
+            &workspace.commands,
+            "ABCD1234",
+            "https://microsoft.com/devicelogin",
+        );
+
+        assert_eq!(ui.get_modal(), "mod-acquire");
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::CancelMicrosoftLogin)
+        ));
         assert_eq!(
             toasts.borrow().as_slice(),
             [(lookup("gui-dialog-not-shown"), true)]

@@ -28,15 +28,15 @@ use ephervex_core::{
     LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchFeatures, LaunchObserver,
     LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
     LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
-    LocalModReport, LoginOptions, ManagedModEntry, ManagedModSnapshot, MetadataAvailability,
-    ModInstallPlan, ModInstallRequest, ModMutability, ModMutation, ModMutationPlan, ModPresence,
-    ModSearchHit, ModSearchQuery, ModVersionChoice, MutationRestriction, NewClient, NewServer,
-    OperationReporter, OptionalSelection, PackAnalysis, PackContentOrigin, PackContentPresence,
-    Paths, PlannedOutcome, ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer,
-    SearchOptions, ServerArchiveEvidence, ServerCommit, ServerContentSource, ServerCreateOptions,
-    ServerEvent, ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
-    SideRequirement, SideSupport, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
-    WatchTarget,
+    LocalModReport, LoginFlow, LoginOptions, LoginRequest, ManagedModEntry, ManagedModSnapshot,
+    MetadataAvailability, ModInstallPlan, ModInstallRequest, ModMutability, ModMutation,
+    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, ModVersionChoice,
+    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
+    PackContentOrigin, PackContentPresence, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
+    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerArchiveEvidence, ServerCommit,
+    ServerContentSource, ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder,
+    ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement, SideSupport,
+    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -743,6 +743,8 @@ pub enum Command {
     SetDefaultAccount(String),
     RemoveAccount(String),
     MicrosoftLogin,
+    /// Stops the Microsoft sign-in that is waiting for the user, if one is.
+    CancelMicrosoftLogin,
     SaveApiSettings {
         client_id: String,
         user_agent: String,
@@ -2204,6 +2206,15 @@ pub enum Event {
     ModAcquisitionEnded {
         id: u64,
     },
+    /// A Microsoft sign-in is waiting for the user to enter this code at this
+    /// address. Neither is a secret.
+    MicrosoftSignInCode {
+        code: String,
+        address: String,
+    },
+    /// The Microsoft sign-in stopped waiting, whether it finished, failed, or
+    /// was canceled.
+    MicrosoftSignInEnded,
     /// An operation stopped before writing anything because a dependency it
     /// needs is another copy of a mod a jar already on the host provides, and
     /// asks whether that jar may stand in for it.
@@ -6107,8 +6118,9 @@ fn run_worker(
             },
             Command::MicrosoftLogin => {
                 let paths = app.paths().clone();
-                spawn_login(paths, &events);
+                spawn_login(paths, &events, &cancellations);
             }
+            Command::CancelMicrosoftLogin => cancel_microsoft_login(&cancellations),
             Command::SaveApiSettings {
                 client_id,
                 user_agent,
@@ -10528,63 +10540,124 @@ fn config_file_stamp(path: &Path) -> Option<(u64, u64, std::time::SystemTime)> {
     Some((metadata.ino(), metadata.len(), metadata.modified().ok()?))
 }
 
-fn spawn_login(paths: Paths, events: &Sender<Event>) {
-    spawn_detached(paths, events.clone(), move |mut app, events, runtime| {
-        runtime.block_on(async move {
-            let (observer, mut receiver) = AuthObserver::channel();
-            let auth_events = events.clone();
-            let forward = tokio::spawn(async move {
-                while let Some(event) = receiver.recv().await {
-                    match event {
-                        AuthEvent::OpenBrowser { url } => {
-                            if !ephervex_core::open_in_browser(&url) {
-                                let _ = auth_events.send(Event::Toast {
-                                    message: lookup("gui-signin-browser-failed"),
-                                    error: true,
+/// Key of the running Microsoft sign-in in the cancellation registry. Only one
+/// runs at a time, because its dialog is the one place to end it.
+const MICROSOFT_LOGIN_KEY: &str = "microsoft-sign-in";
+
+/// Holds the registry entry of the running sign-in and removes it on drop.
+struct MicrosoftLoginSlot {
+    cancellations: CancellationRegistry,
+}
+
+impl MicrosoftLoginSlot {
+    /// Claims the slot, or `None` while another sign-in holds it.
+    fn claim(cancellations: &CancellationRegistry) -> Option<(Self, CancellationToken)> {
+        let mut entries = cancellations.lock().ok()?;
+        if entries.contains_key(MICROSOFT_LOGIN_KEY) {
+            return None;
+        }
+        let token = CancellationToken::new();
+        entries.insert(MICROSOFT_LOGIN_KEY.to_owned(), token.clone());
+        Some((
+            Self {
+                cancellations: Arc::clone(cancellations),
+            },
+            token,
+        ))
+    }
+}
+
+impl Drop for MicrosoftLoginSlot {
+    fn drop(&mut self) {
+        if let Ok(mut entries) = self.cancellations.lock() {
+            entries.remove(MICROSOFT_LOGIN_KEY);
+        }
+    }
+}
+
+fn cancel_microsoft_login(cancellations: &CancellationRegistry) {
+    let token = cancellations
+        .lock()
+        .ok()
+        .and_then(|entries| entries.get(MICROSOFT_LOGIN_KEY).cloned());
+    if let Some(token) = token {
+        token.cancel();
+    }
+}
+
+/// Signs in with the device-code flow: the window shows the code and address
+/// in a dialog for as long as the sign-in waits.
+fn spawn_login(paths: Paths, events: &Sender<Event>, cancellations: &CancellationRegistry) {
+    let Some((slot, cancel)) = MicrosoftLoginSlot::claim(cancellations) else {
+        let _ = events.send(Event::Toast {
+            message: lookup("gui-microsoft-sign-in-running"),
+            error: true,
+        });
+        return;
+    };
+    spawn_detached_with_setup_failure(
+        paths,
+        events.clone(),
+        move |events| {
+            let _ = events.send(Event::MicrosoftSignInEnded);
+        },
+        move |mut app, events, runtime| {
+            runtime.block_on(async move {
+                let (observer, mut receiver) = AuthObserver::channel();
+                let auth_events = events.clone();
+                let forward = tokio::spawn(async move {
+                    while let Some(event) = receiver.recv().await {
+                        match event {
+                            AuthEvent::DeviceCode(prompt) => {
+                                let _ = auth_events.send(Event::MicrosoftSignInCode {
+                                    code: prompt.user_code,
+                                    address: prompt.verification_uri,
                                 });
                             }
+                            AuthEvent::Stage(stage) => {
+                                let _ = auth_events.send(Event::Toast {
+                                    message: localized_value(
+                                        "gui-signin-stage",
+                                        &stage.to_string(),
+                                    ),
+                                    error: false,
+                                });
+                            }
+                            _ => {}
                         }
-                        AuthEvent::DeviceCode(prompt) => {
-                            let _ = auth_events.send(Event::Toast {
-                                message: localized_values(
-                                    "gui-device-code-prompt",
-                                    &prompt.verification_uri,
-                                    &prompt.user_code,
-                                ),
-                                error: false,
-                            });
-                        }
-                        AuthEvent::Stage(stage) => {
-                            let _ = auth_events.send(Event::Toast {
-                                message: localized_value("gui-signin-stage", &stage.to_string()),
-                                error: false,
-                            });
-                        }
-                        _ => {}
                     }
+                });
+                let options = LoginOptions {
+                    request: LoginRequest {
+                        flow: LoginFlow::DeviceCode,
+                        ..LoginRequest::default()
+                    },
+                    ..LoginOptions::default()
+                };
+                let result = app.login(&options, &observer, &cancel).await;
+                drop(observer);
+                let _ = forward.await;
+                let _ = events.send(Event::MicrosoftSignInEnded);
+                drop(slot);
+                match result {
+                    Ok(login) => {
+                        let _ = events.send(Event::Toast {
+                            message: localized_value("gui-signed-in", &login.account.name),
+                            error: false,
+                        });
+                        send_snapshot(&mut app, &events);
+                    }
+                    Err(error) if error.is_cancellation() => {
+                        let _ = events.send(Event::Toast {
+                            message: lookup("gui-operation-canceled"),
+                            error: false,
+                        });
+                    }
+                    Err(error) => send_error(&events, &error),
                 }
             });
-            let result = app
-                .login(
-                    &LoginOptions::default(),
-                    &observer,
-                    &CancellationToken::new(),
-                )
-                .await;
-            drop(observer);
-            let _ = forward.await;
-            match result {
-                Ok(login) => {
-                    let _ = events.send(Event::Toast {
-                        message: localized_value("gui-signed-in", &login.account.name),
-                        error: false,
-                    });
-                    send_snapshot(&mut app, &events);
-                }
-                Err(error) => send_error(&events, &error),
-            }
-        });
-    });
+        },
+    );
 }
 
 /// What a finished background operation wants shown.
@@ -14114,6 +14187,35 @@ mod tests {
     /// which a temporary root does not isolate.
     fn without_desktop_keyring() {
         ephervex_core::test_support::use_in_memory_credential_store();
+    }
+
+    #[test]
+    fn only_one_microsoft_sign_in_waits_at_a_time_and_finishing_frees_the_slot() {
+        let cancellations: CancellationRegistry = Arc::default();
+
+        let (slot, _token) = MicrosoftLoginSlot::claim(&cancellations).expect("the first claim");
+        assert!(MicrosoftLoginSlot::claim(&cancellations).is_none());
+
+        drop(slot);
+        assert!(MicrosoftLoginSlot::claim(&cancellations).is_some());
+    }
+
+    #[test]
+    fn canceling_the_microsoft_sign_in_cancels_only_the_waiting_sign_in() {
+        let cancellations: CancellationRegistry = Arc::default();
+        let other = CancellationToken::new();
+        cancellations
+            .lock()
+            .expect("registry")
+            .insert("unrelated".to_owned(), other.clone());
+        cancel_microsoft_login(&cancellations);
+        assert!(!other.is_cancelled());
+
+        let (_slot, token) = MicrosoftLoginSlot::claim(&cancellations).expect("a claim");
+        cancel_microsoft_login(&cancellations);
+
+        assert!(token.is_cancelled());
+        assert!(!other.is_cancelled());
     }
 
     #[test]
