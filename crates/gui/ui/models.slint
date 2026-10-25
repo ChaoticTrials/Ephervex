@@ -613,6 +613,14 @@ export struct LogView {
     error-enabled: bool,
     fatal-enabled: bool,
     other-enabled: bool,
+    // How many retained records each level has, whatever the filters show.
+    trace-count: int,
+    debug-count: int,
+    info-count: int,
+    warn-count: int,
+    error-count: int,
+    fatal-count: int,
+    other-count: int,
     revision: int,
     // The selection in reading order, as byte offsets into each end's own
     // row. -1 is no selection.

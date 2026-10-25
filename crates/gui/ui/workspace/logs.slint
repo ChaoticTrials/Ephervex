@@ -1,12 +1,49 @@
 // The Logs and Console surfaces: the live log viewer, retained files, and the crash notice.
 
 import { ListView, ScrollView } from "std-widgets.slint";
-import { AppButton, FilterChip, IconButton, TextField } from "../components/controls.slint";
+import { AppButton, FilterChip, IconButton, KeyboardFocus, TextField } from "../components/controls.slint";
+import { Plate } from "../components/surface.slint";
 import { PopupMenu } from "../components/menus.slint";
 import { BodyText } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { DiagnosticRow, LogChunk } from "../models.slint";
 import { Theme } from "../theme.slint";
+
+// One log level in the toolbar: its name and how many records have it. It
+// takes the level's own fill while it is shown and sits back while it is not.
+component LevelChip inherits Rectangle {
+    in property <string> text;
+    in property <int> count;
+    in property <string> accessible-name: text;
+    in property <color> tone: Theme.surface;
+    in property <bool> selected;
+    callback clicked();
+    height: Theme.control-height;
+    width: label.preferred-width + 24px;
+    horizontal-stretch: 0;
+    accessible-role: checkbox;
+    accessible-label: root.accessible-name;
+    accessible-checked: root.selected;
+    accessible-action-default => { root.clicked(); }
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        fill: root.selected ? root.tone : area.has-hover ? Theme.elevated : Theme.surface;
+        animate lift { duration: 80ms; }
+        label := Text {
+            text: root.text + " " + root.count;
+            color: root.selected ? Theme.text : Theme.text-muted;
+            font-size: Theme.label-size;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
 
 export component LiveLogViewer inherits Rectangle {
     in property <[LogChunk]> chunks;
@@ -30,6 +67,13 @@ export component LiveLogViewer inherits Rectangle {
     in property <bool> error-enabled;
     in property <bool> fatal-enabled;
     in property <bool> other-enabled;
+    in property <int> trace-count;
+    in property <int> debug-count;
+    in property <int> info-count;
+    in property <int> warn-count;
+    in property <int> error-count;
+    in property <int> fatal-count;
+    in property <int> other-count;
     in property <int> revision;
     // The selection, in reading order, as byte offsets into each end's own
     // row. -1 means nothing is selected. Offsets rather than columns
@@ -57,10 +101,8 @@ export component LiveLogViewer inherits Rectangle {
     // what lets the row under the pointer be counted rather than searched
     // for.
     private property <length> row-height: probe.preferred-height + 8px;
-    border-radius: Theme.card-radius;
-    border-width: Theme.strong-border-width;
-    border-color: Theme.border-strong;
-    background: Theme.well;
+    // The toolbars sit on the page; the output below them is the dark console.
+    background: transparent;
 
     // Measured, never drawn. A hidden text still reports the size it would
     // take, which is the only way to learn a font's advance, and a
@@ -85,7 +127,7 @@ export component LiveLogViewer inherits Rectangle {
         spacing: 0px;
         Rectangle {
             height: Theme.control-height + 12px;
-            background: Theme.surface;
+            background: transparent;
             // A pane too narrow for every control scrolls the row sideways
             // rather than cutting it off.
             ScrollView {
@@ -95,22 +137,22 @@ export component LiveLogViewer inherits Rectangle {
                 horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
             levels := HorizontalLayout {
                 height: parent.visible-height;
-                padding-left: 10px; padding-right: 10px; spacing: 6px; cross-axis-alignment: center;
+                padding-left: Theme.lift-room; padding-right: 10px; spacing: 6px; cross-axis-alignment: center;
                 all-levels := FilterChip { text: GuiI18n.text("gui-all"); accessible-name: GuiI18n.text("gui-filter-all-levels"); selected: root.trace-enabled && root.debug-enabled && root.info-enabled && root.warn-enabled && root.error-enabled && root.fatal-enabled && root.other-enabled; clicked => { root.set-level("all", !all-levels.selected); } }
-                FilterChip { text: "INFO"; accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
-                FilterChip { text: "WARN"; accessible-name: GuiI18n.text("gui-filter-warn"); selected: root.warn-enabled; clicked => { root.set-level("warn", !root.warn-enabled); } }
-                FilterChip { text: "ERROR"; accessible-name: GuiI18n.text("gui-filter-error"); selected: root.error-enabled; clicked => { root.set-level("error", !root.error-enabled); } }
-                FilterChip { text: "DEBUG"; accessible-name: GuiI18n.text("gui-filter-debug"); selected: root.debug-enabled; clicked => { root.set-level("debug", !root.debug-enabled); } }
-                FilterChip { text: "TRACE"; accessible-name: GuiI18n.text("gui-filter-trace"); selected: root.trace-enabled; clicked => { root.set-level("trace", !root.trace-enabled); } }
-                FilterChip { text: "FATAL"; accessible-name: GuiI18n.text("gui-filter-fatal"); selected: root.fatal-enabled; clicked => { root.set-level("fatal", !root.fatal-enabled); } }
-                FilterChip { text: GuiI18n.text("gui-log-level-other"); accessible-name: GuiI18n.text("gui-filter-other"); selected: root.other-enabled; clicked => { root.set-level("other", !root.other-enabled); } }
+                LevelChip { text: "ERROR"; count: root.error-count; tone: Theme.danger-soft; accessible-name: GuiI18n.text("gui-filter-error"); selected: root.error-enabled; clicked => { root.set-level("error", !root.error-enabled); } }
+                LevelChip { text: "WARN"; count: root.warn-count; tone: Theme.note-fill; accessible-name: GuiI18n.text("gui-filter-warn"); selected: root.warn-enabled; clicked => { root.set-level("warn", !root.warn-enabled); } }
+                LevelChip { text: "INFO"; count: root.info-count; tone: Theme.state-stopped.mix(Theme.surface, 0.3); accessible-name: GuiI18n.text("gui-filter-info"); selected: root.info-enabled; clicked => { root.set-level("info", !root.info-enabled); } }
+                LevelChip { text: "DEBUG"; count: root.debug-count; tone: Theme.well; accessible-name: GuiI18n.text("gui-filter-debug"); selected: root.debug-enabled; clicked => { root.set-level("debug", !root.debug-enabled); } }
+                LevelChip { text: "TRACE"; count: root.trace-count; tone: Theme.well; accessible-name: GuiI18n.text("gui-filter-trace"); selected: root.trace-enabled; clicked => { root.set-level("trace", !root.trace-enabled); } }
+                LevelChip { text: "FATAL"; count: root.fatal-count; tone: Theme.danger-soft; accessible-name: GuiI18n.text("gui-filter-fatal"); selected: root.fatal-enabled; clicked => { root.set-level("fatal", !root.fatal-enabled); } }
+                LevelChip { text: GuiI18n.text("gui-log-level-other"); count: root.other-count; tone: Theme.elevated; accessible-name: GuiI18n.text("gui-filter-other"); selected: root.other-enabled; clicked => { root.set-level("other", !root.other-enabled); } }
                 Rectangle { horizontal-stretch: 1; }
             }
             }
         }
         Rectangle {
             height: Theme.control-height + 12px;
-            background: Theme.surface;
+            background: transparent;
             ScrollView {
                 viewport-width: max(self.width, actions.min-width);
                 viewport-height: self.visible-height;
@@ -118,7 +160,7 @@ export component LiveLogViewer inherits Rectangle {
                 horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
             actions := HorizontalLayout {
                 height: parent.visible-height;
-                padding-left: 10px; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
+                padding-left: Theme.lift-room; padding-right: 10px; spacing: 8px; cross-axis-alignment: center;
                 if root.searchable : HorizontalLayout {
                     spacing: 8px;
                     horizontal-stretch: 0;
@@ -128,7 +170,13 @@ export component LiveLogViewer inherits Rectangle {
                     AppButton { text: GuiI18n.text("gui-find"); clicked => { root.search(search-field.text); } }
                 }
                 FilterChip { text: GuiI18n.text("gui-wrap-lines"); accessible-name: GuiI18n.text("gui-wrap-lines"); selected: root.wrap-lines; clicked => { root.wrap-changed(!root.wrap-lines); } }
-                FilterChip { text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest"); accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest"); selected: root.follow; clicked => { root.follow-changed(!root.follow); } }
+                AppButton {
+                    text: root.follow ? GuiI18n.text("gui-following") : GuiI18n.text("gui-jump-latest");
+                    accessible-name: root.follow ? GuiI18n.text("gui-pause-following") : GuiI18n.text("gui-jump-latest");
+                    icon: @image-url("../../../../assets/icons/jump-to-end.svg");
+                    tone: root.follow ? "success" : "default";
+                    clicked => { root.follow-changed(!root.follow); }
+                }
                 AppButton { text: GuiI18n.text("gui-copy-selection"); enabled: root.has-selection; hint: GuiI18n.text("gui-hint-copy-selection"); clicked => { root.copy-selection(); } }
                 AppButton { text: GuiI18n.text("gui-copy-retained"); enabled: root.has-content; hint: GuiI18n.text("gui-hint-copy-retained"); clicked => { root.copy(); } }
                 Rectangle { horizontal-stretch: 1; }
@@ -138,17 +186,26 @@ export component LiveLogViewer inherits Rectangle {
             }
             }
         }
+        // The output, on the dark floor a console is read against.
+        Rectangle {
+            vertical-stretch: 1;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
+            border-color: Theme.border-strong;
+            background: Theme.terminal;
+            clip: true;
+            VerticalLayout {
         if root.status != "" || root.history-truncated : Rectangle {
             height: 28px;
-            background: Theme.background;
+            background: transparent;
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 12px;
-                BodyText { text: root.status; color: Theme.text-muted; font-size: Theme.caption-size; }
-                if root.history-truncated : BodyText { text: GuiI18n.text("gui-retained-history-truncated"); color: Theme.warning; font-size: Theme.caption-size; }
+                BodyText { text: root.status; color: Theme.on-terminal-muted; font-size: Theme.caption-size; }
+                if root.history-truncated : BodyText { text: GuiI18n.text("gui-retained-history-truncated"); color: Theme.warning.brighter(1.2); font-size: Theme.caption-size; }
                 Rectangle { horizontal-stretch: 1; }
             }
         }
-        if root.chunks.length == 0 : Rectangle { background: Theme.well; VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.text; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); horizontal-alignment: center; } } }
+        if root.chunks.length == 0 : Rectangle { background: transparent; VerticalLayout { alignment: center; spacing: 6px; Text { text: GuiI18n.text("gui-no-log-output"); color: Theme.on-terminal; font-size: Theme.heading-size; horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-no-log-output-detail"); color: Theme.on-terminal-muted; horizontal-alignment: center; } } }
         if root.chunks.length > 0 : Rectangle {
           keys := FocusScope {
             key-pressed(event) => {
@@ -191,7 +248,8 @@ export component LiveLogViewer inherits Rectangle {
                 // several: a row shorter than its own text overlaps the row
                 // under it.
                 height: root.wrap-lines ? chunk-input.preferred-height + 8px : root.row-height;
-                background: transparent;
+                // An error stands out as a whole line, not only in its color.
+                background: chunk.level == "error" || chunk.level == "fatal" ? Theme.terminal-error.with-alpha(0.14) : transparent;
                 accessible-role: text-input;
                 accessible-read-only: true;
                 accessible-value: chunk.text;
@@ -223,7 +281,7 @@ export component LiveLogViewer inherits Rectangle {
                     width: root.wrap-lines ? output.visible-width - 20px : max(output.visible-width - 20px, self.preferred-width);
                     height: self.preferred-height;
                     text: chunk.text;
-                    color: chunk.level == "error" || chunk.level == "fatal" ? Theme.log-error : chunk.level == "warn" ? Theme.warning : chunk.level == "debug" || chunk.level == "trace" ? Theme.text-muted : Theme.text-secondary;
+                    color: chunk.level == "error" || chunk.level == "fatal" ? Theme.terminal-error : chunk.level == "warn" ? Theme.warning.brighter(1.2) : chunk.level == "debug" || chunk.level == "trace" ? Theme.on-terminal-muted : Theme.on-terminal;
                     selection-background-color: Theme.accent;
                     selection-foreground-color: Theme.background;
                     read-only: true;
@@ -312,7 +370,6 @@ export component LiveLogViewer inherits Rectangle {
               y: parent.height - self.height - 14px;
               icon: @image-url("../../../../assets/icons/jump-to-end.svg");
               accessible-name: GuiI18n.text("gui-jump-latest");
-              background: Theme.elevated;
               clicked => {
                   output.viewport-y = min(0px, output.visible-height - output.viewport-height);
                   if !root.follow {
@@ -320,6 +377,8 @@ export component LiveLogViewer inherits Rectangle {
                   }
               }
           }
+        }
+            }
         }
     }
 }

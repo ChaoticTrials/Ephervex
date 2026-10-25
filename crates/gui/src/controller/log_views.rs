@@ -452,6 +452,18 @@ impl LogViews {
         row.error_enabled = state.filter.is_enabled(LogLevel::Error);
         row.fatal_enabled = state.filter.is_enabled(LogLevel::Fatal);
         row.other_enabled = state.filter.is_enabled(LogLevel::Other);
+        let mut counts = [0_usize; 7];
+        for record in state.history.records() {
+            counts[level_slot(record.level)] += 1;
+        }
+        let [trace, debug, info, warn, error, fatal, other] = counts.map(to_i32);
+        row.trace_count = trace;
+        row.debug_count = debug;
+        row.info_count = info;
+        row.warn_count = warn;
+        row.error_count = error;
+        row.fatal_count = fatal;
+        row.other_count = other;
         if chunks_changed {
             row.revision = row.revision.saturating_add(1);
         }
@@ -731,6 +743,19 @@ fn write_selection(state: &LiveViewerState, row: &mut LogView) {
         row.has_selection = false;
     }
     row.selection_revision = row.selection_revision.saturating_add(1);
+}
+
+/// Where a level's count sits among the seven.
+const fn level_slot(level: LogLevel) -> usize {
+    match level {
+        LogLevel::Trace => 0,
+        LogLevel::Debug => 1,
+        LogLevel::Info => 2,
+        LogLevel::Warn => 3,
+        LogLevel::Error => 4,
+        LogLevel::Fatal => 5,
+        LogLevel::Other => 6,
+    }
 }
 
 /// The pane callbacks of every log viewer.
@@ -1245,6 +1270,35 @@ mod tests {
         views.set_follow(A, true);
         assert_eq!(row(&views, A).pending_lines, 0);
         assert_eq!(lines(&views, A).len(), 4);
+    }
+
+    #[test]
+    fn each_level_is_counted_whatever_the_filters_show() {
+        let (mut views, _) = views();
+        let host = InstanceId::new();
+        let source = LiveLogSource::Client(host);
+        views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
+        views.set_level(A, "info", false);
+
+        let next = from_reader(
+            &views,
+            &source,
+            &[
+                log_line("INFO", "one"),
+                log_line("INFO", "two"),
+                log_line("WARN", "careful"),
+                log_line("ERROR", "broken"),
+            ],
+        );
+        deliver(&mut views, &next);
+
+        let shown = row(&views, A);
+        assert_eq!(
+            (shown.info_count, shown.warn_count, shown.error_count),
+            (2, 1, 1),
+            "a hidden level still has its count"
+        );
+        assert_eq!(shown.debug_count, 0);
     }
 
     #[test]
