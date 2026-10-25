@@ -36,7 +36,7 @@ def raw_record(**overrides) -> dict:
         "options": {f"option{n}": option(f"option{n}") for n in range(analyzer.MINIMUM_PERSISTED_OPTIONS)},
         "keybinds": [keybind("attack"), keybind("use")],
         "sound_family": {"prefix": "soundCategory_", "enum_class": "Sound", "names": ["master", "music"],
-                         "default": 1.0, "confidence": "high"},
+                         "confidence": "high", "default": {"value": 1.0, "confidence": "high", "evidence": "fallback constant 1.0"}},
         "model_part_family": {"prefix": "modelPart_", "enum_class": "Part", "names": ["cape", "jacket"]},
         "javap_errors": [],
         "keybinding_code_space": "glfw",

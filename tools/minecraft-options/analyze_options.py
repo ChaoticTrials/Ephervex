@@ -712,15 +712,18 @@ def is_plain_arithmetic(member: Member) -> bool:
     return True
 
 
-def lambda_arithmetic(members: list[Member], owner: str, name: str,
+def lambda_arithmetic(members: list[Member], owner: str, handle_owner: str, name: str,
                       descriptor: str) -> list[dict[str, Any]] | None:
     """The constant arithmetic one synthetic lambda performs, if it is that
     simple.
 
-    Obfuscated releases reuse short method names, so the descriptor decides
-    which overload this is; a name that matches more than one signature is
+    `members` belong to `owner`, so a method handle into any other class resolves
+    nothing here. Obfuscated releases reuse short method names, so the descriptor
+    decides which overload this is; a name that matches more than one signature is
     left unresolved rather than guessed at.
     """
+    if handle_owner != owner:
+        return None
     params, ret = split_descriptor(descriptor)
     wanted = [java_type(p) for p in params]
     want_ret = java_type(ret)
@@ -771,18 +774,21 @@ GLFW = {32: "space", 39: "apostrophe", 44: "comma", 45: "minus", 46: "period", 4
         75: "k", 76: "l", 77: "m", 78: "n", 79: "o", 80: "p", 81: "q", 82: "r", 83: "s", 84: "t",
         85: "u", 86: "v", 87: "w", 88: "x", 89: "y", 90: "z",
         91: "left.bracket", 92: "backslash", 93: "right.bracket", 96: "grave.accent",
+        161: "world.1", 162: "world.2",
         256: "escape", 257: "enter", 258: "tab", 259: "backspace", 260: "insert", 261: "delete",
         262: "right", 263: "left", 264: "down", 265: "up", 266: "page.up", 267: "page.down",
         268: "home", 269: "end", 280: "caps.lock", 281: "scroll.lock", 282: "num.lock",
         283: "print.screen", 284: "pause",
         290: "f1", 291: "f2", 292: "f3", 293: "f4", 294: "f5", 295: "f6", 296: "f7", 297: "f8",
         298: "f9", 299: "f10", 300: "f11", 301: "f12",
+        **{302 + i: f"f{13 + i}" for i in range(13)},
         320: "keypad.0", 321: "keypad.1", 322: "keypad.2", 323: "keypad.3", 324: "keypad.4",
         325: "keypad.5", 326: "keypad.6", 327: "keypad.7", 328: "keypad.8", 329: "keypad.9",
         330: "keypad.decimal", 331: "keypad.divide", 332: "keypad.multiply", 333: "keypad.subtract",
         334: "keypad.add", 335: "keypad.enter", 336: "keypad.equal",
         340: "left.shift", 341: "left.control", 342: "left.alt", 343: "left.win",
-        344: "right.shift", 345: "right.control", 346: "right.alt", 347: "right.win"}
+        344: "right.shift", 345: "right.control", 346: "right.alt", 347: "right.win",
+        348: "menu"}
 
 # org.lwjgl.input.Keyboard (LWJGL 2) scan codes.  LWJGL is NOT bundled in any
 # client JAR under the analysis root, so this table is an external constant
@@ -801,10 +807,10 @@ LWJGL2_KEYS = {1: "escape", 2: "1", 3: "2", 4: "3", 5: "4", 6: "5", 7: "6", 8: "
                70: "scroll.lock", 71: "keypad.7", 72: "keypad.8", 73: "keypad.9", 74: "keypad.subtract",
                75: "keypad.4", 76: "keypad.5", 77: "keypad.6", 78: "keypad.add", 79: "keypad.1",
                80: "keypad.2", 81: "keypad.3", 82: "keypad.0", 83: "keypad.decimal", 87: "f11",
-               88: "f12", 156: "keypad.enter", 157: "right.control", 181: "keypad.divide",
-               184: "right.alt", 197: "pause", 199: "home", 200: "up", 201: "page.up", 203: "left",
+               88: "f12", 100: "f13", 101: "f14", 102: "f15", 141: "keypad.equal", 156: "keypad.enter", 157: "right.control", 181: "keypad.divide",
+               183: "print.screen", 184: "right.alt", 197: "pause", 199: "home", 200: "up", 201: "page.up", 203: "left",
                205: "right", 207: "end", 208: "down", 209: "page.down", 210: "insert", 211: "delete",
-               219: "left.win", 220: "right.win"}
+               219: "left.win", 220: "right.win", 221: "menu"}
 
 MOUSE_NAMES = {0: "left", 1: "right", 2: "middle"}
 
@@ -1172,14 +1178,22 @@ def visitor_shape(desc: str) -> str | None:
     return None
 
 
-def detect_era(members: list[Member]) -> tuple[str, str | None]:
-    """Return (era, option_instance_class)."""
+def detect_era(members: list[Member], client_classes: set[str] | None = None) -> tuple[str, str | None]:
+    """Return (era, option_instance_class).
+
+    The visitor is a client class, never a JDK or library one, so a call is only
+    read as a visitor call when its owner is one of `client_classes` (or, without
+    that set, at least not in a `java/` package).
+    """
     option_candidates: dict[str, int] = defaultdict(int)
     field_access = False
     for m in members:
         for ins in m.insns:
             ref = ins.method()
             if not ref or ins.op not in ("invokeinterface", "invokevirtual"):
+                continue
+            if not ref[0] or (ref[0] not in client_classes if client_classes is not None
+                              else ref[0].startswith(("java/", "javax/"))):
                 continue
             shape = visitor_shape(ref[2])
             if shape is None:
@@ -1431,10 +1445,11 @@ def legacy_save_blocks(member: Member) -> dict[str, dict[str, Any]]:
             elif ref and ref[0] and ref[2] in ("()I", "()Ljava/lang/String;") and ref[0] != "java/lang/StringBuilder":
                 enum_getter = (ref[0], ref[2])
         ops = arithmetic_chain(body)
-        typ = encoding = None
-        for desc in appends:
-            if desc in APPEND_TYPES:
-                typ, encoding = APPEND_TYPES[desc]
+        # The first append writes the key literal itself. The value is the last one, and a
+        # value appended as some other type (`Object`, `CharSequence`, `char[]`) is untyped
+        # rather than whatever an earlier piece of the line was.
+        value_appends = appends[1:] if appends[:1] == ["(Ljava/lang/String;)"] else appends
+        typ, encoding = APPEND_TYPES.get(value_appends[-1] if value_appends else "", (None, None))
         out[key] = {"persisted_key": key, "field": field, "field_descriptor": descriptor,
                     "save_type": typ, "save_encoding": encoding,
                     "save_transform_ops": ops or [],
@@ -1823,15 +1838,15 @@ def xmap_transform(dis: Disassembler, before: list[Insn], members: list[Member] 
     pair = xmap_targets(dis, before, owner)
     if not members or not pair:
         return None
-    (_, decode_name, decode_desc), (_, encode_name, encode_desc) = pair
+    (decode_class, decode_name, decode_desc), (encode_class, encode_name, encode_desc) = pair
     decode_params, decode_ret = split_descriptor(decode_desc)
     encode_params, encode_ret = split_descriptor(encode_desc)
     if len(decode_params) != 1 or len(encode_params) != 1:
         return None
     if decode_params[0] != encode_ret or encode_params[0] != decode_ret:
         return None
-    encode = lambda_arithmetic(members, owner, encode_name, encode_desc)
-    decode = lambda_arithmetic(members, owner, decode_name, decode_desc)
+    encode = lambda_arithmetic(members, owner, encode_class, encode_name, encode_desc)
+    decode = lambda_arithmetic(members, owner, decode_class, decode_name, decode_desc)
     if not encode or not decode:
         return None
     if invert_ops(encode) != decode:
@@ -2279,6 +2294,9 @@ def extract_keybinds(dis: Disassembler, members: list[Member], legacy_codes: boo
             code = numbers[-1] if numbers else None
             if unbound:
                 code = -1
+            if legacy_codes and code is not None and code < 0:
+                # LWJGL 2 numbers mouse buttons below zero (-100 is the left button).
+                input_type = "mouse"
             serialized = None
             confidence = "medium"
             encoding = None
@@ -2463,6 +2481,28 @@ def resolve_key_code_space(keybinds: list[dict[str, Any]], legacy_codes: bool) -
                     kb["confidence"] = kb["codec_confidence"] = "high" if kb["serialized"] else "medium"
             check = hid_check
     return apply_key_code_check(keybinds, check), check
+
+
+def resolve_keybinds(dis: Disassembler, members: list[Member], version: str | None,
+                     option_class: str | None) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
+    """The key bindings of a release, with the code space that proves them.
+
+    A release version says which numbering applies. An unidentified JAR says
+    nothing, so each numbering is tried and the first one whose own anchors verify
+    is adopted; when none does, the bindings stay unverified under the modern one.
+    """
+    if is_release(version):
+        legacy = version_key(version) < version_key("1.13")
+        keybinds = extract_keybinds(dis, members, legacy, option_class)
+        return (keybinds, *resolve_key_code_space(keybinds, legacy))
+    results = []
+    for legacy in (False, True):
+        keybinds = extract_keybinds(dis, members, legacy, option_class)
+        space, check = resolve_key_code_space(keybinds, legacy)
+        if space != UNVERIFIED_CODE_SPACE:
+            return keybinds, space, check
+        results.append((keybinds, space, check))
+    return results[0]
 
 
 def apply_key_code_check(keybinds: list[dict[str, Any]], check: dict[str, Any]) -> str:
@@ -2664,11 +2704,17 @@ def legacy_ui_ranges(dis: Disassembler, ui_classes: list[str]) -> dict[str, Any]
         for member in parse_members(text):
             floats: list[float] = []
             translation = None
-            constant = None
+            # The constant is stored by the `putstatic` that follows its constructor call,
+            # so the entry waits for it before the next constant's caption can replace it.
+            pending: dict[str, Any] | None = None
             for ins in member.insns:
+                fld = ins.field()
+                if ins.op == "putstatic" and fld and pending is not None:
+                    pending["enum_constant"] = fld[1]
+                    pending = None
                 s = ins.string()
                 if s is not None and s.startswith("options.") and s.count(".") == 1:
-                    translation, floats = s, []
+                    translation, floats, pending = s, [], None
                     continue
                 if translation is None:
                     continue
@@ -2676,61 +2722,82 @@ def legacy_ui_ranges(dis: Disassembler, ui_classes: list[str]) -> dict[str, Any]
                     floats.append(float(M_FLOAT.match(ins.comment).group(1)))
                 elif ins.op in ("fconst_0", "fconst_1", "fconst_2", "dconst_0", "dconst_1"):
                     floats.append(float(ins.op[-1]))
-                fld = ins.field()
-                if ins.op == "putstatic" and fld:
-                    constant = fld[1]
                 ref = ins.method()
                 if ref and ref[1] == "<init>" and len(floats) >= 3:
                     key = translation[len("options."):]
                     lo, hi, step = floats[0], floats[1], floats[2]
-                    if lo <= hi:
-                        out.setdefault(key, {"translation_key": translation, "source_class": cls,
-                                             "source_member": member.signature,
-                                             "enum_constant": constant,
-                                             "ui_min": lo, "ui_max": hi, "ui_step": step})
+                    if lo <= hi and key not in out:
+                        pending = out[key] = {"translation_key": translation, "source_class": cls,
+                                              "source_member": member.signature,
+                                              "enum_constant": None,
+                                              "ui_min": lo, "ui_max": hi, "ui_step": step}
                     translation, floats = None, []
     return out
 
 
 def dynamic_family(dis: Disassembler, prefix: str, enum_class: str | None,
-                   constants: dict[str, list[str]], extra: dict[str, Any] | None = None
+                   constants: dict[str, list[str]], default: dict[str, Any] | None = None
                    ) -> dict[str, Any] | None:
+    """A `<prefix><name>` setting family and the enum members that name it.
+
+    The family's own confidence and evidence describe how its members were found. The
+    optional `default` is a separate proof about the value an absent member takes, kept
+    under its own key so neither overwrites the other.
+    """
     present = any(any(s.startswith(prefix) for s in values) for values in constants.values())
     if not present:
         return None
     names: list[str] = []
+    unnamed = 0
     if enum_class:
         info = extract_enum(dis, enum_class)
         if info:
             names = [c["serialized_name"] for c in info["constants"] if c["serialized_name"]]
+            unnamed = len(info["constants"]) - len(names)
     record = {"prefix": prefix, "enum_class": enum_class, "names": names,
-              "confidence": "high" if names else "medium",
+              "unnamed_constants": unnamed,
+              "confidence": "high" if names and not unnamed else "medium",
               "evidence": "prefix literal present in the options root constant pool; member names come from "
                           "the enum reached through the root's own generic field signature"}
-    if extra:
-        record.update(extra)
+    if unnamed:
+        record["evidence"] += (f"; {unnamed} enum constant(s) carry no serialized name, so the member set "
+                               "may be incomplete")
+    if default is not None:
+        record["default"] = default
     return record
 
 
+def fractional_constants(member: Member) -> list[float]:
+    """Every float or double constant a member loads."""
+    out = []
+    for ins in member.insns:
+        if ins.op in ("fconst_0", "fconst_1", "fconst_2", "dconst_0", "dconst_1"):
+            out.append(float(ins.op[-1]))
+        elif ins.op in ("ldc", "ldc_w", "ldc2_w") and (m := M_FLOAT.match(ins.comment)):
+            out.append(float(m.group(1)))
+    return out
+
+
 def sound_default_volume(members: list[Member], sound_enum: str | None) -> dict[str, Any]:
-    """Prove the 1.0 fallback used when a category has no stored volume."""
+    """Prove the 1.0 fallback used when a category has no stored volume.
+
+    The member must take the category enum as a parameter, look a value up, and load no
+    fractional constant other than 1.0, so a member that merely touches the enum cannot
+    stand in for the fallback.
+    """
     if not sound_enum:
-        return {"default": None, "confidence": "unknown"}
+        return {"value": None, "confidence": "unknown"}
+    wanted = java_type(f"L{sound_enum};")
     for m in members:
-        params, ret = split_descriptor(m.signature.split(" ")[-1] if "(" in m.signature else "")
-        touches_enum = f"L{sound_enum};" in m.signature.replace(".", "/") or any(
-            (ins.field() or ("", "", ""))[2] == f"L{sound_enum};" for ins in m.insns)
-        if not touches_enum and sound_enum.replace("/", ".") not in m.signature:
+        if wanted not in member_types(m)[0]:
             continue
         has_lookup = any((ins.method() or ("", "", ""))[1] in ("get", "getOrDefault", "containsKey",
                                                               "getFloat", "valueOf")
                          for ins in m.insns)
-        ones = [ins for ins in m.insns if const_num(ins) == 1.0
-                and ins.op in ("fconst_1", "dconst_1", "ldc", "ldc_w", "ldc2_w")]
-        if has_lookup and ones:
-            return {"default": 1.0, "confidence": "high",
+        if has_lookup and set(fractional_constants(m)) == {1.0}:
+            return {"value": 1.0, "confidence": "high",
                     "evidence": f"absent-category fallback constant 1.0 in {m.signature}"}
-    return {"default": None, "confidence": "unknown"}
+    return {"value": None, "confidence": "unknown"}
 
 
 # ---------------------------------------------------------------------------
@@ -2862,9 +2929,8 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
             text = dis.get(cls)
             root_text += text
             members.extend(parse_members(text))
-        era, option_class = detect_era(members)
+        era, option_class = detect_era(members, all_classes)
         version = vd["version"]
-        legacy_codes = is_release(version) and version_key(version) < version_key("1.13")
 
         options: dict[str, dict[str, Any]] = {}
         if era == "legacy_direct":
@@ -2903,7 +2969,10 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                     "string_token": "enum serialized string token"}.get(form, "enum, codec unresolved")
         else:
             visitor = extract_visitor(dis, members, option_class)
-            defs = (extract_option_instances(dis, members, option_class, roots[0] if roots else None)
+            # Lambda handles and their bootstrap table belong to one class, so they can
+            # only be followed when the members all come from a single root.
+            defs = (extract_option_instances(dis, members, option_class,
+                                             roots[0] if len(roots) == 1 else None)
                     if option_class else {})
             for key, record in visitor.items():
                 merged = dict(record)
@@ -3006,8 +3075,7 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                     "note": "these are the slider bounds enforced by the settings screen, transformed into "
                             "file units; the loader itself does not clamp"}
 
-        keybinds = extract_keybinds(dis, members, legacy_codes, option_class)
-        code_space, code_check = resolve_key_code_space(keybinds, legacy_codes)
+        keybinds, code_space, code_check = resolve_keybinds(dis, members, version, option_class)
         graphics_preset = extract_preset_controls(dis, options, members, option_class, roots)
         sound_enum, part_enum = field_generic_types(root_text)
         sounds = dynamic_family(dis, "soundCategory_", sound_enum, constants,
@@ -3076,23 +3144,39 @@ UNSAFE_FOR_EPHERVEX = {"resourcePacks", "incompatibleResourcePacks", "fullscreen
                        "lastServer", "startedCleanly", "version", "soundDevice"}
 
 
-def category_for(key: str, field: str | None) -> str:
-    s = (key + " " + (field or "")).lower()
-    if key.startswith("soundCategory_") or any(x in s for x in ("sound", "music", "subtitles", "audio")):
+KEY_WORD_RE = re.compile(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|[0-9]+")
+
+SOUND_WORDS = {"sound", "music", "subtitles", "audio"}
+CONTROL_WORDS = {"mouse", "sensitivity", "toggle", "sprint"}
+LANGUAGE_WORDS = {"language", "unicode", "glyph"}
+VIDEO_WORDS = {"render", "graphics", "fullscreen", "touchscreen", "fov", "gamma", "cloud", "clouds",
+               "particles", "mipmap", "vsync", "framerate", "fps", "gui", "vignette", "biome",
+               "weather", "transparency", "anisotropy", "texture", "screen", "anaglyph", "distance",
+               "blurriness"}
+ACCESSIBILITY_WORDS = {"chat", "narrator", "contrast", "notification", "accessibility", "lightning",
+                       "splash", "background"}
+
+
+def category_for(key: str) -> str:
+    """The settings group a persisted key belongs to, decided by the key's own words.
+
+    Words are the camelCase and underscore-separated parts of the key, never substrings,
+    so `anaglyph3d` is not a glyph setting and `menuBackgroundBlurriness` is not a
+    background one. Neither a backing field name nor an obfuscated one takes part.
+    """
+    words = {w.lower() for w in KEY_WORD_RE.findall(key)}
+    if key.startswith("soundCategory_") or words & SOUND_WORDS:
         return "Sound & Music"
-    if key.startswith("key_") or any(x in s for x in ("mouse", "sensitivity", "toggle", "sprintwindow")):
+    if key.startswith("key_") or words & CONTROL_WORDS:
         return "Controls"
-    if key == "lang" or any(x in s for x in ("language", "unicode", "glyph")):
+    if key == "lang" or words & LANGUAGE_WORDS:
         return "Language / Accessibility"
-    if any(x in s for x in ("render", "graphics", "fullscreen", "fov", "gamma", "cloud", "particle",
-                            "mipmap", "vsync", "framerate", "gui", "vignette", "biome", "weather",
-                            "transparency", "anisotrop", "texture", "screen")):
+    if words & VIDEO_WORDS:
         return "Video"
-    if any(x in s for x in ("chat", "narrator", "contrast", "notification", "accessib", "lightning",
-                            "splash", "background")):
-        return "Language / Accessibility"
-    if key.startswith("modelPart_"):
+    if "realms" in words:
         return "Gameplay"
+    if words & ACCESSIBILITY_WORDS:
+        return "Language / Accessibility"
     return "Gameplay"
 
 
@@ -3162,7 +3246,7 @@ def build_setting(version: str | None, sha: str, root_class: str | None, key: st
             typ = "special"
     setting: dict[str, Any] = {
         "logical_id": field or key,
-        "category": category_for(key, field),
+        "category": category_for(key),
         "persisted_key": key,
         "translation_key": record.get("translation_key"),
         "type": typ,
@@ -3216,30 +3300,35 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
 
     sounds = analysis.get("sound_family")
     if sounds:
+        volume = sounds.get("default") or {}
+        proven = volume.get("value") is not None
+        family = sounds.get("confidence") or "high"
         for name in sounds["names"] or []:
             key = "soundCategory_" + name
             settings.append({
                 "logical_id": "sound.volume." + name, "category": "Sound & Music",
                 "persisted_key": key, "translation_key": None, "type": "number",
-                "default": sounds.get("default"),
+                "default": volume.get("value"),
                 "numeric": {"min": 0.0, "max": 1.0, "step": None, "clamped": True},
                 "allowed_values": None,
                 "file_encoding": "decimal floating point in the closed interval 0.0 to 1.0",
                 "ui_to_file_transform": None, "value_to_storage": None, "storage_to_value": None,
-                "support_status": "supported", "type_confidence": "high",
-                "default_confidence": sounds.get("confidence", "unknown") if sounds.get("default") is not None
-                else "unknown",
-                "domain_confidence": "high",
-                "confidence": "high", "notes": [], "ephervex_manageable": True,
+                "support_status": "supported", "type_confidence": family,
+                "default_confidence": volume.get("confidence", "unknown") if proven else "unknown",
+                "domain_confidence": family,
+                "confidence": family, "notes": [], "ephervex_manageable": True,
                 "evidence": [{"jar_sha256": sha, "minecraft_version": version, "class": root_class,
                               "method": "options persistence path, soundCategory_ family loop",
                               "description": "Dynamic soundCategory_<name> family; the member set comes from "
                                              f"{sounds['enum_class']} reached through the root's own generic "
-                                             "field signature. "
-                                             + str(sounds.get("evidence_note") or sounds.get("evidence", "")),
+                                             "field signature."
+                                             + (f" {volume['evidence']}" if proven else "")
+                                             + (f" {sounds['unnamed_constants']} enum constant(s) carry no "
+                                                "serialized name." if sounds.get("unnamed_constants") else ""),
                               "constant": key}]})
     parts = analysis.get("model_part_family")
     if parts:
+        family = parts.get("confidence") or "high"
         for name in parts["names"] or []:
             key = "modelPart_" + name
             settings.append({
@@ -3248,8 +3337,8 @@ def normalize(record: dict[str, Any]) -> dict[str, Any]:
                 "numeric": None, "allowed_values": None,
                 "file_encoding": "lowercase true/false", "ui_to_file_transform": None,
                 "value_to_storage": None, "storage_to_value": None, "support_status": "supported",
-                "type_confidence": "high", "default_confidence": "medium", "domain_confidence": "high",
-                "confidence": "high", "notes": ["All skin model parts are enabled by default; the default is "
+                "type_confidence": family, "default_confidence": "medium", "domain_confidence": family,
+                "confidence": family, "notes": ["All skin model parts are enabled by default; the default is "
                                                 "the initial EnumSet population rather than a literal constant."],
                 "ephervex_manageable": True,
                 "evidence": [{"jar_sha256": sha, "minecraft_version": version, "class": root_class,

@@ -934,7 +934,7 @@
       "key": "fov"
     }
   ],
-  "revision": 1,
+  "revision": 2,
   "schemas": [
     {
       "id": "1ad4e8b5b315a359",
@@ -2172,7 +2172,7 @@
       "type": "boolean"
     },
     {
-      "category": "Gameplay",
+      "category": "Video",
       "id": "simulationDistance",
       "key": "simulationDistance",
       "manageable": true,

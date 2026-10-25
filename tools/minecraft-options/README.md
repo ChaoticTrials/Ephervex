@@ -259,7 +259,9 @@ checks the assumption against the release's own bytecode: well-known defaults
 they are known to be. A modern release that contradicts the GLFW table is tried
 against USB HID usage ids (`hid`, 1-based mouse buttons), which 26.3 uses; it
 is adopted only when its own anchors verify. Both write the same key names, so
-they share one codec. A release that contradicts every table, or exposes too few
+they share one codec. A JAR whose release version cannot be identified assumes
+neither: each of LWJGL2 and GLFW is tried, and the one whose anchors verify is
+adopted. A release that contradicts every table, or exposes too few
 of those defaults to prove it, records the code space as `unverified`, with
 the evidence in `keybinding_code_space_check`. Its key bindings keep their raw
 codes but are medium confidence with no serialized key, and they get no codec.
