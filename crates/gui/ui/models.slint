@@ -332,6 +332,9 @@ export struct BundlePartRow {
     name: string,
     kind: string,
     size: string,
+    // Where the file is, and when it was last written, worded for the page.
+    path: string,
+    modified: string,
     selected: bool,
 }
 
@@ -638,6 +641,8 @@ export struct ActivityRow {
 export struct AccountRow {
     id: string,
     name: string,
+    // The first letter of the name, capitalized, for the avatar.
+    initial: string,
     kind: string,
     is-default: bool,
     credential-state: string,

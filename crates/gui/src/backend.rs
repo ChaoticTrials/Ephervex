@@ -795,6 +795,12 @@ pub enum Command {
     SaveCurseForgeApiKey(String),
     RemoveCurseForgeApiKey,
     OpenCurseForgeKeyHelp,
+    /// Open Ephervex's source page in the browser.
+    OpenSourcePage,
+    /// Open the website of the toolkit the interface is built with.
+    OpenSlintPage,
+    /// Open a file the diagnostic planner listed in the desktop's editor or viewer.
+    OpenFile(PathBuf),
     SaveStorageRoot(String),
     PickWatchedFolder,
     /// Choose jars to add to a host's mods folder from a file dialog.
@@ -826,6 +832,12 @@ pub enum Command {
     SaveDefaultModCatalog {
         catalog: Option<ModProvider>,
     },
+    /// The port a new server is offered.
+    SaveServerPortDefault {
+        custom_port: bool,
+        /// `None` keeps the stored port.
+        port: Option<u16>,
+    },
     /// Everything the General settings page edits, saved together.
     SaveGeneralSettings {
         text_scale: ephervex_core::ApplicationTextScale,
@@ -837,6 +849,9 @@ pub enum Command {
     },
     LoadJavaRuntimes,
     RefreshJava,
+    /// Probes an executable named in the launcher's Java settings and reports
+    /// what it is.
+    CheckJavaPath(PathBuf),
     /// The canonical executable of the runtime to remove.
     RemoveManagedJavaRuntime(String),
     SaveJavaSettings {
@@ -1056,6 +1071,10 @@ pub struct SettingsData {
     pub favorite_minecraft_versions: Vec<String>,
     pub make_default_account_operator: bool,
     pub operator_permission_level: u8,
+    /// Whether a new server is offered [`Self::default_server_port`] instead of
+    /// an automatically chosen port.
+    pub default_server_port_custom: bool,
+    pub default_server_port: u16,
     /// The `server.properties` values new servers start with, by key.
     pub server_property_defaults: std::collections::BTreeMap<String, String>,
     pub java_auto_detect: bool,
@@ -1641,6 +1660,10 @@ pub struct BundlePartData {
     /// The core kind, by its stable identifier.
     pub kind: &'static str,
     pub size_bytes: u64,
+    /// Where the file is, as the planner reports it. Only handed back to open it.
+    pub path: PathBuf,
+    /// When it was last written, worded for the page. Empty when unknown.
+    pub modified: String,
 }
 
 /// What one bundle export wrote.
@@ -2134,6 +2157,12 @@ pub enum Event {
         request: u64,
     },
     JavaRuntimes(Vec<JavaData>),
+    /// What probing the preferred Java executable found: the runtime it is,
+    /// or why it is not one.
+    JavaPathChecked {
+        path: String,
+        result: Result<String, String>,
+    },
     Activity(ActivityData),
     Toast {
         message: String,
@@ -6315,6 +6344,30 @@ fn run_worker(
                     error: !opened,
                 });
             }
+            Command::OpenSourcePage => {
+                if !ephervex_core::open_in_browser(ephervex_core::SOURCE_REPOSITORY) {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-source-page-unavailable"),
+                        error: true,
+                    });
+                }
+            }
+            Command::OpenSlintPage => {
+                if !ephervex_core::open_in_browser("https://slint.dev/") {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-slint-page-unavailable"),
+                        error: true,
+                    });
+                }
+            }
+            Command::OpenFile(path) => {
+                if !ephervex_core::open_file(&path) {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-file-unavailable"),
+                        error: true,
+                    });
+                }
+            }
             Command::SaveStorageRoot(root) => {
                 let path = nonempty(&root).map(Path::new);
                 match app.set_persistent_instance_root(path) {
@@ -6434,6 +6487,15 @@ fn run_worker(
                     send_snapshot(&mut app, &events);
                 }
             }
+            Command::SaveServerPortDefault { custom_port, port } => {
+                match app.set_server_port_default(custom_port, port) {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        send_snapshot(&mut app, &events);
+                    }
+                }
+            }
             Command::SaveGeneralSettings {
                 text_scale,
                 technical_text_size,
@@ -6484,6 +6546,30 @@ fn run_worker(
                             .map(|choice| crate::java_view::choice_view(&choice))
                             .map_err(|error| localized_error(&error));
                         let _ = events.send(Event::HostJavaPathChecked { host, result });
+                    },
+                );
+            }
+            Command::CheckJavaPath(path) => {
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let probed = path.to_string_lossy().into_owned();
+                        let result = runtime
+                            .block_on(app.test_java_runtime(&path))
+                            .map(|java| {
+                                crate::java_view::reported_runtime_line(
+                                    &java.version_string,
+                                    &java.vendor,
+                                    &java.arch,
+                                )
+                            })
+                            .map_err(|error| localized_error(&error));
+                        let _ = events.send(Event::JavaPathChecked {
+                            path: probed,
+                            result,
+                        });
                     },
                 );
             }
@@ -7026,6 +7112,8 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
         operator_permission_level: server.operator_permission_level.value(),
+        default_server_port_custom: server.custom_port,
+        default_server_port: server.port,
         server_property_defaults: app.server_property_defaults().clone(),
         java_auto_detect: java.auto_detect,
         java_auto_download: java.auto_download,
@@ -7120,6 +7208,11 @@ fn bundle_parts(
                 name: part.name.clone(),
                 kind: part.kind.as_str(),
                 size_bytes: part.size_bytes,
+                path: part.path.clone(),
+                modified: std::fs::metadata(&part.path)
+                    .and_then(|metadata| metadata.modified())
+                    .map(|modified| modified_time(DateTime::<Utc>::from(modified)))
+                    .unwrap_or_default(),
             })
             .collect(),
         Err(error) => {
@@ -14119,6 +14212,20 @@ fn relative_time(timestamp: DateTime<Utc>) -> String {
         lookup_args("gui-hours-ago", [("count", Arg::from(age.num_hours()))])
     } else {
         timestamp.format("%Y-%m-%d %H:%M").to_string()
+    }
+}
+
+/// When a file was written, for a list of files: how long ago while that is
+/// under a day, and the date and time after.
+fn modified_time(timestamp: DateTime<Utc>) -> String {
+    let age = Utc::now().signed_duration_since(timestamp);
+    if age.num_days() < 1 {
+        relative_time(timestamp)
+    } else {
+        timestamp
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
     }
 }
 

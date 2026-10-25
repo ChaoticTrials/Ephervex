@@ -1,5 +1,6 @@
 // A host's own settings forms: runtime options and server properties.
 
+import { Plate } from "../components/surface.slint";
 import { ScrollView } from "std-widgets.slint";
 import { ChoiceBox } from "../components/selection.slint";
 import { AppButton, BusySpinner, LabeledToggle, Pill, TextField, Toggle } from "../components/controls.slint";
@@ -9,6 +10,7 @@ import {
     Divider,
     FieldLabel,
     Heading,
+    HoverNote,
     SectionTitle
 } from "../components/text.slint";
 import { GuiI18n, PropertyRules, ServerHints } from "../globals.slint";
@@ -243,6 +245,9 @@ export component ServerPropertyRowView inherits Rectangle {
     in property <bool> restart-pending;
     // Draws the line that separates it from the row above.
     in property <bool> separated;
+    // Names the row by its key in server.properties and keeps the description
+    // for hover, for a long list of settings read by their keys.
+    in property <bool> keys-only;
     callback edited(string);
     callback chosen(int);
     callback reset();
@@ -257,20 +262,35 @@ export component ServerPropertyRowView inherits Rectangle {
         padding-left: 16px;
         padding-right: 16px;
         spacing: 24px;
-        VerticalLayout {
+        Rectangle {
             horizontal-stretch: 1;
-            alignment: center;
-            spacing: 3px;
-            HorizontalLayout {
-                spacing: 8px;
-                BodyText { text: root.item.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
-                if root.item.changed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-changed"); tone-color: Theme.accent; content-height: 20px; } }
-                if root.item.awaiting-restart && root.restart-pending : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-restart"); tone-color: Theme.warning; content-height: 20px; } }
-                Rectangle { horizontal-stretch: 1; }
+            min-width: 0px;
+            min-height: label-column.preferred-height;
+            preferred-height: label-column.preferred-height;
+            label-column := VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                alignment: center;
+                spacing: 3px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    if !root.keys-only : BodyText { text: root.item.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
+                    if root.keys-only : Text { text: root.item.key; color: Theme.text; font-family: Theme.mono-family; font-size: Theme.body-size; font-weight: 700; vertical-alignment: center; horizontal-stretch: 0; overflow: elide; min-width: 0px; }
+                    if root.item.changed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-changed"); tone-color: Theme.accent; content-height: 20px; } }
+                    if root.item.awaiting-restart && root.restart-pending : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-restart"); tone-color: Theme.warning; content-height: 20px; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if !root.keys-only : BodyText { text: root.item.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                if !root.keys-only && root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
             }
-            BodyText { text: root.item.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            if root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
+            label-area := TouchArea { enabled: root.keys-only; }
+            HoverNote {
+                text: root.keys-only ? (root.item.note == "" ? root.item.detail : root.item.detail + " " + root.item.note) : "";
+                hovered: label-area.has-hover;
+                pointer-x: label-area.mouse-x;
+                pointer-y: label-area.mouse-y;
+            }
         }
         if root.item.can-reset : VerticalLayout {
             alignment: center;
@@ -305,17 +325,16 @@ export component ServerPropertyRowView inherits Rectangle {
 export component ServerPropertyGroupCard inherits Rectangle {
     in property <ServerPropertyGroup> group;
     in property <bool> restart-pending;
+    // See `ServerPropertyRowView.keys-only`.
+    in property <bool> keys-only;
     callback edited(string, string);
     callback chosen(string, int);
     callback reset(string);
-    border-radius: Theme.card-radius;
-    border-width: Theme.strong-border-width;
-    border-color: Theme.border-strong;
-    background: Theme.surface;
     // Left to itself, the card measures its wrapped lines unwrapped.
     height: card.preferred-height;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: root.group.heading;
+    Plate { width: root.width; height: root.height; }
     card := VerticalLayout {
         padding-top: 12px;
         padding-bottom: 4px;
@@ -323,6 +342,7 @@ export component ServerPropertyGroupCard inherits Rectangle {
         for row[index] in root.group.rows : ServerPropertyRowView {
             item: row;
             separated: index > 0;
+            keys-only: root.keys-only;
             restart-pending: root.restart-pending;
             edited(value) => { root.edited(row.key, value); }
             chosen(position) => { root.chosen(row.key, position); }

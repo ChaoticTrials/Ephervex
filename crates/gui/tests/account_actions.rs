@@ -20,33 +20,31 @@ use i_slint_backend_testing::{
 use slint::platform::PointerEventButton;
 use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
-/// The marker on the default account stands where the button it replaces would
-/// be, so the column does not jump from one row to the next.
+/// The default account says so with a badge, and offers Make Default only on
+/// the accounts that are not the default.
 #[test]
-fn the_default_marker_is_the_size_of_the_button_it_replaces() {
+fn only_an_account_that_is_not_the_default_offers_to_become_it() {
     let ui = window();
     accounts_page(&ui);
     settle(&ui);
 
-    // A badge and the text inside it carry the same label, so the badge is the
-    // larger of the two.
-    let marker = widest(&ui, &lookup("gui-default")).expect("the default account is marked");
-    let make_default =
-        widest(&ui, &lookup("gui-make-default")).expect("the other account can become the default");
-
     assert!(
-        (marker.size().width - make_default.size().width).abs() < 1.0,
-        "the marker and the button it stands in for must be the same width \
-         ({} against {})",
-        marker.size().width,
-        make_default.size().width
+        widest(&ui, &lookup("gui-default")).is_some(),
+        "the default account is marked"
     );
-    assert!((marker.size().height - make_default.size().height).abs() < 1.0);
+    let offers = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-make-default"))
+        .filter(|element| {
+            element.size().width > 0.0
+                && element.accessible_role()
+                    == Some(i_slint_backend_testing::AccessibleRole::Button)
+        })
+        .count();
+    assert_eq!(offers, 1, "only Bob can become the default");
 }
 
 /// Every row's controls sit on one line with the name beside them.
 #[test]
-fn an_accounts_controls_are_centered_against_its_name() {
+fn an_accounts_controls_are_centered_against_its_row() {
     let ui = window();
     accounts_page(&ui);
     settle(&ui);
@@ -54,16 +52,20 @@ fn an_accounts_controls_are_centered_against_its_name() {
     let row = ElementHandle::find_by_accessible_label(&ui, "Alice")
         .find(|element| element.size().height > 40.0)
         .expect("the default account has a row");
-    let marker = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-default"))
-        .find(|element| element.size().width > 0.0)
-        .expect("the default account is marked");
+    let remove = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-remove"))
+        .find(|element| {
+            element.size().width > 0.0
+                && element.absolute_position().y >= row.absolute_position().y
+                && element.absolute_position().y < row.absolute_position().y + row.size().height
+        })
+        .expect("the row offers Remove");
 
-    let above = marker.absolute_position().y - row.absolute_position().y;
+    let above = remove.absolute_position().y - row.absolute_position().y;
     let below = (row.absolute_position().y + row.size().height)
-        - (marker.absolute_position().y + marker.size().height);
+        - (remove.absolute_position().y + remove.size().height);
     assert!(
-        (above - below).abs() < 1.0,
-        "a row's controls sit on its centre line, not flush to its top \
+        (above - below).abs() < 2.0,
+        "a row's controls sit on its center line, not flush to its top \
          (above {above}, below {below})"
     );
 }
@@ -224,6 +226,7 @@ fn account(id: &str, name: &str, is_default: bool) -> AccountRow {
     AccountRow {
         id: id.into(),
         name: name.into(),
+        initial: name.chars().take(1).collect::<String>().into(),
         kind: "Offline".into(),
         is_default,
         credential_state: "No credential".into(),

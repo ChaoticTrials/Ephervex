@@ -47,6 +47,7 @@ use crate::ui::{
     ModSearchRow, ModVersionRow, NameRules, PackContentRow, PendingEntityRow, PromoteServerRow,
     PropertyRules, RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup,
     ServerPropertyRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    WorkspaceSurfaceRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -6552,6 +6553,29 @@ fn server_property_row(row: server_property_form::PropertyRow) -> ServerProperty
     }
 }
 
+/// The Java page's own actions: reading and rereading the runtimes, and
+/// probing the executable named as the preferred Java.
+fn register_java_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_load_java_runtimes(move || send(&sender, Command::LoadJavaRuntimes));
+
+    let sender = commands.clone();
+    ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
+
+    let sender = commands.clone();
+    let checking = ui.as_weak();
+    ui.on_check_java_path(move |path| {
+        if let Some(ui) = checking.upgrade() {
+            ui.set_java_path_checking(true);
+            ui.set_java_path_verdict(SharedString::default());
+        }
+        send(
+            &sender,
+            Command::CheckJavaPath(PathBuf::from(path.as_str())),
+        );
+    });
+}
+
 fn register_settings(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -6613,11 +6637,7 @@ fn register_settings(
     });
     register_watched_folders(ui, commands);
 
-    let sender = commands.clone();
-    ui.on_load_java_runtimes(move || send(&sender, Command::LoadJavaRuntimes));
-
-    let sender = commands.clone();
-    ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
+    register_java_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_remove_java_runtime(move |path| {
@@ -6707,6 +6727,20 @@ fn register_minecraft_defaults(
         minecraft_defaults::CATEGORIES
             .iter()
             .map(|category| SharedString::from(minecraft_defaults::category_label(*category)))
+            .collect(),
+    ));
+    ui.set_minecraft_category_tabs(model(
+        minecraft_defaults::CATEGORIES
+            .iter()
+            .enumerate()
+            .map(|(index, category)| WorkspaceSurfaceRow {
+                id: index.to_string().into(),
+                label: minecraft_defaults::category_label(*category).into(),
+            })
+            .chain(std::iter::once(WorkspaceSurfaceRow {
+                id: "raw".into(),
+                label: lookup("gui-minecraft-raw-tab").into(),
+            }))
             .collect(),
     ));
     ui.set_minecraft_aspect_labels(model(
@@ -8127,6 +8161,42 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     );
 
     let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_save_server_port_default(move |custom_port, port| {
+        // An automatic port does not depend on what the field holds.
+        if !custom_port {
+            send(
+                &sender,
+                Command::SaveServerPortDefault {
+                    custom_port,
+                    port: None,
+                },
+            );
+            return;
+        }
+        let checked = crate::presentation::validate_port(&port);
+        match port.parse::<u16>().ok().filter(|_| checked.valid) {
+            Some(port) => send(
+                &sender,
+                Command::SaveServerPortDefault {
+                    custom_port,
+                    port: Some(port),
+                },
+            ),
+            None => {
+                // The page goes back to what is stored, so it never shows a
+                // choice that was not saved.
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_default_server_port_custom(ui.get_stored_server_port_custom());
+                    ui.set_default_server_port(ui.get_stored_server_port());
+                    ui.set_default_server_port_editing(false);
+                    ui.invoke_present_toast(checked.message.into(), true);
+                }
+            }
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_set_dependency_warning(move |warn| {
         send(&sender, Command::SaveDependencyWarning(warn));
     });
@@ -8643,6 +8713,14 @@ fn apply_event(
             // or whether its pin still runs, so each shown host reads it again.
             java_runtime::reload_shown(workspace);
         }
+        Event::JavaPathChecked { path, result } => {
+            ui.set_java_path_checking(false);
+            // A verdict on a path since edited away says nothing about the field.
+            if ui.get_java_preferred_path() == path.as_str() {
+                ui.set_java_path_verdict_ok(result.is_ok());
+                ui.set_java_path_verdict(result.unwrap_or_else(|reason| reason).into());
+            }
+        }
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
             diagnosis_flow::apply_activity(
@@ -8917,7 +8995,9 @@ fn apply_event(
             java_runtime::reload_shown(workspace);
         }
         Event::StorageRootPicked(path) => {
-            ui.set_persistent_root(path.display().to_string().into());
+            let picked = SharedString::from(path.display().to_string());
+            ui.set_persistent_root(picked.clone());
+            ui.invoke_save_storage_settings(picked);
         }
         Event::HostIconPicked { host, path } => {
             send(commands, Command::SetHostIcon { host, path });
@@ -9548,6 +9628,12 @@ fn register_curseforge_credential(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     ui.on_open_curseforge_key_help(move || send(&sender, Command::OpenCurseForgeKeyHelp));
+    let sender = commands.clone();
+    ui.on_open_source_page(move || send(&sender, Command::OpenSourcePage));
+    let sender = commands.clone();
+    ui.on_open_slint_page(move || send(&sender, Command::OpenSlintPage));
+    let sender = commands.clone();
+    ui.on_open_file(move |path| send(&sender, Command::OpenFile(path.as_str().into())));
 }
 
 /// The three artifact-cache actions the storage settings offer.
@@ -9888,6 +9974,13 @@ fn apply_snapshot(
     apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);
     ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
+    ui.set_stored_server_port_custom(settings.default_server_port_custom);
+    ui.set_stored_server_port(settings.default_server_port.to_string().into());
+    // What the user is typing is not replaced from under them.
+    if !ui.get_default_server_port_editing() {
+        ui.set_default_server_port_custom(settings.default_server_port_custom);
+        ui.set_default_server_port(settings.default_server_port.to_string().into());
+    }
     if let Some(notice) = organization_set_aside {
         ui.invoke_present_toast(
             lookup_args(
@@ -10380,6 +10473,13 @@ fn account_launch_entries(rows: &[AccountData]) -> Vec<MenuRow> {
 fn account_rows(rows: Vec<AccountData>) -> Vec<AccountRow> {
     rows.into_iter()
         .map(|row| AccountRow {
+            initial: row
+                .name
+                .chars()
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>())
+                .unwrap_or_default()
+                .into(),
             id: row.id.into(),
             name: row.name.into(),
             kind: row.kind.into(),
@@ -12790,6 +12890,8 @@ mod tests {
             name: name.to_owned(),
             kind,
             size_bytes: 2048,
+            path: std::path::PathBuf::from(name),
+            modified: String::new(),
         }
     }
 
@@ -16493,7 +16595,7 @@ mod tests {
         let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
         assert_eq!(
             labels,
-            [lookup("gui-color-scheme-workbench"), "Modrinth".to_owned()]
+            [lookup("gui-color-scheme-light"), "Modrinth".to_owned()]
         );
         let ids: Vec<SharedString> = ui.get_theme_ids().iter().collect();
         assert_eq!(ids, ["workbench", "user:modrinth"]);
@@ -21582,10 +21684,9 @@ mod tests {
         assert!(source.contains("callback choose-default-mod-catalog(string)"));
         assert!(backend.contains("Command::SaveDefaultModCatalog"));
         assert!(backend.contains("app.set_default_mod_catalog(catalog)"));
-        // The chips follow the stored value, so a refused write cannot leave a
+        // The segments follow the stored value, so a refused write cannot leave a
         // catalog selected that was never recorded.
-        assert!(source.contains("selected: root.default-mod-catalog == \"modrinth\""));
-        assert!(source.contains("selected: root.default-mod-catalog == \"curseforge\""));
+        assert!(source.contains("current: root.default-mod-catalog == \"curseforge\" ? 1 : root.default-mod-catalog == \"modrinth\" ? 0 : -1"));
         // A name a newer Ephervex recorded is reported as itself.
         assert!(source.contains("root.configured-mod-catalog"));
         assert!(source.contains("gui-preferred-mod-catalog-unrecognized"));

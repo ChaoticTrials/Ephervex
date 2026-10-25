@@ -65,6 +65,11 @@ export component Plate inherits Rectangle {
     in property <brush> outline: Theme.border-strong;
     in property <length> radius: Theme.card-radius;
     in property <length> outline-width: Theme.strong-border-width;
+    // How faded the face and its shadow are, from 0 to 1. The shadow fades as a
+    // layer of its own, and the face washes its colors toward the surface
+    // instead of turning translucent, so the shadow does not show through it.
+    // Fading the whole plate would also clip the shadow to the face's bounds.
+    in property <float> fade: 1;
     // The room inside the outline, for content that sizes itself to the face.
     out property <length> inner-width: max(0px, root.width - 2 * root.outline-width);
     out property <length> inner-height: max(0px, root.height - 2 * root.outline-width);
@@ -74,6 +79,7 @@ export component Plate inherits Rectangle {
         width: root.width;
         height: root.height;
         visible: root.lift > 0px;
+        opacity: root.fade;
         border-radius: root.radius;
         background: Theme.shadow-hard;
     }
@@ -82,8 +88,8 @@ export component Plate inherits Rectangle {
         height: root.height;
         border-radius: root.radius;
         border-width: root.outline-width;
-        border-color: root.outline;
-        background: root.fill;
+        border-color: root.fade < 1 ? root.outline.mix(Theme.surface, root.fade) : root.outline;
+        background: root.fade < 1 ? root.fill.mix(Theme.surface, root.fade) : root.fill;
         @children
     }
 }
@@ -104,7 +110,7 @@ export component Panel inherits Plate {
 
 // The face of a button. It rises one pixel toward the pointer with a longer
 // shadow and sinks onto its shadow while pressed. A control that cannot be
-// used holds still, flat, and fades.
+// used holds still and fades, shadow included.
 //
 // Placed directly in a non-layout parent the size of the button, because it
 // moves itself with `x` and `y`.
@@ -118,9 +124,9 @@ export component ButtonPlate inherits Plate {
     private property <bool> raised: root.live && root.hovered && !root.pressed;
     x: root.sunk ? Theme.shadow-offset-small : root.raised ? -1px : 0px;
     y: root.sunk ? Theme.shadow-offset-small : root.raised ? -1px : 0px;
-    lift: !root.live ? 0px : root.sunk ? 1px : root.raised ? Theme.shadow-offset-card + 1px : root.rest-lift;
+    lift: !root.live ? root.rest-lift : root.sunk ? 1px : root.raised ? Theme.shadow-offset-card + 1px : root.rest-lift;
     radius: Theme.button-radius;
-    opacity: root.live ? 1 : Theme.disabled-opacity;
+    fade: root.live ? 1 : Theme.disabled-opacity;
     animate x, y, lift { duration: 80ms; }
 }
 

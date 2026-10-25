@@ -276,6 +276,23 @@ pub fn open_in_browser(url: &str) -> bool {
     }
 }
 
+/// Where Ephervex's source is published.
+pub const SOURCE_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// Opens a file in the desktop's default editor or viewer for its type.
+///
+/// For a file Ephervex itself lists, such as a log, so the user can read it
+/// without finding it first. Returns whether the desktop accepted it.
+pub fn open_file(path: &std::path::Path) -> bool {
+    match open::that_detached(path) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, file = %path.display(), "could not hand the file to the desktop");
+            false
+        }
+    }
+}
+
 /// Shows the folder holding a file in the desktop's file manager.
 ///
 /// For a file Ephervex itself just wrote to a place the user chose, such as a

@@ -788,12 +788,16 @@ fn bundle_rows(selected: bool) -> ModelRc<BundlePartRow> {
             name: "logs/latest.log".into(),
             kind: lookup("gui-bundle-kind-game-log").into(),
             size: "2.0 KiB".into(),
+            path: "/tmp/logs/latest.log".into(),
+            modified: "3 h ago".into(),
             selected,
         },
         BundlePartRow {
             name: "crash-reports/crash-new.txt".into(),
             kind: lookup("gui-bundle-kind-crash-report").into(),
             size: "4.0 KiB".into(),
+            path: "/tmp/crash-reports/crash-new.txt".into(),
+            modified: "2026-10-20 12:00".into(),
             selected: false,
         },
     ]))

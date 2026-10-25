@@ -824,6 +824,8 @@ fn bundle_view(bundle: &BundleChoice) -> BundleView {
                     name: part.name.clone().into(),
                     kind: lookup(bundle_kind_label(part.kind)).into(),
                     size: ephervex_model::format_binary_bytes(part.size_bytes).into(),
+                    path: part.path.display().to_string().into(),
+                    modified: part.modified.clone().into(),
                     selected: bundle.selected.contains(&part.name),
                 })
                 .collect(),

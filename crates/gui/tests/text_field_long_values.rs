@@ -19,7 +19,7 @@ const LONG_VALUE: &str = "/home/melanx/Games/Minecraft/Ephervex/persistent-insta
     garden-of-glass-questbook-edition/saves/reproduction-of-the-crash-on-world-load/\
     region-files-copied-from-the-reporter";
 
-/// Gap between the field and the button beside it in the storage settings row.
+/// Gap between the field and the button beside it in the provider identity row.
 const GAP_BESIDE_FIELD: usize = 8;
 
 /// How far the hard shadow of a field that has focus falls past its right edge.
@@ -28,11 +28,11 @@ const FOCUS_SHADOW_REACH: usize = 3;
 #[test]
 fn a_long_value_is_not_drawn_past_the_border_of_its_field() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
     let empty = gap_beside(&field, &ui);
 
-    ui.set_persistent_root(LONG_VALUE.into());
+    ui.set_microsoft_client_id(LONG_VALUE.into());
     settle(&ui);
 
     assert!(
@@ -44,11 +44,11 @@ fn a_long_value_is_not_drawn_past_the_border_of_its_field() {
 #[test]
 fn a_long_value_is_not_drawn_past_the_border_after_the_caret_moves_to_its_end() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
     let empty = gap_beside(&field, &ui);
 
-    ui.set_persistent_root(LONG_VALUE.into());
+    ui.set_microsoft_client_id(LONG_VALUE.into());
     focus_and_press(&ui, &field, Key::End);
 
     assert!(
@@ -60,9 +60,9 @@ fn a_long_value_is_not_drawn_past_the_border_after_the_caret_moves_to_its_end() 
 #[test]
 fn moving_the_caret_to_the_end_of_a_long_value_scrolls_the_field_to_it() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
-    ui.set_persistent_root(LONG_VALUE.into());
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
+    ui.set_microsoft_client_id(LONG_VALUE.into());
     settle(&ui);
     let start = input_of(&field).absolute_position().x;
 
@@ -84,9 +84,9 @@ fn moving_the_caret_to_the_end_of_a_long_value_scrolls_the_field_to_it() {
 #[test]
 fn moving_the_caret_back_to_the_start_scrolls_the_field_back() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
-    ui.set_persistent_root(LONG_VALUE.into());
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
+    ui.set_microsoft_client_id(LONG_VALUE.into());
     settle(&ui);
     let start = input_of(&field).absolute_position().x;
 
@@ -103,14 +103,14 @@ fn moving_the_caret_back_to_the_start_scrolls_the_field_back() {
 #[test]
 fn a_shorter_value_does_not_leave_the_field_scrolled() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
-    ui.set_persistent_root(LONG_VALUE.into());
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
+    ui.set_microsoft_client_id(LONG_VALUE.into());
     settle(&ui);
     let start = input_of(&field).absolute_position().x;
     focus_and_press(&ui, &field, Key::End);
 
-    ui.set_persistent_root("/tmp".into());
+    ui.set_microsoft_client_id("/tmp".into());
     settle(&ui);
 
     assert_eq!(
@@ -123,9 +123,9 @@ fn a_shorter_value_does_not_leave_the_field_scrolled() {
 #[test]
 fn a_value_that_fits_keeps_the_field_unscrolled_with_the_caret_at_its_end() {
     let ui = window();
-    storage_settings(&ui);
-    let field = storage_root_field(&ui);
-    ui.set_persistent_root("/tmp".into());
+    provider_settings(&ui);
+    let field = provider_identity_field(&ui);
+    ui.set_microsoft_client_id("/tmp".into());
     settle(&ui);
     let start = input_of(&field).absolute_position().x;
 
@@ -147,7 +147,9 @@ fn press(ui: &AppWindow, key: Key) {
 }
 
 fn focus_and_press(ui: &AppWindow, field: &ElementHandle, key: Key) {
-    input_of(field).mock_single_click(slint::platform::PointerEventButton::Left);
+    // The middle of the field itself: the middle of a long value's input lies
+    // beyond the field's clip and takes no press.
+    field.mock_single_click(slint::platform::PointerEventButton::Left);
     settle(ui);
     press(ui, key);
 }
@@ -176,12 +178,16 @@ fn pixel(coordinate: f32) -> usize {
     coordinate.round() as usize
 }
 
-fn storage_root_field(ui: &AppWindow) -> ElementHandle {
+fn provider_identity_field(ui: &AppWindow) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, &lookup("gui-no-override"))
         .filter(|element| element.accessible_role() == Some(AccessibleRole::TextInput))
-        .max_by(|left, right| left.size().width.total_cmp(&right.size().width))
         .filter(|element| element.size().width > 0.0)
-        .expect("the storage root has a text field")
+        .min_by(|left, right| {
+            left.absolute_position()
+                .y
+                .total_cmp(&right.absolute_position().y)
+        })
+        .expect("the provider identity page has a text field")
 }
 
 fn input_of(field: &ElementHandle) -> ElementHandle {
@@ -192,9 +198,12 @@ fn input_of(field: &ElementHandle) -> ElementHandle {
         .expect("a text field wraps a text input")
 }
 
-fn storage_settings(ui: &AppWindow) {
+/// The provider identity page, whose first field has a button beside it once
+/// its value is a custom one.
+fn provider_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.invoke_open_settings("Storage".into());
+    ui.set_microsoft_client_id_is_custom(true);
+    ui.invoke_open_settings("Providers & APIs".into());
     settle(ui);
 }
 

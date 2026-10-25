@@ -77,7 +77,7 @@ fn every_maintenance_action_is_offered_and_raises_its_own_request() {
 
     assert_eq!(asked.borrow().as_slice(), ["inspect", "verify", "review"]);
     assert!(
-        visible(&ui, &lookup("gui-storage-idle")),
+        visible(&ui, &lookup("gui-storage-shared-files-detail")),
         "nothing is claimed before something has been inspected"
     );
 }
@@ -293,7 +293,7 @@ fn the_storage_page_offers_a_review_and_no_unconditional_clear() {
     ui.on_review_storage_cleanup(move || *sink.borrow_mut() += 1);
     settings(&ui, "Storage");
 
-    button(&ui, &lookup("gui-review-storage-cleanup")).mock_single_click(PointerEventButton::Left);
+    button(&ui, &lookup("gui-storage-preview-cleanup")).mock_single_click(PointerEventButton::Left);
 
     assert_eq!(*reviews.borrow(), 1);
     assert_eq!(ui.get_modal(), "", "reviewing is the controller's to open");

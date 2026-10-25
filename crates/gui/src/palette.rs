@@ -186,7 +186,7 @@ fn built_in_label(scheme: ApplicationColorScheme) -> String {
     lookup(match scheme {
         ApplicationColorScheme::Workbench
         | ApplicationColorScheme::Dark
-        | ApplicationColorScheme::Light => "gui-color-scheme-workbench",
+        | ApplicationColorScheme::Light => "gui-color-scheme-light",
     })
 }
 
@@ -643,7 +643,7 @@ mod tests {
                 ApplicationTheme::User("mine".to_owned()),
             ]
         );
-        assert_eq!(choices[0].label, lookup("gui-color-scheme-workbench"));
+        assert_eq!(choices[0].label, lookup("gui-color-scheme-light"));
         assert_eq!(choices[1].label, "MINE");
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("mine".to_owned())),

@@ -368,17 +368,11 @@ fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open
     ui.set_loading(false);
     ui.invoke_open_settings("General".into());
 
-    // One column at the smallest height the window may have, where the page's
-    // last dropdown sits across the bottom edge of the page.
+    // A dropdown lower on the page is not on screen until the window is tall
+    // enough to show part of it, so grow the window from its smallest height
+    // until the page's last dropdown first appears across the bottom edge.
     let theme = ui.global::<Theme>();
-    let (width, height) = (
-        theme.get_window_min_width() + 60.0,
-        theme.get_window_min_height(),
-    );
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    ui.window()
-        .set_size(PhysicalSize::new(width as u32, height as u32));
-    settle(&ui);
+    let width = theme.get_window_min_width() + 60.0;
     let lowest = |ui: &AppWindow| {
         ElementHandle::find_by_element_type_name(ui, "ChoiceBox")
             .filter(|element| element.size().width > 0.0)
@@ -387,17 +381,26 @@ fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open
                     .y
                     .total_cmp(&right.absolute_position().y)
             })
-            .expect("the page has a dropdown")
     };
-
-    let box_ = lowest(&ui);
-    let (at, size) = (box_.absolute_position(), box_.size());
-    let page_bottom = height - theme.get_shell_padding() - theme.get_strong_border_width();
-    assert!(
-        at.y + size.height > page_bottom,
-        "the last dropdown is not cut off by the page edge: {at:?}"
-    );
-    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 2.0);
+    let mut cut_off = None;
+    let mut height = theme.get_window_min_height();
+    while height < theme.get_window_min_height() + 600.0 && cut_off.is_none() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        ui.window()
+            .set_size(PhysicalSize::new(width as u32, height as u32));
+        settle(&ui);
+        let page_bottom = height - theme.get_shell_padding() - theme.get_strong_border_width();
+        cut_off = lowest(&ui)
+            .filter(|found| {
+                let top = found.absolute_position().y;
+                // Enough of it shows to be pressed, and not all of it.
+                top + 12.0 < page_bottom && top + found.size().height > page_bottom
+            })
+            .map(|found| (found.absolute_position(), found.size()));
+        height += 4.0;
+    }
+    let (at, size) = cut_off.expect("the last dropdown is cut off by the page edge at some height");
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 4.0);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -412,8 +415,9 @@ fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open
     settle(&ui);
 
     // Focusing the dropdown scrolls it into view, which moves it.
-    assert_eq!(lowest(&ui).accessible_expanded(), Some(true));
-    assert_ne!(lowest(&ui).absolute_position(), at);
+    let moved = lowest(&ui).expect("the dropdown is still on the page");
+    assert_eq!(moved.accessible_expanded(), Some(true));
+    assert_ne!(moved.absolute_position(), at);
 }
 
 /// The dropdown carrying `label`, not the text beside it that reads the same.

@@ -332,8 +332,7 @@ fn window(width: u32, height: u32) -> AppWindow {
     ui.window().set_size(PhysicalSize::new(width, height));
     ui.show().expect("show");
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     ui.set_minecraft_preference_rows(ModelRc::new(VecModel::from(rows())));
     settle(&ui);
     ui

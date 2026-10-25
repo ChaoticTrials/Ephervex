@@ -673,7 +673,11 @@ pub struct ServerDefaults {
     /// Off by default. These servers exist to test mods, not to be public.
     pub online_mode: bool,
     pub network_access: NetworkAccess,
+    /// The port a new server is offered when `custom_port` is set.
     pub port: u16,
+    /// Whether a new server is offered `port` instead of the first free port
+    /// from the Minecraft default.
+    pub custom_port: bool,
     /// Apply the selected account to new development servers when its identity
     /// is valid for the server's authentication mode.
     pub make_default_account_operator: bool,
@@ -695,6 +699,7 @@ impl Default for ServerDefaults {
             online_mode: false,
             network_access: NetworkAccess::Localhost,
             port: 25565,
+            custom_port: false,
             make_default_account_operator: true,
             operator_permission_level: OperatorPermissionLevel::default(),
             properties: BTreeMap::new(),
@@ -1938,6 +1943,7 @@ jvm_args = []
 online_mode = false
 network_access = "localhost"
 port = 25565
+custom_port = false
 make_default_account_operator = true
 operator_permission_level = 4
 

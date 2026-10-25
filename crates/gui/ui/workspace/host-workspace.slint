@@ -62,7 +62,7 @@ export component WorkspaceTab inherits Rectangle {
         overflow: elide;
     }
     KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // What a pane of a split shows, as a button that opens the host picker.
@@ -91,7 +91,7 @@ export component PaneHostButton inherits Rectangle {
         Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
     }
     KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // A host's surfaces as tabs: as many as fit, then More, which lists the
@@ -178,7 +178,7 @@ export component SurfaceTabs inherits Rectangle {
                 Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
             }
             KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { more-host.open-more(); } }
-            more-area := TouchArea { clicked => { more-host.open-more(); } }
+            more-area := TouchArea { mouse-cursor: pointer; clicked => { more-host.open-more(); } }
     }
     menu := PopupWindow {
         x: 0px;
@@ -228,7 +228,7 @@ export component SurfaceTabs inherits Rectangle {
                         accessible-label: surface.label;
                         accessible-action-default => { root.chosen(surface.id); }
                         Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; height: parent.height; }
-                        entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
+                        entry-area := TouchArea { mouse-cursor: pointer; clicked => { root.chosen(surface.id); } }
                     }
                 }
             }
@@ -567,7 +567,7 @@ export component HostPickerCard inherits Rectangle {
         fill: root.current ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
     }
     KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.card-radius; activated => { root.picked(root.item.kind, root.item.id); } }
-    card-area := TouchArea { clicked => { root.picked(root.item.kind, root.item.id); } }
+    card-area := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.item.kind, root.item.id); } }
     VerticalLayout {
         padding: 12px; spacing: 8px;
         HorizontalLayout {
@@ -607,7 +607,7 @@ export component HostPickerCard inherits Rectangle {
             accessible-label: GuiI18n.value("gui-host-choice-server", server.name);
             accessible-action-default => { root.picked("server", server.id); }
             KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { root.picked("server", server.id); } }
-            linked-area := TouchArea { clicked => { root.picked("server", server.id); } }
+            linked-area := TouchArea { mouse-cursor: pointer; clicked => { root.picked("server", server.id); } }
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 8px;
                 if server.icon-slot >= 0 : VerticalLayout { alignment: center; Image { width: 22px; height: 22px; source: HostIcons.images[server.icon-slot]; image-fit: contain; } }

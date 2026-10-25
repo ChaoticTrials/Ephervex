@@ -122,16 +122,22 @@ fn a_compact_button_is_shorter_and_its_shadow_falls_less_far() {
 }
 
 #[test]
-fn a_disabled_button_is_flat_and_faded() {
+fn a_disabled_button_is_faded_and_keeps_its_shadow() {
     let ui = window();
     let image = render(&ui);
     let height = u32::try_from(ui.get_height_px()).expect("a positive height");
     let top = 20;
     let left = 20 + 5 * 140;
-    assert_eq!(
-        pixel(&image, left + 60, top + height + 1),
+    let below = pixel(&image, left + 60, top + height + 1);
+    assert_ne!(
+        below,
         rgb(&ui.get_floor()),
-        "a disabled button casts no shadow"
+        "a disabled button keeps its shadow"
+    );
+    assert_ne!(
+        below,
+        rgb(&ui.get_shadow()),
+        "and the shadow is faded with it"
     );
     assert_ne!(
         pixel(&image, left + 8, top + height / 2),

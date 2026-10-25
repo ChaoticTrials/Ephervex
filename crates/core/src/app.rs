@@ -147,6 +147,11 @@ pub struct ApplicationDisplaySettings {
 pub struct ServerApplicationSettings {
     pub make_default_account_operator: bool,
     pub operator_permission_level: OperatorPermissionLevel,
+    /// Whether a new server is offered [`Self::port`] instead of an
+    /// automatically chosen one.
+    pub custom_port: bool,
+    /// The port a new server is offered when [`Self::custom_port`] is set.
+    pub port: u16,
 }
 
 /// Configured and resolved locations for persistent instances.
@@ -470,7 +475,32 @@ impl App {
                 .config
                 .server_defaults
                 .operator_permission_level,
+            custom_port: self.storage.config.server_defaults.custom_port,
+            port: self.storage.config.server_defaults.port,
         }
+    }
+
+    /// Persists the port a new server is offered, keeping the stored port when
+    /// none is given. A port of zero is refused: it asks the operating system
+    /// to choose, which a default cannot mean.
+    pub fn set_server_port_default(
+        &mut self,
+        custom_port: bool,
+        port: Option<u16>,
+    ) -> CoreResult<()> {
+        if port == Some(0) {
+            return Err(ephervex_server::ServerError::InvalidProperty {
+                key: "server-port".to_owned(),
+                reason: "the port must be from 1 to 65535",
+            }
+            .into());
+        }
+        self.mutate_config(|config| {
+            config.server_defaults.custom_port = custom_port;
+            if let Some(port) = port {
+                config.server_defaults.port = port;
+            }
+        })
     }
 
     /// The `server.properties` values new servers start with, by key.
@@ -3506,9 +3536,38 @@ mod tests {
             ServerApplicationSettings {
                 make_default_account_operator: false,
                 operator_permission_level: OperatorPermissionLevel::from_value(2).expect("level"),
+                custom_port: false,
+                port: 25565,
             }
         );
         assert!(reopened.config().minecraft_preferences.is_empty());
+    }
+
+    #[test]
+    fn the_default_server_port_persists_and_zero_is_refused() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let defaults = app.server_application_settings();
+        assert!(!defaults.custom_port);
+        assert_eq!(defaults.port, 25565);
+
+        app.set_server_port_default(true, Some(25570))
+            .expect("save the port default");
+        let reopened = app_rooted_at(base.path());
+        let saved = reopened.server_application_settings();
+        assert!(saved.custom_port);
+        assert_eq!(saved.port, 25570);
+
+        let mut unchanged = app_rooted_at(base.path());
+        assert!(unchanged.set_server_port_default(true, Some(0)).is_err());
+        assert_eq!(unchanged.server_application_settings().port, 25570);
+
+        unchanged
+            .set_server_port_default(false, None)
+            .expect("switch back to an automatic port");
+        let kept = unchanged.server_application_settings();
+        assert!(!kept.custom_port);
+        assert_eq!(kept.port, 25570, "the custom port is remembered");
     }
 
     #[test]

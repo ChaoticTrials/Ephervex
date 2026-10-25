@@ -11,7 +11,7 @@
 // set where it is placed applies.
 
 import { ListView } from "std-widgets.slint";
-import { FocusRing } from "controls.slint";
+import { FocusRing, SegmentedChoice } from "controls.slint";
 import { Plate } from "surface.slint";
 import { HoverNote, TooltipCard } from "text.slint";
 import { Theme } from "../theme.slint";
@@ -404,5 +404,39 @@ export component LabeledChoice inherits Rectangle {
             }
             @children
         }
+    }
+}
+
+// The options as a joined bar when it fits in `available-width`, and as a
+// dropdown when it does not.
+export component ChoiceBar inherits Rectangle {
+    in property <[string]> options;
+    in property <int> current;
+    in property <string> accessible-name;
+    // The width the caller can give the choice.
+    in property <length> available-width: 100000px;
+    callback selected(int);
+    private property <bool> as-menu: bar.natural-width > root.available-width;
+    width: root.as-menu ? min(240px * Theme.text-scale, root.available-width) : bar.width;
+    height: root.as-menu ? Theme.control-height : bar.height;
+    horizontal-stretch: 0;
+    bar := SegmentedChoice {
+        x: 0px;
+        y: 0px;
+        visible: !root.as-menu;
+        options: root.options;
+        current: root.current;
+        accessible-name: root.accessible-name;
+        selected(index) => { root.selected(index); }
+    }
+    menu := IndexComboBox {
+        x: 0px;
+        y: 0px;
+        width: root.as-menu ? root.width : 0px;
+        visible: root.as-menu;
+        label: root.accessible-name;
+        model: root.options;
+        index: root.current;
+        selected(index, value) => { root.selected(index); }
     }
 }
