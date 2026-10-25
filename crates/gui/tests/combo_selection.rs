@@ -61,7 +61,6 @@ fn dropdowns_in_a_fixed_height_dialog_stay_dropdown_sized_and_fill_their_row() {
     // Entries must not make a dropdown claim the dialog's spare height.
     for label in [
         lookup("gui-minecraft-release"),
-        lookup("gui-loader"),
         lookup("gui-loader-version-placeholder"),
     ] {
         let height = dropdown(&ui, &label).size().height;
@@ -69,11 +68,13 @@ fn dropdowns_in_a_fixed_height_dialog_stay_dropdown_sized_and_fill_their_row() {
     }
 
     // The release dropdown takes the row beside its star.
-    let loader = dropdown(&ui, &lookup("gui-loader")).size().width;
+    let build = dropdown(&ui, &lookup("gui-loader-version-placeholder"))
+        .size()
+        .width;
     let release = dropdown(&ui, &lookup("gui-minecraft-release")).size().width;
     assert!(
-        release > loader / 2.0,
-        "the release dropdown is {release}px wide in a {loader}px dialog"
+        release > build / 2.0,
+        "the release dropdown is {release}px wide beside a {build}px build dropdown"
     );
 }
 
@@ -87,7 +88,8 @@ fn the_create_dialog_shows_the_loader_and_build_the_application_chose() {
     ui.set_create_loader("NeoForge".into());
     ui.set_modal("create-instance".into());
     settle(&ui);
-    assert_eq!(shown(&ui, &lookup("gui-loader")), "NeoForge");
+    assert!(loader_is_chosen(&ui, "NeoForge"));
+    assert!(!loader_is_chosen(&ui, "Vanilla"));
 
     ui.set_create_loader_versions(strings(&["21.1.9", "21.1.8", "21.1.7"]));
     ui.set_create_loader_version("21.1.8".into());
@@ -120,7 +122,8 @@ fn the_server_dialog_shows_the_release_loader_and_build_it_will_submit() {
     settle(&ui);
 
     assert_eq!(shown(&ui, &lookup("gui-minecraft-release")), "1.20.4");
-    assert_eq!(shown(&ui, &lookup("gui-loader")), "Fabric");
+    assert!(loader_is_chosen(&ui, "Fabric"));
+    assert!(!loader_is_chosen(&ui, "Vanilla"));
     assert_eq!(
         shown(&ui, &lookup("gui-loader-version-placeholder")),
         "0.15.11"
@@ -425,6 +428,15 @@ fn dropdown(ui: &AppWindow, label: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, label)
         .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
         .expect("a dropdown with that label")
+}
+
+/// Whether the loader segment named `name` is the highlighted one.
+fn loader_is_chosen(ui: &AppWindow, name: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, name)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .expect("a loader segment with that name")
+        .accessible_checked()
+        .unwrap_or(false)
 }
 
 fn shown(ui: &AppWindow, label: &str) -> String {

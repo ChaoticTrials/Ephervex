@@ -97,6 +97,8 @@ enum CreationKey {
         issue_link: String,
         linked_server: String,
         server_pack: Option<PathBuf>,
+        server_port: Option<u16>,
+        server_online: bool,
     },
     Server {
         name: String,
@@ -106,6 +108,7 @@ enum CreationKey {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        online: bool,
         /// The archive this server's content comes from, empty when it has
         /// none. Part of the key so that picking a different archive is a
         /// different creation rather than a second click on the same one.
@@ -2843,6 +2846,18 @@ fn register_create_server(
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
 ) {
+    let weak = ui.as_weak();
+    ui.on_server_link_index(move |id| {
+        weak.upgrade().map_or(0, |ui| {
+            let position = ui
+                .get_server_link_ids()
+                .iter()
+                .position(|known| known == id);
+            position
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0)
+        })
+    });
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_submit_create_server(
@@ -2854,7 +2869,8 @@ fn register_create_server(
               persistent,
               automatic_port,
               port,
-              server_pack| {
+              server_pack,
+              online| {
             let linked = !client.is_empty();
             let port = if automatic_port {
                 None
@@ -2888,6 +2904,7 @@ fn register_create_server(
                 },
                 persistent,
                 port,
+                online,
                 server_pack: server_pack.as_str().to_owned(),
             };
             let pending = pending_creation(&key, false);
@@ -2918,6 +2935,7 @@ fn register_create_server(
                     loader_version: loader_version.into(),
                     persistent,
                     port,
+                    online,
                     server_pack: (!server_pack.is_empty())
                         .then(|| PathBuf::from(server_pack.as_str())),
                 },
@@ -3678,6 +3696,12 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
         ui.set_create_issue_link(SharedString::default());
         ui.set_create_linked_server(false);
         ui.set_create_linked_server_name(SharedString::default());
+        ui.set_create_linked_port(if ui.get_stored_server_port_custom() {
+            ui.get_stored_server_port()
+        } else {
+            SharedString::default()
+        });
+        ui.set_create_linked_online(ui.get_default_server_online());
         set_server_pack(&ui, ServerPackTarget::NewInstance, None);
         ui.set_modal_error(SharedString::default());
         send(&sender, Command::LoadMinecraftReleases);
@@ -3910,7 +3934,9 @@ fn register_create_instance(
               issue_link,
               with_server,
               server_name,
-              server_pack| {
+              server_pack,
+              server_port,
+              server_online| {
             // Refused here, with the dialog still open, so a mistyped address is
             // fixed where it was typed rather than reported after the dialog is gone.
             if let Err(error) = ephervex_core::validated_issue_link(&issue_link) {
@@ -3930,6 +3956,20 @@ fn register_create_instance(
             // Files only mean something to a server that is wanted.
             let server_pack = (with_server && !server_pack.is_empty())
                 .then(|| PathBuf::from(server_pack.as_str()));
+            // An empty port leaves the server's to be chosen; one that is
+            // typed is checked here, with the dialog still open.
+            let server_port = if with_server && !server_port.trim().is_empty() {
+                let validation = validate_port(server_port.trim());
+                if !validation.valid {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_modal_error(validation.message.into());
+                    }
+                    return;
+                }
+                server_port.trim().parse::<u16>().ok()
+            } else {
+                None
+            };
             let key = CreationKey::Client {
                 name: name.trim().to_owned(),
                 minecraft: minecraft.as_str().to_owned(),
@@ -3939,6 +3979,8 @@ fn register_create_instance(
                 issue_link: issue_link.trim().to_owned(),
                 linked_server: linked_server.clone(),
                 server_pack: server_pack.clone(),
+                server_port,
+                server_online,
             };
             let pending = pending_creation(&key, false);
             let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
@@ -3964,6 +4006,8 @@ fn register_create_instance(
                     issue_link: issue_link.trim().into(),
                     linked_server,
                     server_pack,
+                    server_port,
+                    server_online,
                 },
             );
         },
@@ -9947,6 +9991,36 @@ fn apply_settings_fields(ui: &AppWindow, settings: &SettingsData, drafts: &mut S
     );
 }
 
+/// The instances a new server can be linked to, Standalone first, and the id
+/// each choice stands for.
+fn apply_server_link_choices(ui: &AppWindow, clients: &[InstanceRow]) {
+    ui.set_server_link_labels(model(
+        std::iter::once(lookup("gui-standalone"))
+            .chain(clients.iter().map(|row| row.name.to_string()))
+            .map(SharedString::from)
+            .collect(),
+    ));
+    ui.set_server_link_ids(model(
+        std::iter::once(String::new())
+            .chain(clients.iter().map(|row| row.id.to_string()))
+            .map(SharedString::from)
+            .collect(),
+    ));
+    // The dropdown follows the instance the dialog will link to, wherever the
+    // refreshed list now puts it; one that is gone makes the server standalone.
+    let chosen = ui.get_create_server_client_id();
+    let position = ui
+        .get_server_link_ids()
+        .iter()
+        .position(|known| known == chosen);
+    if let Some(index) = position.and_then(|index| i32::try_from(index).ok()) {
+        ui.set_create_server_link_index(index);
+    } else {
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_link_index(0);
+    }
+}
+
 fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
@@ -9981,6 +10055,7 @@ fn apply_snapshot(
         ui.set_default_server_port_custom(settings.default_server_port_custom);
         ui.set_default_server_port(settings.default_server_port.to_string().into());
     }
+    ui.set_default_server_online(settings.default_server_online_mode);
     if let Some(notice) = organization_set_aside {
         ui.invoke_present_toast(
             lookup_args(
@@ -10004,6 +10079,7 @@ fn apply_snapshot(
         list,
         home,
     );
+    apply_server_link_choices(ui, &clients);
     let servers = apply_server_snapshot(ui, servers, server_list, home);
     home.set_default_account(
         accounts
@@ -11530,6 +11606,8 @@ mod tests {
             false,
             "".into(),
             "".into(),
+            "".into(),
+            false,
         );
 
         assert_eq!(ui.get_modal(), "create-instance");
@@ -11570,6 +11648,8 @@ mod tests {
             true,
             "".into(),
             "".into(),
+            "".into(),
+            false,
         );
 
         let Ok(Command::CreateClient {
@@ -11582,6 +11662,118 @@ mod tests {
         };
         assert_eq!(issue_link, "https://example.com/issues/7");
         assert_eq!(linked_server, "Repro Server");
+    }
+
+    /// Submits the New Instance dialog with a linked server and `port`.
+    fn submit_instance_with_server_port(ui: &AppWindow, port: &str, with_server: bool) {
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "".into(),
+            with_server,
+            "".into(),
+            "".into(),
+            port.into(),
+            true,
+        );
+    }
+
+    #[test]
+    fn a_port_the_linked_server_cannot_use_keeps_the_new_instance_dialog_open() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+        ui.set_modal("create-instance".into());
+
+        for port in ["70000", "12a"] {
+            submit_instance_with_server_port(&ui, port, true);
+            assert_eq!(ui.get_modal(), "create-instance", "{port}");
+            assert!(!ui.get_modal_error().is_empty(), "{port}");
+            assert!(receiver.try_recv().is_err(), "{port} started nothing");
+        }
+    }
+
+    #[test]
+    fn a_padded_linked_server_port_is_trimmed_and_a_port_without_a_server_is_ignored() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+
+        submit_instance_with_server_port(&ui, " 25570 ", true);
+        let Ok(Command::CreateClient {
+            server_port,
+            server_online,
+            ..
+        }) = receiver.try_recv()
+        else {
+            panic!("a creation was started");
+        };
+        assert_eq!(server_port, Some(25570));
+        assert!(server_online);
+
+        submit_instance_with_server_port(&ui, "70000", false);
+        let Ok(Command::CreateClient { server_port, .. }) = receiver.try_recv() else {
+            panic!("a creation was started");
+        };
+        assert_eq!(server_port, None, "no server wants the port");
+    }
+
+    #[test]
+    fn the_new_instance_dialog_starts_its_linked_server_from_the_stored_defaults_each_time() {
+        let ui = test_window();
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        register_create_instance_naming(&ui, &sender);
+        ui.set_stored_server_port_custom(true);
+        ui.set_stored_server_port("25570".into());
+        ui.set_default_server_online(false);
+
+        ui.invoke_open_create_instance_modal();
+        assert_eq!(ui.get_create_linked_port(), "25570");
+        assert!(!ui.get_create_linked_online());
+
+        ui.set_create_linked_port("30000".into());
+        ui.set_create_linked_online(true);
+        ui.set_modal("".into());
+        ui.invoke_open_create_instance_modal();
+        assert_eq!(ui.get_create_linked_port(), "25570");
+        assert!(!ui.get_create_linked_online());
+    }
+
+    #[test]
+    fn the_link_dropdown_follows_the_chosen_instance_when_the_list_changes() {
+        let ui = test_window();
+        let instance = |id: &str, name: &str| InstanceRow {
+            id: id.into(),
+            name: name.into(),
+            ..InstanceRow::default()
+        };
+        apply_server_link_choices(&ui, &[instance("a", "Alpha"), instance("b", "Beta")]);
+        ui.set_create_server_client_id("b".into());
+        ui.set_create_server_link_index(2);
+
+        apply_server_link_choices(
+            &ui,
+            &[
+                instance("c", "Aardvark"),
+                instance("a", "Alpha"),
+                instance("b", "Beta"),
+            ],
+        );
+        assert_eq!(ui.get_create_server_link_index(), 3);
+        assert_eq!(ui.get_create_server_client_id(), "b");
+
+        apply_server_link_choices(&ui, &[instance("a", "Alpha")]);
+        assert_eq!(ui.get_create_server_link_index(), 0);
+        assert_eq!(
+            ui.get_create_server_client_id(),
+            "",
+            "an instance that is gone leaves a standalone server"
+        );
     }
 
     #[test]
@@ -16380,6 +16572,8 @@ mod tests {
     #[test]
     fn duplicate_creation_is_rejected_until_the_original_request_finishes() {
         let key = CreationKey::Client {
+            server_online: false,
+            server_port: None,
             name: "Rendering Repro".to_owned(),
             minecraft: "1.20.1".to_owned(),
             loader: "Forge".to_owned(),
@@ -16412,6 +16606,7 @@ mod tests {
     #[test]
     fn distinct_creation_requests_can_run_together() {
         let first = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: "client-one".to_owned(),
             minecraft: "1.20.1".to_owned(),
@@ -16455,6 +16650,7 @@ mod tests {
         ui.invoke_follow_host(2, "client".into(), client_b.id().into(), "Overview".into());
 
         let first = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: client_a.id(),
             minecraft: String::new(),
@@ -17469,6 +17665,7 @@ mod tests {
         ui.set_instances(model(rows));
 
         let building = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: "client-a".to_owned(),
             minecraft: String::new(),
@@ -17693,6 +17890,7 @@ mod tests {
             let client = "client-one";
             let linked = !client.is_empty();
             CreationKey::Server {
+                online: false,
                 name: "Client One Server".to_owned(),
                 client: client.to_owned(),
                 minecraft: if linked {

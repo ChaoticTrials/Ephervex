@@ -54,7 +54,7 @@ fn submitting_carries_the_chosen_archive_path() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack| {
+    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack, _| {
         sink.borrow_mut().push(server_pack.to_string());
     });
 
@@ -79,7 +79,7 @@ fn a_server_built_the_usual_way_submits_no_archive() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack| {
+    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack, _| {
         sink.borrow_mut().push(server_pack.to_string());
     });
 
@@ -126,7 +126,7 @@ fn an_untouched_dialog_submits_the_suggested_name() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _, _| {
         sink.borrow_mut().push(name.to_string());
     });
 
@@ -150,7 +150,7 @@ fn a_typed_name_is_submitted_instead_of_the_suggestion() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _, _| {
         sink.borrow_mut().push(name.to_string());
     });
 
@@ -547,4 +547,29 @@ fn a_server_for_an_instance_is_titled_as_a_linked_server() {
             .any(|element| element.size().width > 0.0),
         "a standalone server keeps its own title"
     );
+}
+
+/// An empty port field means the port is chosen on creation, and the account
+/// check chosen in the dialog is what is submitted.
+#[test]
+fn an_empty_port_is_automatic_and_the_account_check_is_submitted() {
+    let ui = window();
+    let submitted: Rc<RefCell<Vec<(bool, String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&submitted);
+    ui.on_submit_create_server(move |_, _, _, _, _, _, automatic, port, _, online| {
+        sink.borrow_mut()
+            .push((automatic, port.to_string(), online));
+    });
+
+    open_create_server(&ui, "repro-client");
+    ui.set_create_server_name("Repro Server".into());
+    settle(&ui);
+    widest(&ui, &lookup("gui-accounts-online"))
+        .expect("the account choice")
+        .invoke_accessible_default_action();
+    widest(&ui, &lookup("gui-create-server"))
+        .expect("the dialog can be submitted")
+        .invoke_accessible_default_action();
+
+    assert_eq!(submitted.borrow().as_slice(), [(true, String::new(), true)]);
 }

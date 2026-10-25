@@ -152,6 +152,9 @@ pub struct ServerApplicationSettings {
     pub custom_port: bool,
     /// The port a new server is offered when [`Self::custom_port`] is set.
     pub port: u16,
+    /// Whether a new server checks players against Mojang's accounts unless
+    /// told otherwise.
+    pub online_mode: bool,
 }
 
 /// Configured and resolved locations for persistent instances.
@@ -477,6 +480,7 @@ impl App {
                 .operator_permission_level,
             custom_port: self.storage.config.server_defaults.custom_port,
             port: self.storage.config.server_defaults.port,
+            online_mode: self.storage.config.server_defaults.online_mode,
         }
     }
 
@@ -3538,6 +3542,7 @@ mod tests {
                 operator_permission_level: OperatorPermissionLevel::from_value(2).expect("level"),
                 custom_port: false,
                 port: 25565,
+                online_mode: false,
             }
         );
         assert!(reopened.config().minecraft_preferences.is_empty());

@@ -189,12 +189,25 @@ impl App {
         match request.port_selection {
             ServerPortSelection::Explicit(port) => {
                 request.network.port = port;
+                if let Some(online) = request.online_mode {
+                    request.network.online_mode = online;
+                }
+                let _ = network_properties(&request.network)?;
+            }
+            ServerPortSelection::PortOnly(port) => {
+                let defaults = &self.config().server_defaults;
+                request.network = ServerNetworkSettings {
+                    online_mode: request.online_mode.unwrap_or(defaults.online_mode),
+                    access: defaults.network_access,
+                    bind_address: None,
+                    port,
+                };
                 let _ = network_properties(&request.network)?;
             }
             ServerPortSelection::Automatic => {
                 let defaults = &self.config().server_defaults;
                 request.network = ServerNetworkSettings {
-                    online_mode: defaults.online_mode,
+                    online_mode: request.online_mode.unwrap_or(defaults.online_mode),
                     access: defaults.network_access,
                     bind_address: None,
                     port: DEFAULT_SERVER_PORT,
@@ -3398,6 +3411,46 @@ mod tests {
 
         remember_active_account(&mut app, "not-a-uuid", "Unsafe", AccountKind::Microsoft);
         assert!(app.default_operator_profile(&online).is_none());
+    }
+
+    #[test]
+    fn a_server_request_can_choose_online_or_offline_accounts_with_either_port_choice() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        assert!(!app.config().server_defaults.online_mode);
+
+        let mut automatic = NewServer::new("A", "1.20.1", LoaderSelection::vanilla());
+        app.resolve_creation_network(&mut automatic)
+            .expect("resolve");
+        assert!(!automatic.network.online_mode, "the configured default");
+
+        let mut automatic =
+            NewServer::new("A", "1.20.1", LoaderSelection::vanilla()).with_online_mode(true);
+        app.resolve_creation_network(&mut automatic)
+            .expect("resolve");
+        assert!(automatic.network.online_mode, "the chosen mode");
+
+        let mut explicit =
+            NewServer::new("B", "1.20.1", LoaderSelection::vanilla()).with_online_mode(true);
+        explicit.port_selection = ServerPortSelection::Explicit(25570);
+        app.resolve_creation_network(&mut explicit)
+            .expect("resolve");
+        assert!(explicit.network.online_mode);
+        assert_eq!(explicit.network.port, 25570);
+    }
+
+    #[test]
+    fn a_chosen_port_keeps_the_configured_network_access() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let mut app = test_app(directory.path());
+        app.mutate_config(|config| config.server_defaults.network_access = NetworkAccess::Lan)
+            .expect("configure LAN access");
+
+        let mut request =
+            NewServer::new("A", "1.20.1", LoaderSelection::vanilla()).with_port(25570);
+        app.resolve_creation_network(&mut request).expect("resolve");
+        assert_eq!(request.network.port, 25570);
+        assert_eq!(request.network.access, NetworkAccess::Lan);
     }
 
     #[test]

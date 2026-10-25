@@ -341,6 +341,9 @@ pub struct NewServer {
     pub creation: ServerCreationSource,
     pub network: ServerNetworkSettings,
     pub port_selection: ServerPortSelection,
+    /// Whether players are checked against Mojang's accounts, when the caller
+    /// chose; otherwise the configured default applies.
+    pub online_mode: Option<bool>,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
 }
@@ -350,7 +353,11 @@ pub struct NewServer {
 pub enum ServerPortSelection {
     #[default]
     Automatic,
+    /// The caller's whole network settings, port included.
     Explicit(u16),
+    /// Only the port is the caller's; access and bind address come from the
+    /// configured server defaults.
+    PortOnly(u16),
 }
 
 impl NewServer {
@@ -369,6 +376,7 @@ impl NewServer {
             },
             network: ServerNetworkSettings::default(),
             port_selection: ServerPortSelection::Automatic,
+            online_mode: None,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
@@ -397,9 +405,26 @@ impl NewServer {
             creation: ServerCreationSource::LinkedClient { client_id },
             network: ServerNetworkSettings::default(),
             port_selection: ServerPortSelection::Automatic,
+            online_mode: None,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
+    }
+
+    /// Chooses whether players are checked against Mojang's accounts, in place
+    /// of the configured default.
+    #[must_use]
+    pub const fn with_online_mode(mut self, online: bool) -> Self {
+        self.online_mode = Some(online);
+        self
+    }
+
+    /// Fixes the port and leaves the rest of the network settings to the
+    /// configured defaults.
+    #[must_use]
+    pub const fn with_port(mut self, port: u16) -> Self {
+        self.port_selection = ServerPortSelection::PortOnly(port);
+        self
     }
 
     #[must_use]

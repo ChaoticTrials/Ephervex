@@ -256,6 +256,10 @@ pub enum Command {
         /// Published server files to build that server from, rather than from
         /// the instance's own recipe.
         server_pack: Option<PathBuf>,
+        /// The port that server takes; none leaves it to be chosen.
+        server_port: Option<u16>,
+        /// Whether that server checks players against Mojang's accounts.
+        server_online: bool,
     },
     ImportPack {
         archive: PathBuf,
@@ -595,6 +599,8 @@ pub enum Command {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        /// Whether the server checks players against Mojang's accounts.
+        online: bool,
         /// A published server archive to install as the server's content,
         /// instead of reconstructing it from a client's recipe.
         server_pack: Option<PathBuf>,
@@ -1075,6 +1081,9 @@ pub struct SettingsData {
     /// an automatically chosen port.
     pub default_server_port_custom: bool,
     pub default_server_port: u16,
+    /// Whether a new server checks players against Mojang's accounts unless
+    /// the dialog says otherwise.
+    pub default_server_online_mode: bool,
     /// The `server.properties` values new servers start with, by key.
     pub server_property_defaults: std::collections::BTreeMap<String, String>,
     pub java_auto_detect: bool,
@@ -3499,6 +3508,8 @@ fn run_worker(
                 issue_link,
                 linked_server,
                 server_pack,
+                server_port,
+                server_online,
             } => match loader_selection(&loader, &loader_version) {
                 Ok(loader) => {
                     let paths = app.paths().clone();
@@ -3541,8 +3552,12 @@ fn run_worker(
                                 instance: created.record.id.to_string(),
                                 server_name: linked_server.clone(),
                             });
-                            let server = NewServer::linked(linked_server, created.record.id)
-                                .with_storage(created.record.storage);
+                            let mut server = NewServer::linked(linked_server, created.record.id)
+                                .with_storage(created.record.storage)
+                                .with_online_mode(server_online);
+                            if let Some(port) = server_port {
+                                server = server.with_port(port);
+                            }
                             let options = ServerCreateOptions {
                                 install_java_if_missing: true,
                                 content: server_pack.map_or(ServerContentSource::Recipe, |path| {
@@ -5425,6 +5440,7 @@ fn run_worker(
                 loader_version,
                 persistent,
                 port,
+                online,
                 server_pack,
             } => {
                 let acquisition_host = client.as_ref().map(ToString::to_string);
@@ -5438,10 +5454,9 @@ fn run_worker(
                 };
                 match request {
                     Ok(mut request) => {
+                        request = request.with_online_mode(online);
                         if let Some(port) = port {
-                            let mut network = request.network.clone();
-                            network.port = port;
-                            request = request.with_network(network);
+                            request = request.with_port(port);
                         }
                         let paths = app.paths().clone();
                         let acquisition_events = events.clone();
@@ -7114,6 +7129,7 @@ fn application_settings(app: &App) -> Result<SettingsData, CoreError> {
         operator_permission_level: server.operator_permission_level.value(),
         default_server_port_custom: server.custom_port,
         default_server_port: server.port,
+        default_server_online_mode: server.online_mode,
         server_property_defaults: app.server_property_defaults().clone(),
         java_auto_detect: java.auto_detect,
         java_auto_download: java.auto_download,

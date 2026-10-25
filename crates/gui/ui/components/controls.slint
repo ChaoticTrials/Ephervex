@@ -1278,6 +1278,9 @@ export component ToastPanel inherits Plate {
 export component SegmentedChoice inherits Rectangle {
     in property <[string]> options;
     in property <int> current;
+    // The chosen option by its text, for a list whose position the caller does
+    // not know; used when it is not empty.
+    in property <string> current-value;
     in property <string> accessible-name;
     // The width the bar needs.
     out property <length> natural-width: bar.preferred-width;
@@ -1470,3 +1473,94 @@ export component SettingBlock inherits Rectangle {
         @children
     }
 }
+
+// A box that is ticked or not, with its label, and a note at the right.
+export component CheckRow inherits Rectangle {
+    in property <string> label;
+    in property <string> note;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    height: Theme.control-height + 4px;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.toggled(!root.checked); } }
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.small-radius;
+        fill: Theme.field;
+    }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.toggled(!root.checked); } }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: root.checked ? Theme.text : Theme.field;
+                if root.checked : Image {
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../assets/icons/check.svg");
+                    colorize: Theme.surface;
+                }
+            }
+        }
+        BodyText { text: root.label; color: Theme.text; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        Rectangle { horizontal-stretch: 1; }
+        BodyText { text: root.note; color: Theme.text-muted; font-size: Theme.label-size; vertical-alignment: center; overflow: elide; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+// What a field is, and a note about it at the right of the same line.
+export component FieldCaption inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> note;
+    spacing: 8px;
+    Text { text: root.label; color: Theme.text; font-size: Theme.label-size; font-weight: 700; vertical-alignment: bottom; }
+    Rectangle { horizontal-stretch: 1; }
+    Text { text: root.note; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: bottom; overflow: elide; }
+}
+
+// A line of context at the foot of a form: what the choices above come to.
+export component InfoBanner inherits Rectangle {
+    in property <string> text;
+    height: row.preferred-height;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.card-radius;
+        fill: Theme.selection-card;
+    }
+    row := HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Image { source: @image-url("../../../../assets/icons/settings-about.svg"); width: 16px; height: 16px; colorize: Theme.text-secondary; }
+        }
+        BodyText { text: root.text; color: Theme.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+    }
+}
+

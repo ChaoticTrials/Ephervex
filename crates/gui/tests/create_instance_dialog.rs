@@ -22,6 +22,8 @@ type Submission = (
     bool,
     String,
     String,
+    String,
+    bool,
 );
 
 fn dialog() -> AppWindow {
@@ -58,7 +60,17 @@ fn record(ui: &AppWindow) -> Rc<RefCell<Vec<Submission>>> {
     let calls: Rc<RefCell<Vec<Submission>>> = Rc::default();
     let sink = Rc::clone(&calls);
     ui.on_submit_create_instance(
-        move |name, minecraft, loader, version, persistent, link, with_server, server, pack| {
+        move |name,
+              minecraft,
+              loader,
+              version,
+              persistent,
+              link,
+              with_server,
+              server,
+              pack,
+              port,
+              online| {
             sink.borrow_mut().push((
                 name.to_string(),
                 minecraft.to_string(),
@@ -69,6 +81,8 @@ fn record(ui: &AppWindow) -> Rc<RefCell<Vec<Submission>>> {
                 with_server,
                 server.to_string(),
                 pack.to_string(),
+                port.to_string(),
+                online,
             ));
         },
     );
@@ -99,7 +113,9 @@ fn a_plain_instance_submits_without_a_link_or_a_server() {
             String::new(),
             false,
             String::new(),
-            String::new()
+            String::new(),
+            String::new(),
+            false
         )]
     );
 }
@@ -126,6 +142,28 @@ fn the_link_the_storage_and_a_linked_server_are_submitted_with_the_instance() {
         submitted.7, "",
         "the dialog leaves naming it to the suggestion"
     );
+}
+
+#[test]
+fn the_linked_servers_port_and_account_check_are_submitted() {
+    let ui = dialog();
+    let calls = record(&ui);
+    press(&ui, &lookup("gui-create-with-server"));
+    ui.set_create_linked_port("25570".into());
+    settle(&ui);
+    press(&ui, &lookup("gui-accounts-online"));
+    press(&ui, &lookup("gui-create-instance"));
+    let calls = calls.borrow();
+    let submitted = calls.last().expect("a submission");
+    assert_eq!(submitted.9, "25570");
+    assert!(submitted.10, "online accounts were chosen");
+}
+
+#[test]
+fn a_linked_server_asks_for_neither_before_one_is_wanted() {
+    let ui = dialog();
+    assert!(shown(&ui, &lookup("gui-accounts-online")).is_none());
+    assert!(shown(&ui, &lookup("gui-linked-server-name")).is_none());
 }
 
 #[test]
@@ -174,9 +212,9 @@ fn choosing_and_clearing_ask_the_controller() {
     let cleared = Rc::clone(&asked);
     ui.on_clear_instance_server_pack(move || cleared.borrow_mut().push("clear"));
     press(&ui, &lookup("gui-create-with-server"));
+    press(&ui, &lookup("gui-choose-server-pack"));
     ui.set_create_instance_server_pack("/tmp/pack-server.zip".into());
     settle(&ui);
-    press(&ui, &lookup("gui-choose-server-pack"));
     press(&ui, &lookup("gui-clear-server-pack"));
     assert_eq!(asked.borrow().as_slice(), ["choose", "clear"]);
 }

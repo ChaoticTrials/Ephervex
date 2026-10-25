@@ -263,7 +263,7 @@ fn the_bundle_offer_is_asked_for_when_the_card_appears_and_when_the_host_changes
     let asked = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&asked);
     ui.on_plan_host_bundle(move |kind, id| {
-        sink.borrow_mut().push((kind.to_string(), id.to_string()))
+        sink.borrow_mut().push((kind.to_string(), id.to_string()));
     });
     support::show(
         &ui,

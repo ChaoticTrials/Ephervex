@@ -17,13 +17,16 @@ import { Outlined, Panel, Plate } from "components/surface.slint";
 import {
     AppButton,
     BusySpinner,
+    CheckRow,
     Chip,
     DraftBar,
     EmptyState,
     FavoriteToggle,
+    FieldCaption,
     FilterChip,
     FocusEdge,
     IconButton,
+    InfoBanner,
     InlineToggle,
     KeyboardFocus,
     LabeledToggle,
@@ -61,8 +64,9 @@ import {
 import { ServerFiles, ServerCommandInput } from "workspace/server-tools.slint";
 import { ServerStatisticsCard } from "workspace/server-statistics.slint";
 import { ModBrowser } from "workspace/mod-browser.slint";
-import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint";
+import { GuiI18n, NameRules, PropertyRules, ServerHints, ServerPackRules } from "globals.slint";
 import { HomePage } from "home/home-page.slint";
+import { ServerPackZone } from "components/server-pack-zone.slint";
 import { CaseSurface } from "workspace/case.slint";
 import { StorageCard } from "home/storage-card.slint";
 import { HostActions } from "workspace/host-actions.slint";
@@ -654,7 +658,21 @@ export component AppWindow inherits Window {
     in-out property <bool> default-server-port-editing: false;
     callback save-server-port-default(bool, string);
     in-out property <bool> create-server-automatic-port: true;
-    in-out property <string> create-server-port: "25565";
+    // Whether a new server checks players against Mojang accounts by default.
+    in-out property <bool> default-server-online: false;
+    // The linked server asked for in the New Instance dialog: its port, empty
+    // for one chosen on creation, and whether it checks players.
+    in-out property <string> create-linked-port;
+    in-out property <bool> create-linked-online: root.default-server-online;
+    // The New Server dialog's account check, and the instance it is linked to:
+    // the choices (Standalone first), their ids, and which one is chosen.
+    in-out property <bool> create-server-online: root.default-server-online;
+    in-out property <[string]> server-link-labels: [GuiI18n.text("gui-standalone")];
+    in-out property <[string]> server-link-ids: [""];
+    in-out property <int> create-server-link-index: 0;
+    // Where an instance is among the choices above, 0 when it is not.
+    pure callback server-link-index(string) -> int;
+    in-out property <string> create-server-port: "";
     // The archive a server's content comes from, empty when the server is
     // built the usual way. Holds the full path because that is what the
     // backend needs; the modal shows only the file name.
@@ -907,7 +925,7 @@ export component AppWindow inherits Window {
     in-out property <string> pending-reveal-instance;
     callback install-mod(string, string, string, string);
     callback install-server-mod(string, string, string, string, [string]);
-    callback submit-create-instance(string, string, string, string, bool, string, bool, string, string);
+    callback submit-create-instance(string, string, string, string, bool, string, bool, string, string, string, bool);
     callback open-create-instance-modal();
     callback recompute-create-name();
     callback recompute-create-server-name();
@@ -928,7 +946,7 @@ export component AppWindow inherits Window {
     // No archive path: submission always uses whichever archive the
     // current analysis actually applies to, not this text.
     callback submit-import(string, bool, bool, string);
-    callback submit-create-server(string, string, string, string, string, bool, bool, string, string);
+    callback submit-create-server(string, string, string, string, string, bool, bool, string, string, bool);
     callback choose-server-pack();
     callback clear-server-pack();
     callback choose-instance-server-pack();
@@ -1214,7 +1232,9 @@ export component AppWindow inherits Window {
         root.create-server-pack = "";
         root.create-server-pack-name = "";
         root.create-server-automatic-port = !root.stored-server-port-custom;
-        root.create-server-port = root.stored-server-port;
+        root.create-server-port = root.stored-server-port-custom ? root.stored-server-port : "";
+        root.create-server-online = root.default-server-online;
+        root.create-server-link-index = 0;
         root.modal = "create-server";
     }
     // The New Server dialog for a server linked to one client.
@@ -1225,7 +1245,9 @@ export component AppWindow inherits Window {
         root.create-server-pack = "";
         root.create-server-pack-name = "";
         root.create-server-automatic-port = !root.stored-server-port-custom;
-        root.create-server-port = root.stored-server-port;
+        root.create-server-port = root.stored-server-port-custom ? root.stored-server-port : "";
+        root.create-server-online = root.default-server-online;
+        root.create-server-link-index = root.server-link-index(client-id);
         root.modal = "create-server";
     }
 
@@ -2758,13 +2780,28 @@ export component AppWindow inherits Window {
         background: Theme.scrim;
         TouchArea { clicked => { } }
         Plate {
-            width: root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
-            height: root.modal == "create-instance" ? min(860px, parent.height - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" || root.modal == "launcher-bundle" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
+            width: root.modal == "create-instance" || root.modal == "create-server" ? min(900px, parent.width - 80px) : root.modal == "microsoft-sign-in" ? min(300px + 90px * Theme.text-scale, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" ? min(820px, parent.width - 80px) : root.modal == "mod-plan" || root.modal == "mod-apply" || root.modal == "mod-remove" || root.modal == "mod-result" || root.modal == "mod-manage" || root.modal == "mod-acquire" || root.modal == "storage-cleanup" ? min(720px, parent.width - 80px) : min(620px, parent.width - 80px);
+            height: root.modal == "create-instance" ? min(860px, parent.height - 80px) : root.modal == "license" || root.modal == "third-party" || root.modal == "create-server" ? min(720px, parent.height - 80px) : root.modal == "import" || root.modal == "pane-host" ? min(620px, parent.height - 80px) : root.modal == "mod-plan" ? min(500px * Theme.text-scale + root.linked-targets.length * 68px + 14px + root.mod-plan-extra, parent.height - 80px) : root.modal == "mod-manage" || root.modal == "storage-cleanup" ? min(620px, parent.height - 80px) : root.modal == "mod-acquire" ? min(260px * Theme.text-scale + root.mod-acquisition-items.length * 64px, parent.height - 80px) : root.modal == "mod-apply" ? min(370px * Theme.text-scale + root.linked-targets.length * 68px + 14px, parent.height - 80px) : root.modal == "mod-result" ? min(300px * Theme.text-scale + root.linked-results.length * 68px + 14px, parent.height - 80px) : root.modal == "loader-change" ? 400px : root.modal == "mod-remove" ? min((root.linked-targets.length > 0 ? 424px : 300px) * Theme.text-scale + root.mod-removal-dependencies.length * 24px + root.linked-targets.length * 68px, parent.height - 80px) : root.modal == "eula" ? 440px : root.modal == "kill" ? 300px : root.modal == "delete-instance" || root.modal == "delete-server" ? min(root.delete-dialog-height, parent.height - 80px) : root.modal == "groups" ? min(420px, parent.height - 80px) : root.modal == "rename" || root.modal == "launcher-bundle" ? min(modal-body.preferred-height, parent.height - 80px) : root.modal == "snapshot-create" || root.modal == "snapshot-restore" || root.modal == "snapshot-rename" || root.modal == "snapshot-delete" ? 330px : root.modal == "mod-impact" ? min(300px * Theme.text-scale + (root.mod-impact-breaks.length + root.mod-impact-degrades.length + root.mod-impact-unknown.length + root.mod-impact-unidentifiable.length + root.mod-requires-disabled.length + root.mod-requires-absent.length + root.mod-requires-incompatible.length) * 24px, parent.height - 80px) : root.modal == "delete-mod" ? 320px : root.modal == "mod-stand-in" ? min(340px * Theme.text-scale, parent.height - 80px) : root.modal == "remove-java-runtime" ? (root.pending-java-pinning == "" && root.pending-java-pins-known ? 320px : 320px + 66px * Theme.text-scale) : root.modal == "mod-clash" ? 380px : root.modal == "absent-mods" ? min(250px + root.absent-mods.length * 22px, parent.height - 80px) : root.modal == "make-persistent" ? min(290px + root.promote-servers.length * 28px, parent.height - 80px) : root.modal == "open-pack-link" ? 300px : root.modal == "theme-problems" ? min(260px * Theme.text-scale + root.theme-problems.length * 44px, parent.height - 80px) : root.modal == "create-server" ? min((root.create-server-client-id == "" ? 640px : 535px) + (root.create-server-client-id == "" && root.create-server-loader != "Vanilla" ? 44px : 0px) + (root.create-server-pack != "" && root.create-server-pack-note != "" ? 44px : 0px), parent.height - 80px) : 570px;
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             radius: Theme.dialog-radius;
             lift: Theme.shadow-offset-dialog;
             fill: Theme.elevated;
+            // A header in the color of what is being made, for the dialogs
+            // that make something.
+            if root.modal == "create-instance" || root.modal == "create-server" : Rectangle {
+                x: Theme.strong-border-width;
+                y: Theme.strong-border-width;
+                width: parent.width - 2 * Theme.strong-border-width;
+                height: 22px + title-row.preferred-height + 13px - Theme.strong-border-width;
+                clip: true;
+                Rectangle {
+                    width: parent.width;
+                    height: parent.height + Theme.dialog-radius;
+                    border-radius: Theme.dialog-radius;
+                    background: root.modal == "create-server" ? Theme.state-stopped : Theme.background;
+                }
+            }
             modal-body := VerticalLayout { padding: 22px; spacing: 13px;
                 title-row := HorizontalLayout { cross-axis-alignment: center; spacing: 12px; // A name or a version is long and unpredictable, so those titles stay in the body face and elide.
                     property <string> title-text: root.modal == "pane-host" ? GuiI18n.text("gui-modal-pane-host") : root.modal == "microsoft-sign-in" ? GuiI18n.text("gui-modal-microsoft-sign-in") : root.modal == "create-instance" ? GuiI18n.text("gui-modal-new-instance") : root.modal == "import" ? GuiI18n.text("gui-modal-import") : root.modal == "create-server" ? (root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server") : GuiI18n.text("gui-modal-new-server")) : root.modal == "mod-plan" ? GuiI18n.text("gui-modal-install-mod") : root.modal == "mod-manage" ? GuiI18n.text("gui-modal-manage-mod") : root.modal == "mod-acquire" ? GuiI18n.text("gui-modal-mod-acquire") : root.modal == "loader-change" ? GuiI18n.text("gui-modal-change-loader") : root.modal == "mod-remove" ? GuiI18n.text("gui-modal-remove-mod") : root.modal == "mod-apply" ? GuiI18n.text("gui-modal-apply-mod") : root.modal == "mod-result" ? GuiI18n.text("gui-modal-mod-result") : root.modal == "eula" ? GuiI18n.text("gui-server-eula") : root.modal == "kill" ? GuiI18n.text("gui-modal-force-kill") : root.modal == "delete-instance" ? GuiI18n.text("gui-delete-instance") : root.modal == "delete-server" ? GuiI18n.text("gui-delete-server") : root.modal == "launcher-bundle" ? GuiI18n.text("gui-launcher-bundle-save-title") : root.modal == "groups" ? GuiI18n.text("gui-modal-groups") : root.modal == "rename" ? (root.pending-action-kind == "new-group" ? GuiI18n.text("gui-modal-new-group") : GuiI18n.text("gui-modal-rename")) : root.modal == "snapshot-create" ? GuiI18n.text("gui-snapshot-create") : root.modal == "snapshot-restore" ? GuiI18n.text("gui-snapshot-restore") : root.modal == "snapshot-rename" ? GuiI18n.text("gui-snapshot-rename") : root.modal == "snapshot-delete" ? GuiI18n.text("gui-snapshot-delete") : root.modal == "mod-impact" ? GuiI18n.value(root.mod-impact-enabling ? "gui-mod-impact-enable-title" : "gui-mod-impact-disable-title", root.mod-impact-name) : root.modal == "delete-mod" ? GuiI18n.text("gui-modal-delete-mod") : root.modal == "mod-stand-in" ? GuiI18n.text("gui-modal-mod-stand-in") : root.modal == "remove-java-runtime" ? GuiI18n.text("gui-java-remove-runtime-title") : root.modal == "storage-cleanup" ? GuiI18n.text("gui-storage-cleanup-title") : root.modal == "mod-clash" ? GuiI18n.text("gui-modal-mod-clash") : root.modal == "absent-mods" ? GuiI18n.text("gui-modal-absent-mods") : root.modal == "make-persistent" ? GuiI18n.text("gui-make-persistent") : root.modal == "open-pack-link" ? GuiI18n.text("gui-open-pack-link") : root.modal == "theme-problems" ? GuiI18n.text("gui-modal-theme-problems") : root.modal == "license" ? GuiI18n.text("gui-modal-apache-license") : root.third-party-open >= 0 ? root.third-party-packages[root.third-party-open].name + " " + root.third-party-packages[root.third-party-open].version + " | " + root.third-party-packages[root.third-party-open].license : GuiI18n.text("gui-third-party-licenses"); property <bool> dynamic-title: root.modal == "mod-impact" || (root.modal == "third-party" && root.third-party-open >= 0); if !title-row.dynamic-title : DisplayHeading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } if title-row.dynamic-title : Heading { text: title-row.title-text; font-size: Theme.modal-title-size; overflow: elide; horizontal-stretch: 1; } IconButton { icon: @image-url("../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-close"); clicked => { if root.modal == "import" { root.close-import-modal(); } else if root.modal == "mod-stand-in" { root.answer-mod-stand-in(root.mod-stand-in-id, false); } else { if root.modal == "mod-plan" { root.abandon-browser-install(); } if root.modal == "mod-acquire" { root.cancel-mod-acquisition(root.mod-acquisition-id); } if root.modal == "open-pack-link" { root.cancel-pack-link(); } root.modal = ""; root.modal-error = ""; } } } }
@@ -2776,85 +2813,144 @@ export component AppWindow inherits Window {
                     viewport-width: self.visible-width;
                     VerticalLayout {
                         alignment: start;
-                        spacing: 10px;
+                        spacing: 14px;
                         padding-left: Theme.lift-room;
                         padding-top: Theme.lift-room;
                         padding-right: Theme.shadow-room;
                         padding-bottom: Theme.shadow-room;
-                        BodyText { text: GuiI18n.text("gui-create-instance-detail"); wrap: word-wrap; }
-                        FieldLabel { text: GuiI18n.text("gui-name"); }
-                        TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); }
-                        FieldLabel { text: GuiI18n.text("gui-issue-link-optional"); }
-                        TextField { text <=> root.create-issue-link; placeholder: GuiI18n.text("gui-issue-link-placeholder"); accessible-name: GuiI18n.text("gui-issue-link"); }
-                        FieldLabel { text: GuiI18n.text("gui-minecraft-release"); }
+                        SectionHeading { title: GuiI18n.text("gui-create-basics"); }
                         HorizontalLayout {
-                            spacing: 8px;
-                            ValueComboBox {
-                                horizontal-stretch: 1;
-                                label: GuiI18n.text("gui-minecraft-release");
-                                model: root.minecraft-releases;
-                                value: root.create-minecraft;
-                                selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); }
+                            spacing: 16px;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-name"); note: GuiI18n.text("gui-create-name-note"); }
+                                TextField { text <=> root.create-name; placeholder: root.create-name-suggestion; accessible-name: GuiI18n.text("gui-name"); }
                             }
-                            FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; hint: GuiI18n.text("gui-hint-choose-minecraft-release"); toggled => { root.toggle-favorite-version(root.create-minecraft); } }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-issue-link"); note: GuiI18n.text("gui-create-optional"); }
+                                TextField { text <=> root.create-issue-link; placeholder: GuiI18n.text("gui-issue-link-placeholder"); accessible-name: GuiI18n.text("gui-issue-link-optional"); }
+                            }
                         }
-                        FieldLabel { text: GuiI18n.text("gui-loader"); }
-                        ValueComboBox {
-                            label: GuiI18n.text("gui-loader");
-                            model: root.create-loaders;
-                            value: root.create-loader;
-                            selected(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); }
-                        }
-                        if root.create-loader != "Vanilla" : ValueComboBox {
-                            label: GuiI18n.text("gui-loader-version-placeholder");
-                            model: root.create-loader-versions;
-                            value: root.create-loader-version;
-                            selected(value) => { root.create-loader-version = value; }
-                            changed value => { root.recompute-create-name(); }
-                        }
-                        FieldLabel { text: GuiI18n.text("gui-storage"); }
                         HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            padding-right: Theme.shadow-room;
-                            FilterChip { text: GuiI18n.text("gui-temporary"); selected: !root.create-persistent; clicked => { root.create-persistent = false; } }
-                            FilterChip { text: GuiI18n.text("gui-persistent"); selected: root.create-persistent; clicked => { root.create-persistent = true; } }
+                            spacing: 16px;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-minecraft"); note: GuiI18n.text("gui-create-favorite-note"); }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    ValueComboBox {
+                                        horizontal-stretch: 1;
+                                        label: GuiI18n.text("gui-minecraft-release");
+                                        model: root.minecraft-releases;
+                                        value: root.create-minecraft;
+                                        selected(value) => { root.create-minecraft = value; root.create-loader-version = ""; root.create-loader-versions = []; root.minecraft-selection-changed("client", value); if root.create-loader != "Vanilla" { root.request-loader-catalog("client", root.create-loader, value); } root.recompute-create-name(); }
+                                    }
+                                    FavoriteToggle { version: root.create-minecraft; favorite: root.create-minecraft-favorite; enabled: root.create-minecraft != ""; hint: GuiI18n.text("gui-hint-choose-minecraft-release"); toggled => { root.toggle-favorite-version(root.create-minecraft); } }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-loader"); }
+                                HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                                    SegmentedChoice {
+                                        horizontal-stretch: 1;
+                                        accessible-name: GuiI18n.text("gui-loader");
+                                        options: root.create-loaders;
+                                        current-value: root.create-loader;
+                                        chosen(value) => { root.create-loader = value; root.create-loader-version = ""; root.create-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("client", value, root.create-minecraft); } root.recompute-create-name(); }
+                                    }
+                                }
+                            }
                         }
-                        BodyText { text: root.create-persistent ? GuiI18n.text("gui-persistent-root") : GuiI18n.text("gui-temporary-root"); color: Theme.text-muted; wrap: word-wrap; }
-                        InlineToggle {
-                            label: GuiI18n.text("gui-create-with-server");
-                            checked: root.create-linked-server;
-                            toggled(value) => { root.create-linked-server = value; }
+                        HorizontalLayout {
+                            spacing: 16px;
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-loader-build"); note: GuiI18n.text("gui-create-build-note"); }
+                                ValueComboBox {
+                                    label: GuiI18n.text("gui-loader-version-placeholder");
+                                    enabled: root.create-loader != "Vanilla";
+                                    model: root.create-loader-versions;
+                                    value: root.create-loader-version;
+                                    selected(value) => { root.create-loader-version = value; }
+                                    changed value => { root.recompute-create-name(); }
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-storage"); }
+                                HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                                    SegmentedChoice {
+                                        horizontal-stretch: 1;
+                                        accessible-name: GuiI18n.text("gui-storage");
+                                        options: [GuiI18n.text("gui-temporary"), GuiI18n.text("gui-persistent")];
+                                        current: root.create-persistent ? 1 : 0;
+                                        selected(index) => { root.create-persistent = index == 1; }
+                                    }
+                                }
+                            }
                         }
-                        if root.create-linked-server : FieldLabel { text: GuiI18n.text("gui-linked-server-name"); }
-                        if root.create-linked-server : TextField {
-                            text <=> root.create-linked-server-name;
-                            placeholder: NameRules.linked-server-name(root.create-name != "" ? root.create-name : root.create-name-suggestion);
-                            accessible-name: GuiI18n.text("gui-linked-server-name");
+                        SectionHeading { title: GuiI18n.text("gui-linked-server-heading"); detail: GuiI18n.text("gui-create-optional"); }
+                        HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                            CheckRow {
+                                label: GuiI18n.text("gui-create-with-server");
+                                note: GuiI18n.text("gui-create-with-server-note");
+                                checked: root.create-linked-server;
+                                toggled(value) => { root.create-linked-server = value; }
+                            }
                         }
-                        if root.create-linked-server : FieldLabel { text: GuiI18n.text("gui-server-pack"); }
-                        if root.create-linked-server : BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; }
                         if root.create-linked-server : HorizontalLayout {
-                            spacing: 8px;
-                            alignment: start;
-                            AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-instance-server-pack(); } }
-                            if root.create-instance-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-instance-server-pack(); } }
-                            if root.create-instance-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.create-instance-server-pack-name; overflow: elide; } }
+                            spacing: 16px;
+                            VerticalLayout { horizontal-stretch: 2; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-linked-server-name"); }
+                                TextField {
+                                    text <=> root.create-linked-server-name;
+                                    placeholder: NameRules.linked-server-name(root.create-name != "" ? root.create-name : root.create-name-suggestion);
+                                    accessible-name: GuiI18n.text("gui-linked-server-name");
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-port"); note: GuiI18n.text("gui-create-port-note"); }
+                                TextField {
+                                    text <=> root.create-linked-port;
+                                    placeholder: root.stored-server-port-custom ? root.stored-server-port : "25565";
+                                    input-type: InputType.number;
+                                    invalid: root.create-linked-port != "" && PropertyRules.port-error(root.create-linked-port) != "";
+                                    accessible-name: GuiI18n.text("gui-port");
+                                }
+                            }
+                            VerticalLayout { horizontal-stretch: 2; spacing: 4px; alignment: start;
+                                FieldCaption { label: GuiI18n.text("gui-accounts"); }
+                                HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                                    SegmentedChoice {
+                                        horizontal-stretch: 1;
+                                        accessible-name: GuiI18n.text("gui-accounts");
+                                        options: [GuiI18n.text("gui-accounts-online"), GuiI18n.text("gui-accounts-offline")];
+                                        current: root.create-linked-online ? 0 : 1;
+                                        selected(index) => { root.create-linked-online = index == 0; }
+                                    }
+                                }
+                            }
+                        }
+                        if root.create-linked-server : ServerPackZone {
+                            file: root.create-instance-server-pack;
+                            file-name: root.create-instance-server-pack-name;
+                            browse => { root.choose-instance-server-pack(); }
+                            clear => { root.clear-instance-server-pack(); }
                         }
                     }
                     }
                     // Outside the form, so a refusal is seen however far it is scrolled.
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
+                    InfoBanner {
+                        text: GuiI18n.values(root.create-persistent ? "gui-create-summary-persistent" : "gui-create-summary-temporary", root.create-minecraft, root.create-loader == "Vanilla" || root.create-loader-version == "" ? root.create-loader : root.create-loader + " " + root.create-loader-version);
+                    }
                     ActionRow {
                             Rectangle { horizontal-stretch: 1; }
                             AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } }
                             AppButton {
                                 text: GuiI18n.text("gui-create-instance");
+                                icon: @image-url("../../../assets/icons/add.svg");
                                 tone: "primary";
                                 enabled: root.minecraft-releases.length > 0 && (root.create-name != "" || root.create-name-suggestion != "") && root.create-minecraft != "" && (root.create-loader == "Vanilla" || root.create-loader-version != "");
                                 hint: root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : root.create-name == "" && root.create-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : GuiI18n.text("gui-hint-choose-loader-version");
                                 clicked => {
-                                    root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent, root.create-issue-link, root.create-linked-server, root.create-linked-server-name, root.create-instance-server-pack);
+                                    root.submit-create-instance(root.create-name != "" ? root.create-name : root.create-name-suggestion, root.create-minecraft, root.create-loader, root.create-loader-version, root.create-persistent, root.create-issue-link, root.create-linked-server, root.create-linked-server-name, root.create-instance-server-pack, root.create-linked-port, root.create-linked-online);
                                 }
                             }
                     }
@@ -3047,9 +3143,130 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.modal == "create-server" : VerticalLayout { spacing: 10px;
-                    ScrollView { vertical-stretch: 1; viewport-width: self.visible-width; VerticalLayout { padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room; spacing: 10px; alignment: start; BodyText { text: root.create-server-client-id != "" ? GuiI18n.text("gui-create-linked-server-detail") : GuiI18n.text("gui-create-standalone-server-detail"); wrap: word-wrap; } Text { text: GuiI18n.text("gui-name"); color: Theme.text-secondary; font-size: Theme.label-size; } TextField { text <=> root.create-server-name; placeholder: root.create-server-name-suggestion; accessible-name: GuiI18n.text("gui-name"); } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-minecraft-release"); color: Theme.text-secondary; font-size: Theme.label-size; } if root.create-server-client-id == "" : ValueComboBox { label: GuiI18n.text("gui-minecraft-release"); model: root.minecraft-releases; value: root.create-server-minecraft; selected(value) => { root.create-server-minecraft = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; root.minecraft-selection-changed("server", value); if root.create-server-loader != "Vanilla" { root.request-loader-catalog("server", root.create-server-loader, value); } root.recompute-create-server-name(); } } if root.create-server-client-id == "" : Text { text: GuiI18n.text("gui-loader"); color: Theme.text-secondary; font-size: Theme.label-size; } if root.create-server-client-id == "" : ValueComboBox { label: GuiI18n.text("gui-loader"); model: root.create-server-loaders; value: root.create-server-loader; selected(value) => { root.create-server-loader = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("server", value, root.create-server-minecraft); } root.recompute-create-server-name(); } } if root.create-server-client-id == "" && root.create-server-loader != "Vanilla" : ValueComboBox { label: GuiI18n.text("gui-loader-version-placeholder"); model: root.create-server-loader-versions; value: root.create-server-loader-version; selected(value) => { root.create-server-loader-version = value; } changed value => { root.recompute-create-server-name(); } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-store-persistently"); } Toggle { checked <=> root.create-server-persistent; } } HorizontalLayout { BodyText { text: GuiI18n.text("gui-port-automatic"); } Toggle { checked <=> root.create-server-automatic-port; accessible-name: GuiI18n.text("gui-port-automatic"); } } if root.create-server-automatic-port : BodyText { text: GuiI18n.text("gui-port-automatic-detail"); color: Theme.text-muted; wrap: word-wrap; } if !root.create-server-automatic-port : HorizontalLayout { FieldLabel { text: GuiI18n.text("gui-port-custom"); } TextField { accessible-label: GuiI18n.text("gui-port-custom"); text <=> root.create-server-port; input-type: InputType.number; width: 150px; } } Text { text: GuiI18n.text("gui-server-pack"); color: Theme.text-secondary; font-size: Theme.label-size; } BodyText { text: GuiI18n.text("gui-server-pack-detail"); color: Theme.text-muted; wrap: word-wrap; } HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); clicked => { root.choose-server-pack(); } } if root.create-server-pack != "" : AppButton { text: GuiI18n.text("gui-clear"); accessible-name: GuiI18n.text("gui-clear-server-pack"); clicked => { root.clear-server-pack(); } } if root.create-server-pack != "" : VerticalLayout { alignment: center; horizontal-stretch: 1; BodyText { text: root.create-server-pack-name; overflow: elide; } } } if root.create-server-pack != "" && root.create-server-pack-note != "" : BodyText { text: root.create-server-pack-note; color: Theme.text-muted; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-eula-create-warning"); color: Theme.warning; wrap: word-wrap; } } }
+                    ScrollView {
+                        vertical-stretch: 1;
+                        viewport-width: self.visible-width;
+                        VerticalLayout {
+                            padding-left: Theme.lift-room;
+                            padding-top: Theme.lift-room;
+                            padding-right: Theme.shadow-room;
+                            padding-bottom: Theme.shadow-room;
+                            spacing: 14px;
+                            alignment: start;
+                            VerticalLayout { spacing: 4px;
+                                FieldCaption { label: GuiI18n.text("gui-name"); }
+                                TextField { text <=> root.create-server-name; placeholder: root.create-server-name-suggestion; accessible-name: GuiI18n.text("gui-name"); }
+                            }
+                            if root.create-server-client-id == "" : HorizontalLayout {
+                                spacing: 16px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-minecraft"); }
+                                    ValueComboBox {
+                                        label: GuiI18n.text("gui-minecraft-release");
+                                        model: root.minecraft-releases;
+                                        value: root.create-server-minecraft;
+                                        selected(value) => { root.create-server-minecraft = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; root.minecraft-selection-changed("server", value); if root.create-server-loader != "Vanilla" { root.request-loader-catalog("server", root.create-server-loader, value); } root.recompute-create-server-name(); }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-loader"); }
+                                    HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                                        SegmentedChoice {
+                                            horizontal-stretch: 1;
+                                            accessible-name: GuiI18n.text("gui-loader");
+                                            options: root.create-server-loaders;
+                                            current-value: root.create-server-loader;
+                                            chosen(value) => { root.create-server-loader = value; root.create-server-loader-version = ""; root.create-server-loader-versions = []; if value != "Vanilla" { root.request-loader-catalog("server", value, root.create-server-minecraft); } root.recompute-create-server-name(); }
+                                        }
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 16px;
+                                if root.create-server-client-id == "" : VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-loader-build"); note: GuiI18n.text("gui-create-build-note"); }
+                                    ValueComboBox {
+                                        label: GuiI18n.text("gui-loader-version-placeholder");
+                                        enabled: root.create-server-loader != "Vanilla";
+                                        model: root.create-server-loader-versions;
+                                        value: root.create-server-loader-version;
+                                        selected(value) => { root.create-server-loader-version = value; }
+                                        changed value => { root.recompute-create-server-name(); }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-port"); note: GuiI18n.text("gui-create-port-note"); }
+                                    TextField {
+                                        text <=> root.create-server-port;
+                                        placeholder: root.stored-server-port-custom ? root.stored-server-port : "25565";
+                                        input-type: InputType.number;
+                                        invalid: root.create-server-port != "" && PropertyRules.port-error(root.create-server-port) != "";
+                                        accessible-name: GuiI18n.text("gui-port");
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 16px;
+                                VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-accounts"); }
+                                    HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
+                                        SegmentedChoice {
+                                            horizontal-stretch: 1;
+                                            accessible-name: GuiI18n.text("gui-accounts");
+                                            options: [GuiI18n.text("gui-accounts-online"), GuiI18n.text("gui-accounts-offline")];
+                                            current: root.create-server-online ? 0 : 1;
+                                            selected(index) => { root.create-server-online = index == 0; }
+                                        }
+                                    }
+                                }
+                                VerticalLayout { horizontal-stretch: 1; spacing: 4px; alignment: start;
+                                    FieldCaption { label: GuiI18n.text("gui-link-to-instance"); note: GuiI18n.text("gui-create-optional"); }
+                                    IndexComboBox {
+                                        label: GuiI18n.text("gui-link-to-instance");
+                                        model: root.server-link-labels;
+                                        index: root.create-server-link-index;
+                                        selected(index, value) => {
+                                            root.create-server-link-index = index;
+                                            root.create-server-client-id = root.server-link-ids[index];
+                                            if index == 0 { root.recompute-create-server-name(); } else { root.create-server-name-suggestion = NameRules.linked-server-name(value); }
+                                        }
+                                    }
+                                }
+                            }
+                            VerticalLayout { spacing: 4px;
+                                FieldCaption { label: GuiI18n.text("gui-storage"); }
+                                HorizontalLayout { padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room; alignment: start;
+                                    SegmentedChoice {
+                                        accessible-name: GuiI18n.text("gui-storage");
+                                        options: [GuiI18n.text("gui-temporary"), GuiI18n.text("gui-persistent")];
+                                        current: root.create-server-persistent ? 1 : 0;
+                                        selected(index) => { root.create-server-persistent = index == 1; }
+                                    }
+                                }
+                            }
+                            ServerPackZone {
+                                file: root.create-server-pack;
+                                file-name: root.create-server-pack-name;
+                                note: root.create-server-pack-note;
+                                browse => { root.choose-server-pack(); }
+                                clear => { root.clear-server-pack(); }
+                            }
+                            BodyText { text: GuiI18n.text("gui-eula-create-warning"); color: Theme.warning; wrap: word-wrap; }
+                        }
+                    }
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
-                    ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-create-server"); tone: "primary"; enabled: (root.create-server-name != "" || root.create-server-name-suggestion != "") && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))) && root.create-server-pack-conflict == ""; hint: root.create-server-name == "" && root.create-server-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : root.create-server-pack-conflict != "" ? root.create-server-pack-conflict : root.create-server-client-id == "" && root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-server-client-id == "" && root.create-server-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : GuiI18n.text("gui-hint-choose-loader-version"); clicked => { root.submit-create-server(root.create-server-name != "" ? root.create-server-name : root.create-server-name-suggestion, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-automatic-port, root.create-server-port, root.create-server-pack); } } }
+                    ActionRow {
+                        Rectangle { horizontal-stretch: 1; }
+                        AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } }
+                        AppButton {
+                            text: GuiI18n.text("gui-create-server");
+                            icon: @image-url("../../../assets/icons/server.svg");
+                            tone: "info";
+                            enabled: (root.create-server-name != "" || root.create-server-name-suggestion != "") && (root.create-server-client-id != "" || (root.minecraft-releases.length > 0 && root.create-server-minecraft != "" && (root.create-server-loader == "Vanilla" || root.create-server-loader-version != ""))) && root.create-server-pack-conflict == "";
+                            hint: root.create-server-name == "" && root.create-server-name-suggestion == "" ? GuiI18n.text("gui-hint-enter-name") : root.create-server-pack-conflict != "" ? root.create-server-pack-conflict : root.create-server-client-id == "" && root.minecraft-releases.length == 0 ? GuiI18n.text("gui-hint-minecraft-list-unavailable") : root.create-server-client-id == "" && root.create-server-minecraft == "" ? GuiI18n.text("gui-hint-choose-minecraft-release") : GuiI18n.text("gui-hint-choose-loader-version");
+                            clicked => { root.submit-create-server(root.create-server-name != "" ? root.create-server-name : root.create-server-name-suggestion, root.create-server-client-id, root.create-server-minecraft, root.create-server-loader, root.create-server-loader-version, root.create-server-persistent, root.create-server-port == "", root.create-server-port, root.create-server-pack, root.create-server-online); }
+                        }
+                    }
                 }
                 if root.modal == "mod-plan" : VerticalLayout { spacing: 12px; Heading { text: root.mod-plan-title + " " + root.mod-plan-version; font-size: Theme.section-size; } BodyText { text: root.mod-plan-kind == "server" ? GuiI18n.text("gui-server-mod-plan-compatible") : GuiI18n.text("gui-mod-plan-compatible"); wrap: word-wrap; } Rectangle { height: 116px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background; VerticalLayout { padding: 12px; spacing: 5px; BodyText { text: GuiI18n.count("gui-mod-plan-install", root.mod-plan-install-count); color: Theme.text; } BodyText { text: GuiI18n.count("gui-mod-plan-required", root.mod-plan-dependency-count); } BodyText { text: GuiI18n.count("gui-mod-plan-existing", root.mod-plan-existing-count); } BodyText { text: GuiI18n.count("gui-mod-plan-optional", root.mod-plan-optional-count); } } } if root.mod-plan-warning-count > 0 : BodyText { text: GuiI18n.count("gui-mod-plan-warnings", root.mod-plan-warning-count); color: Theme.warning; wrap: word-wrap; }
                     if root.mod-plan-unstated.length > 0 : VerticalLayout { spacing: 4px;

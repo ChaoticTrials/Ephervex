@@ -1,0 +1,46 @@
+// Where the files of a server's own pack are named: dropped on the window or
+// chosen here, then shown with a way to take them back out.
+
+import { AppButton } from "controls.slint";
+import { Plate } from "surface.slint";
+import { BodyText } from "text.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+export component ServerPackZone inherits Rectangle {
+    // The chosen archive's path and file name, empty before one is chosen.
+    in property <string> file;
+    in property <string> file-name;
+    // What Ephervex found out about the archive, empty when nothing.
+    in property <string> note;
+    callback browse();
+    callback clear();
+    height: body.preferred-height + 2 * Theme.strong-border-width;
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.card-radius;
+        fill: root.file == "" ? Theme.selection-card : Theme.field;
+    }
+    body := HorizontalLayout {
+        padding: 14px;
+        spacing: 12px;
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+            if root.file == "" : BodyText { text: GuiI18n.text("gui-server-pack-drop"); color: Theme.text; font-weight: 700; wrap: word-wrap; }
+            if root.file == "" : BodyText { text: GuiI18n.text("gui-server-pack-drop-detail"); color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
+            if root.file != "" : BodyText { text: root.file-name; color: Theme.text; font-family: Theme.mono-family; font-weight: 700; overflow: elide; }
+            if root.file != "" && root.note != "" : BodyText { text: root.note; color: Theme.success; font-size: Theme.label-size; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            padding-right: Theme.shadow-room;
+            padding-bottom: Theme.shadow-room;
+            if root.file == "" : AppButton { text: GuiI18n.text("gui-browse"); accessible-name: GuiI18n.text("gui-choose-server-pack"); compact: true; clicked => { root.browse(); } }
+            if root.file != "" : AppButton { text: GuiI18n.text("gui-server-pack-remove"); accessible-name: GuiI18n.text("gui-clear-server-pack"); icon: @image-url("../../../../assets/icons/trash.svg"); compact: true; clicked => { root.clear(); } }
+        }
+    }
+}
