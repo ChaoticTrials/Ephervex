@@ -53,8 +53,11 @@ bytecode or against a file the game itself wrote, it says so:
   `70.0` - confirmed against real files from 26.1.2 and 26.2, which store
   `fov:0.5` for ninety degrees;
 * 1.16.5 writes enum values bare, confirmed from its save path, which prints
-  `renderClouds:true` from a string literal;
+  `renderClouds:true` from a string literal; 1.17 through 1.18.2 pass the
+  cloud status through a reader and writer lambda that name the same three
+  tokens, and the writer's output is printed as it stands;
 * releases that keep their options in `OptionInstance` encode each one with its
   codec and print the resulting JSON, so a value whose JSON form is a string
   arrives quoted - `renderClouds:"true"`, `mainHand:"right"` - confirmed
-  against real 26.1.2 and 26.2 files.
+  against real 26.1.2 and 26.2 files, and against the save path of 1.20.1,
+  which encodes each option with its codec through `JsonOps` before printing it.

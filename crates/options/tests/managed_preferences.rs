@@ -195,6 +195,10 @@ fn an_enumeration_is_written_in_the_form_the_exact_release_stores() {
     for (version, expected) in [
         ("1.12.2", "renderClouds:fast"),
         ("1.16.5", "renderClouds:fast"),
+        ("1.17.1", "renderClouds:fast"),
+        ("1.18.2", "renderClouds:fast"),
+        ("1.19.2", "renderClouds:\"fast\""),
+        ("1.20.1", "renderClouds:\"fast\""),
         ("26.2", "renderClouds:\"fast\""),
     ] {
         assert_eq!(

@@ -29,6 +29,7 @@ from zipfile import BadZipFile, ZipFile
 
 from file_io import stable_json
 from release_identity import RELEASE_PATTERN, is_release, version_key
+from token_lambdas import Routine, SwitchMap, prove_enum_tokens
 
 TOOL_VERSION = "2.0.0"
 PRUNE = {".git", ".gradle", "build", "cache", "caches", "node_modules", "minecraft-options-research"}
@@ -361,6 +362,8 @@ MEMBER_RE = re.compile(r"^  (?:\S.*\(.*\)|static \{\})")
 # Only a mnemonic starts an instruction. The `value: target` rows inside a
 # switch table also begin with an offset-like number, and are not instructions.
 CODE_RE = re.compile(r"^\s{4,}(\d+):\s+([A-Za-z]\S*)\s*(.*)$")
+SWITCH_CASE_RE = re.compile(r"^\s+(-?\d+):\s*(\d+)\s*$")
+SWITCH_DEFAULT_RE = re.compile(r"^\s+default:\s*(\d+)\s*$")
 COMMENT_RE = re.compile(r"//\s*(.*)$")
 
 M_FIELD = re.compile(r'^Field (?:"?([\w/$\[\];]+)"?\.)?([\w$]+):(\S+)$')
@@ -447,10 +450,13 @@ def runs_unconditionally(insns: list[Insn]) -> bool:
 
 
 class Member:
-    __slots__ = ("signature", "name", "insns", "by_offset")
+    __slots__ = ("signature", "name", "insns", "by_offset", "switches")
 
-    def __init__(self, signature: str, insns: list[Insn]) -> None:
+    def __init__(self, signature: str, insns: list[Insn],
+                 switches: dict[int, tuple[dict[int, int], int]] | None = None) -> None:
         self.signature = signature
+        # Offset of each switch instruction -> (case value -> target offset, default target).
+        self.switches = switches or {}
         head = signature.split("(")[0].strip()
         self.name = head.split()[-1] if head else signature
         self.insns = insns
@@ -462,23 +468,33 @@ def parse_members(text: str) -> list[Member]:
     members: list[Member] = []
     signature: str | None = None
     insns: list[Insn] = []
+    switches: dict[int, tuple[dict[int, int], int]] = {}
+    table: tuple[int, dict[int, int]] | None = None
     # javap prints U+2028, U+2029 and similar raw inside a string constant, so only "\n" ends a line.
     for line in text.split("\n"):
         if MEMBER_RE.match(line):
             if signature is not None and insns:
-                members.append(Member(signature, insns))
-            signature, insns = line.strip().rstrip(";"), []
+                members.append(Member(signature, insns, switches))
+            signature, insns, switches, table = line.strip().rstrip(";"), [], {}, None
             continue
         m = CODE_RE.match(line)
         if not m:
+            if table is not None:
+                case, default = SWITCH_CASE_RE.match(line), SWITCH_DEFAULT_RE.match(line)
+                if case:
+                    table[1][int(case.group(1))] = int(case.group(2))
+                elif default:
+                    switches[table[0]] = (table[1], int(default.group(1)))
+                    table = None
             continue
         rest = m.group(3)
         cm = COMMENT_RE.search(rest)
         comment = cm.group(1) if cm else ""
         arg = (rest[:cm.start()] if cm else rest).strip()
         insns.append(Insn(int(m.group(1)), m.group(2), arg, comment, line.strip()))
+        table = (int(m.group(1)), {}) if m.group(2) in SWITCH_OPS else None
     if signature is not None and insns:
-        members.append(Member(signature, insns))
+        members.append(Member(signature, insns, switches))
     return members
 
 
@@ -724,13 +740,72 @@ def lambda_arithmetic(members: list[Member], owner: str, handle_owner: str, name
     """
     if handle_owner != owner:
         return None
+    found = find_method(members, name, descriptor)
+    if found is None or not is_plain_arithmetic(found):
+        return None
+    return arithmetic_chain(found.insns)
+
+
+def find_method(members: list[Member], name: str, descriptor: str) -> Member | None:
+    """The one member with this name and descriptor, or None when it is absent or ambiguous."""
     params, ret = split_descriptor(descriptor)
     wanted = [java_type(p) for p in params]
     want_ret = java_type(ret)
     matches = [m for m in members if m.name == name and member_types(m) == (wanted, want_ret)]
-    if len(matches) != 1 or not is_plain_arithmetic(matches[0]):
-        return None
-    return arithmetic_chain(matches[0].insns)
+    return matches[0] if len(matches) == 1 else None
+
+
+class ClassWorld:
+    """The methods, lambda bootstraps and switch maps of a JAR's classes, as `token_lambdas` looks them up."""
+
+    def __init__(self, dis: Disassembler, loaded: dict[str, list[Member]] | None = None) -> None:
+        self.dis = dis
+        self.loaded = dict(loaded or {})
+        self.bootstraps: dict[str, dict[int, tuple[str, str, str]]] = {}
+
+    def members(self, class_name: str) -> list[Member]:
+        if class_name not in self.loaded:
+            self.loaded[class_name] = parse_members(self.dis.get(class_name))
+        return self.loaded[class_name]
+
+    def routine(self, owner: str, name: str, descriptor: str) -> Routine | None:
+        found = find_method(self.members(owner), name, descriptor)
+        if found is None:
+            return None
+        return Routine(found.insns, found.switches, "static" in found.signature.split("(")[0].split())
+
+    def bootstrap(self, owner: str, index: int) -> tuple[str, str, str] | None:
+        if owner not in self.bootstraps:
+            self.bootstraps[owner] = bootstrap_targets(self.dis.verbose(owner))
+        return self.bootstraps[owner].get(index)
+
+    def switch_map(self, owner: str, field: str) -> SwitchMap | None:
+        """The case number each constant selects in one `$SwitchMap` array.
+
+        javac fills the array in the synthetic class's initializer, one
+        `array[Enum.CONSTANT.ordinal()] = case` store per constant the switch names.
+        """
+        clinit = next((m for m in self.members(owner) if m.signature.startswith("static {}")), None)
+        if clinit is None:
+            return None
+        enum_class: str | None = None
+        cases: dict[str, int] = {}
+        for i in range(len(clinit.insns) - 4):
+            array, constant, ordinal, number, store = clinit.insns[i:i + 5]
+            target, picked, call = array.field(), constant.field(), ordinal.method()
+            if not (array.op == "getstatic" and target and target[1] == field and target[2] == "[I"
+                    and target[0] in (None, owner)):
+                continue
+            if not (constant.op == "getstatic" and picked and picked[0] and picked[2] == f"L{picked[0]};"
+                    and ordinal.op == "invokevirtual" and call and call[1:] == ("ordinal", "()I")
+                    and call[0] in (None, picked[0]) and const_int(number) is not None
+                    and store.op == "iastore"):
+                continue
+            if enum_class not in (None, picked[0]) or picked[1] in cases:
+                return None
+            enum_class = picked[0]
+            cases[picked[1]] = const_int(number)
+        return SwitchMap(enum_class, cases) if enum_class else None
 
 
 def java_type(descriptor: str) -> str:
@@ -1599,6 +1674,10 @@ VISITOR_TYPES = {"Z": ("boolean", "lowercase true/false"), "I": ("integer", "dec
                  "J": ("integer", "decimal integer")}
 
 
+TOKEN_PROOF_NOTE = ("the stored tokens are the ones the codec's writer produces, and its reader maps "
+                    "each back to the same constant")
+
+
 # Instructions that end the statement a visitor call belongs to: the store
 # that consumes its result, a discarded result, a return, or a branch.
 def ends_statement(op: str) -> bool:
@@ -1643,8 +1722,40 @@ def read_visitor_transform(record: dict[str, Any], pre: list[Insn], post: list[I
         record["transform_resolved"] = True
 
 
+def text_lambdas_fit(pair: list[tuple[str, str, str]], enum_class: str, wrapped: bool) -> bool:
+    """Whether a reader and writer lambda convert between this enum and text.
+
+    The reader takes the stored form and returns the enum, the writer the other
+    way round. The stored form is the text itself, or an `Either` holding it.
+    """
+    stored = "Lcom/mojang/datafixers/util/Either;" if wrapped else "Ljava/lang/String;"
+    enum = f"L{enum_class};"
+    reader, writer = pair
+    return split_descriptor(reader[2]) == ([stored], enum) and split_descriptor(writer[2]) == ([enum], stored)
+
+
+def visitor_text_lambdas(dis: Disassembler, owner: str | None, pre: list[Insn],
+                         enum_class: str) -> tuple[tuple[str, str, str], tuple[str, str, str]] | None:
+    """The reader and writer lambdas of `process(key, value, reader, writer)` for an enum, or None.
+
+    The two lambdas are the last two arguments, so they are the last two
+    instructions of the call's operands.
+    """
+    if not owner or len(pre) < 2 or any(ins.op != "invokedynamic" for ins in pre[-2:]):
+        return None
+    targets = bootstrap_targets(dis.verbose(owner))
+    pair = []
+    for ins in pre[-2:]:
+        m = M_INDY.match(ins.comment)
+        target = targets.get(int(m.group(1))) if m else None
+        if not target:
+            return None
+        pair.append(target)
+    return (pair[0], pair[1]) if text_lambdas_fit(pair, enum_class, wrapped=False) else None
+
+
 def extract_visitor(dis: Disassembler, members: list[Member],
-                    option_class: str | None) -> dict[str, dict[str, Any]]:
+                    option_class: str | None, owner: str | None = None) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for m in members:
         insns = m.insns
@@ -1710,8 +1821,16 @@ def extract_visitor(dis: Disassembler, members: list[Member],
                     record["type"] = "enum"
                     record["file_encoding"] = ("enum id integer" if form == "integer_id"
                                                else "enum serialized string token")
+                    lambdas = (visitor_text_lambdas(dis, owner, pre, enum_class)
+                               if info and shape == "custom_codec" else None)
+                    tokens = (prove_enum_tokens(ClassWorld(dis, {owner: members}), enum_class,
+                                                info["constants"], *lambdas, wrapped=False)
+                              if lambdas else None)
+                    if tokens:
+                        record["enum_token_map"] = tokens
+                        record.setdefault("notes", []).append(TOKEN_PROOF_NOTE)
                     if info:
-                        record["allowed_values"] = enum_domain(info, form)
+                        record["allowed_values"] = enum_domain(info, form, tokens)
                     else:
                         record["allowed_values"] = {"source_enum_class": enum_class,
                                                     "persisted_form": form, "values": None}
@@ -1750,6 +1869,7 @@ def extract_option_instances(dis: Disassembler, members: list[Member],
                              owner: str | None = None) -> dict[str, dict[str, Any]]:
     """Recover OptionInstance definitions keyed by the field they are stored in."""
     out: dict[str, dict[str, Any]] = {}
+    world = ClassWorld(dis, {owner: members}) if owner else None
     for m in members:
         insns = m.insns
         start = 0
@@ -1777,7 +1897,7 @@ def extract_option_instances(dis: Disassembler, members: list[Member],
             if translation is None:
                 continue
             first = next(j for j, x in enumerate(window) if x.string() == translation)
-            record = analyse_option_window(dis, window[first:], option_class, members, owner)
+            record = analyse_option_window(dis, window[first:], option_class, members, owner, world)
             record["translation_key"] = translation
             record["field"] = field
             out[field] = record
@@ -1803,6 +1923,26 @@ def xmap_targets(dis: Disassembler, before: list[Insn],
             return None
         pair.append(target)
     return pair
+
+
+def text_codec_shape(before: list[Insn]) -> str | None:
+    """How the codec in front of an `xmap` call carries text, judged from the two lambdas' operands.
+
+    `wrapped`: `Codec.either(Codec.BOOL, Codec.STRING)`, whose right side is the text.
+    `plain`: `Codec.STRING` itself. Anything else says nothing about where text sits.
+    """
+    def codec_field(ins: Insn, name: str) -> bool:
+        fld = ins.field()
+        return ins.op == "getstatic" and fld is not None and fld[:2] == ("com/mojang/serialization/Codec", name)
+
+    if len(before) >= 5 and codec_field(before[-5], "BOOL") and codec_field(before[-4], "STRING"):
+        either = before[-3].method()
+        if (before[-3].op == "invokestatic" and either
+                and either[:2] == ("com/mojang/serialization/Codec", "either")):
+            return "wrapped"
+    if len(before) >= 3 and codec_field(before[-3], "STRING"):
+        return "plain"
+    return None
 
 
 def is_enum_id_mapping(dis: Disassembler, pair: list[tuple[str, str, str]]) -> bool:
@@ -1898,7 +2038,8 @@ def slider_step(dis: Disassembler, before: list[Insn], members: list[Member] | N
 
 def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: str,
                          members: list[Member] | None = None,
-                         owner: str | None = None) -> dict[str, Any]:
+                         owner: str | None = None,
+                         world: ClassWorld | None = None) -> dict[str, Any]:
     record: dict[str, Any] = {"type": "unknown", "default": None, "numeric": None,
                               "allowed_values": None, "file_encoding": None,
                               "value_set": None, "codec": None, "notes": []}
@@ -1910,6 +2051,8 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
     xmap = False
     xmap_steps: list[list[dict[str, Any]]] = []
     xmap_unresolved = False
+    # The `xmap` calls no arithmetic or enum id explains, with the lambdas and codec shape of each.
+    unread_xmaps: list[tuple[list[tuple[str, str, str]] | None, str | None]] = []
     slider_xmap: list[Insn] | None = None
     slider_set: dict[str, Any] = {}
     stored_step: float | None = None
@@ -1938,6 +2081,7 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
                 xmap_steps.append(resolved)
             elif not (pair and is_enum_id_mapping(dis, pair)):
                 xmap_unresolved = True
+                unread_xmaps.append((pair, text_codec_shape(window[:idx])))
         # The slider's own mapping is recognized by its descriptor, because
         # obfuscated releases rename the method.
         if (ref and (ref[0] or "").startswith(option_class + "$") and value_set is not None
@@ -2055,6 +2199,7 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
     if enum_class and (value_set or {}).get("kind") == "enum":
         info = extract_enum(dis, enum_class)
         form = "unknown"
+        tokens: dict[str, str] | None = None
         if info:
             if enum_codec_field and enum_codec_field in info["codec_fields"]:
                 form = info["codec_fields"][enum_codec_field]["persisted_form"]
@@ -2063,13 +2208,25 @@ def analyse_option_window(dis: Disassembler, window: list[Insn], option_class: s
             if form == "unknown" and codec_kind in ("integer", "string"):
                 # The codec can also be assembled inline at the construction site.
                 form = "integer_id" if codec_kind == "integer" else "string_token"
-            record["allowed_values"] = enum_domain(info, form)
+            # An inline text codec names its tokens only inside the two lambdas of its `xmap`.
+            if owner and len(unread_xmaps) == 1 and not xmap_steps:
+                pair, shape = unread_xmaps[0]
+                if pair and shape and text_lambdas_fit(pair, enum_class, shape == "wrapped"):
+                    tokens = prove_enum_tokens(
+                        world or ClassWorld(dis, {owner: members} if members else None),
+                        enum_class, info["constants"], pair[0], pair[1], wrapped=shape == "wrapped")
+            if tokens:
+                form = "string_token"
+                xmap_unresolved = False
+                record["enum_token_map"] = tokens
+                record["notes"].append(TOKEN_PROOF_NOTE)
+            record["allowed_values"] = enum_domain(info, form, tokens)
             record["type"] = "enum"
             record["file_encoding"] = {"integer_id": "enum id integer",
                                        "string_token": "enum serialized string token"}.get(form, "enum, codec unresolved")
             record["enum_default_constant"] = enum_default_constant
             if enum_default_constant:
-                value = enum_persisted_value(info, enum_default_constant, form)
+                value = enum_persisted_value(info, enum_default_constant, form, tokens)
                 if value is not None:
                     default_value, default_conf = value, "high"
                 else:
@@ -2968,11 +3125,11 @@ def analyze_jar(path: Path, root: Path) -> dict[str, Any]:
                     "integer_id": "enum id integer",
                     "string_token": "enum serialized string token"}.get(form, "enum, codec unresolved")
         else:
-            visitor = extract_visitor(dis, members, option_class)
+            owner = roots[0] if len(roots) == 1 else None
+            visitor = extract_visitor(dis, members, option_class, owner)
             # Lambda handles and their bootstrap table belong to one class, so they can
             # only be followed when the members all come from a single root.
-            defs = (extract_option_instances(dis, members, option_class,
-                                             roots[0] if len(roots) == 1 else None)
+            defs = (extract_option_instances(dis, members, option_class, owner)
                     if option_class else {})
             for key, record in visitor.items():
                 merged = dict(record)

@@ -169,6 +169,7 @@ compiled into the binaries and are never fetched at build time. See
 | `official_sources.py` | Downloads from Mojang's published sources: https-only, SHA-1 verified, with validated identifiers and the shared version manifest cache |
 | `file_io.py` | Every file the scripts generate or cache is written through a temporary file in the same directory and renamed into place, so an interrupted run leaves the previous file. Damaged inputs are reported with their path |
 | `release_identity.py` | What counts as a release identifier, and how releases are ordered |
+| `token_lambdas.py` | Runs the reader and writer lambdas of an enum's text codec to prove which token each constant is stored as |
 | `dataset.py` | Turns analyzer output into the compatibility dataset, and validates it |
 | `preferences.py` | Turns the compatibility dataset (plus optional analyzer enrichment) into the bundled product preference catalog, and validates it |
 | `update.py` | The maintainer workflow: fetches, analyzes, folds into the compatibility dataset, and reports whether the product catalog needs review |
@@ -233,6 +234,14 @@ transform the generator cannot recognize as one of those, or one on a setting
 the game writes as an integer, becomes *unknown* here, at generation time. No
 expression is ever written into the dataset, so nothing downstream has to
 evaluate one.
+
+An enum stored as text has the tokens its codec writes. A release that gives the
+codec as an inline reader (text to constant) and writer (constant to text) hides
+them in string and ordinal switches, so `token_lambdas.py` runs both lambdas for
+every constant and accepts the tokens only when the reader returns the constant
+the writer was given. Text carried as `Codec.STRING` or as the right side of
+`Codec.either(Codec.BOOL, Codec.STRING)` is understood; a codec the evaluator
+cannot run to the end leaves the setting *unknown*.
 
 A family may also carry a `startup_preset`. From 1.21.11 the client applies a
 graphics preset right after loading `options.txt`, using the preset the file

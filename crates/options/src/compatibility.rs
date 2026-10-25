@@ -508,12 +508,14 @@ mod tests {
 
     #[test]
     fn the_cloud_status_is_written_as_the_token_each_release_stores() {
-        // Until 1.20.2 the game stores `true`, `fast` or `false` unquoted; a
+        // Through 1.18.2 the game stores `true`, `fast` or `false` unquoted; a
         // boolean codec would drop `fast` and refuse the others.
         let catalog = crate::catalog::MinecraftPreferenceCatalog::bundled_shared().unwrap();
         let descriptor = catalog.descriptor("cloud_status").unwrap();
         let dataset = compatibility();
-        for version in ["1.12.2", "1.13.2", "1.14", "1.16.5"] {
+        for version in [
+            "1.12.2", "1.13.2", "1.14", "1.16.5", "1.17", "1.17.1", "1.18.2",
+        ] {
             let support = dataset.descriptor_support(descriptor, version);
             let PreferenceSupport::Authoritative(fields) = &support else {
                 panic!("{version} proves how the cloud status is stored");
@@ -529,6 +531,35 @@ mod tests {
             assert!(
                 codec.encode(&SettingValue::Boolean(true)).is_err(),
                 "{version} stores more than a boolean"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cloud_status_keeps_its_tokens_for_every_release_that_stores_them_as_text() {
+        let catalog = crate::catalog::MinecraftPreferenceCatalog::bundled_shared().unwrap();
+        let descriptor = catalog.descriptor("cloud_status").unwrap();
+        let dataset = compatibility();
+        for version in [
+            "1.17", "1.17.1", "1.18", "1.18.1", "1.18.2", "1.19", "1.19.1", "1.19.2", "1.19.3",
+            "1.19.4", "1.20", "1.20.1", "1.20.2",
+        ] {
+            let support = dataset.descriptor_support(descriptor, version);
+            let PreferenceSupport::Authoritative(fields) = &support else {
+                panic!("{version} proves how the cloud status is stored");
+            };
+            let codec = codec_of(&fields[0]);
+            for token in ["true", "fast", "false"] {
+                assert!(
+                    codec.encode(&SettingValue::Text(token.to_owned())).is_ok(),
+                    "{version} stores `{token}`"
+                );
+            }
+            assert!(
+                codec
+                    .encode(&SettingValue::Text("fancy".to_owned()))
+                    .is_err(),
+                "{version} stores no token beyond the three"
             );
         }
     }
