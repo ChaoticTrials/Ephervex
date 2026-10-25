@@ -617,6 +617,14 @@ fn discard_client_captures(registry: &Registry, id: InstanceId) {
             "could not remove the output captures of a removed client"
         );
     }
+    discard_history(registry, crate::host_events::EventHost::Client(id));
+}
+
+/// Forgets the history of a host whose record was dropped.
+fn discard_history(registry: &Registry, host: crate::host_events::EventHost) {
+    if let Err(error) = crate::host_events::remove_host_events(registry.paths(), host) {
+        tracing::warn!(?host, %error, "could not remove the history of a removed host");
+    }
 }
 
 /// Removes the output capture of a server whose record was dropped because its
@@ -632,6 +640,7 @@ fn discard_server_capture(registry: &Registry, id: ServerId) {
             "could not remove the output capture of a removed server"
         );
     }
+    discard_history(registry, crate::host_events::EventHost::Server(id));
 }
 
 fn reconcile_server(

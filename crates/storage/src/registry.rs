@@ -1068,6 +1068,7 @@ impl Registry {
                 remove_tree(&indexed.root)?;
             }
             remove_tree(&self.paths().client_captures_dir(id))?;
+            self.discard_history(crate::host_events::EventHost::Client(id));
         }
 
         self.index.connection().execute(
@@ -1571,6 +1572,7 @@ impl Registry {
                 remove_tree(&indexed.root)?;
             }
             remove_tree(&self.paths().server_capture_dir(id))?;
+            self.discard_history(crate::host_events::EventHost::Server(id));
         }
 
         self.index
@@ -2321,6 +2323,14 @@ impl Registry {
 }
 
 impl Registry {
+    /// Forgets the history of a host that is gone. The host is already gone, so
+    /// a failure here costs a stray file and no more.
+    fn discard_history(&self, host: crate::host_events::EventHost) {
+        if let Err(error) = crate::host_events::remove_host_events(self.paths(), host) {
+            tracing::warn!(?host, %error, "could not remove the history of a removed host");
+        }
+    }
+
     /// Removes a deleted host's claim files, so the directory they live in
     /// does not grow with every host that ever existed.
     ///

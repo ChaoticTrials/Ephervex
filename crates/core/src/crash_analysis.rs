@@ -754,6 +754,43 @@ impl App {
         }))
     }
 
+    /// Adds the crash report of a host's last run to its history, when the
+    /// last run left one: what the report says failed, and its first lines.
+    pub(crate) fn record_crash_event(&self, host: InstalledHost) {
+        let Ok(Some(report)) = self
+            .diagnostic_entries(diagnostic_scope(host), DiagnosticKind::CrashReport)
+            .map(|entries| entries.into_iter().next())
+        else {
+            return;
+        };
+        let started = match host {
+            InstalledHost::Instance(id) => self
+                .current_client(id)
+                .ok()
+                .and_then(|client| client.last_launched_at),
+            InstalledHost::Server(id) => self
+                .server(id)
+                .ok()
+                .and_then(|server| server.last_started_at),
+        };
+        let from_last_run = match (report.modified, started) {
+            (Some(reported), Some(started)) => reported >= started,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        };
+        let Some(summary) = report.summary.filter(|_| from_last_run) else {
+            return;
+        };
+        let subject = summary.headline().unwrap_or(&report.name);
+        let detail = summary.excerpt.join("\n");
+        self.record_host_event(
+            host,
+            ephervex_storage::HostEventKind::LogError,
+            subject,
+            &detail,
+        );
+    }
+
     /// The tail of the run's own log, for the attribution a report can omit.
     ///
     /// Best-effort by design: the log is a second opinion, and a host whose

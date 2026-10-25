@@ -63,3 +63,4 @@ so the reasoning trail survives.
 | [0055](0055-resource-shader-and-data-packs-are-recognized-by-location-and-kept-out-of-the-mod-list.md) | Resource packs, shader packs, and data packs are recognized by location and kept out of the mod list | Accepted |
 | [0056](0056-seasonal-themes-are-not-part-of-the-product.md) | Seasonal themes are not part of the product | Accepted (supersedes ADR 0049) |
 | [0057](0057-workbench-is-the-single-built-in-palette-and-dark-and-light-resolve-to-it.md) | Workbench is the single built-in palette, and dark and light resolve to it | Accepted (amends ADR 0041 and ADR 0042) |
+| [0058](0058-a-host-keeps-a-bounded-history-under-the-state-root.md) | A host keeps a bounded history under the state root | Accepted |

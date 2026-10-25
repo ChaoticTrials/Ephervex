@@ -359,10 +359,19 @@ impl App {
 
     /// Counts one more time the bug was seen on an instance.
     pub fn count_case_reproduced(&self, client: InstanceId) -> CoreResult<()> {
+        let mut count = 0;
         self.change_case(client, |case| {
             case.count_reproduced();
+            count = case.reproduced;
             Ok(())
-        })
+        })?;
+        self.record_host_event(
+            crate::mods::InstalledHost::Instance(client),
+            ephervex_storage::HostEventKind::Reproduced,
+            &count.to_string(),
+            "",
+        );
+        Ok(())
     }
 
     /// Starts an instance's reproduced count again.

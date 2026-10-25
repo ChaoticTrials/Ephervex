@@ -42,6 +42,7 @@ mod disk_usage;
 pub mod download_watch;
 pub mod error;
 pub mod health;
+mod host_events;
 mod host_recipe_gate;
 mod hosted_launch;
 pub mod import;
@@ -408,12 +409,13 @@ pub use ephervex_storage::{
     CaseStep, ClientCommit, ClientCommitWarning, ClientFolder, ClientRecord, ClientRootConflict,
     CloneMethod, Config, CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError,
     DiagnosticKind, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop,
-    ImportSource, JavaConfig, LaunchState, LockDisposition, MAX_CASE_NOTE_CHARS,
-    MAX_CASE_STEP_CHARS, MAX_CASE_STEPS, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder,
-    NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
-    ReconciliationReport, RecordRef, RunnerHost, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch,
-    SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
-    ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
-    ServerPortSelection, ServerRecord, ServerRootConflict, SetAsideNotice, StorageError,
-    TechnicalTextSize, TextAnchor, TextView, running_state,
+    HostEvent, HostEventKind, ImportSource, JavaConfig, LaunchState, LockDisposition,
+    MAX_CASE_NOTE_CHARS, MAX_CASE_STEP_CHARS, MAX_CASE_STEPS, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES,
+    MissingFolder, NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting,
+    ReconciledRecord, ReconciliationReport, RecordRef, RunnerHost, RunningLaunch,
+    SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
+    ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings,
+    ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
+    ServerRecord, ServerRootConflict, SetAsideNotice, StorageError, TechnicalTextSize, TextAnchor,
+    TextView, running_state,
 };

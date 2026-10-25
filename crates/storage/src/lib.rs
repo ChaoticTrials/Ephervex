@@ -34,6 +34,7 @@ pub mod config;
 pub(crate) mod copy;
 pub mod diagnostics;
 pub mod folders;
+pub mod host_events;
 pub mod index;
 pub mod lock;
 pub mod metadata;
@@ -67,6 +68,10 @@ pub use diagnostics::{
     SearchOutcome, TextAnchor, TextView,
 };
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
+pub use host_events::{
+    EventHost, HostEvent, HostEventKind, MAX_HOST_EVENTS, append_host_event, read_host_events,
+    remove_host_events,
+};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
 pub use lock::{
     ForcedStop, LAUNCH_LOCK_FILE, LAUNCH_RUN_VARIABLE, LaunchLock, LaunchState, LockDisposition,

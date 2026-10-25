@@ -146,6 +146,52 @@ pub(super) struct PreparedServerStart {
     /// The server's claim, kept from the moment it was found stopped until its
     /// supervisor owns the runtime lock.
     claim: Option<ephervex_storage::HostClaim>,
+    /// Where this run's start and end are recorded in the server's history.
+    history: Option<ServerHistory>,
+}
+
+/// Where one server run records what happened to it.
+#[derive(Debug, Clone)]
+pub(super) struct ServerHistory {
+    paths: ephervex_storage::Paths,
+    id: ServerId,
+    /// The address the run is expected to listen on.
+    address: String,
+}
+
+impl ServerHistory {
+    fn record(&self, kind: ephervex_storage::HostEventKind, subject: &str) {
+        if let Err(error) = ephervex_storage::append_host_event(
+            &self.paths,
+            ephervex_storage::EventHost::Server(self.id),
+            &ephervex_storage::HostEvent::now(kind, subject, ""),
+        ) {
+            tracing::warn!(%error, "could not record a host event");
+        }
+    }
+}
+
+/// Passes every event of a supervised run on to `observer`, recording in
+/// `history` that the server started once its process really did. Finished by
+/// dropping the returned observer and waiting for the task.
+fn recording_observer(
+    observer: &ServerObserver,
+    history: ServerHistory,
+) -> (ServerObserver, tokio::task::JoinHandle<()>) {
+    let (supervised, mut events) = ServerObserver::channel();
+    let outer = observer.clone();
+    let task = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if matches!(event, ephervex_server::ServerEvent::Started { .. }) {
+                history.record(
+                    ephervex_storage::HostEventKind::ServerStarted,
+                    &history.address,
+                );
+            }
+            outer.emit(event);
+        }
+    });
+    (supervised, task)
 }
 
 /// A server running under a runner of its own, as [`App::start_server_detached`]
@@ -277,10 +323,18 @@ impl App {
     ) -> CoreResult<ServerCommit<ServerRecord>> {
         // Before the artifact cache is taken, and before any staging root exists.
         request.name = validated_entity_name(&request.name)?;
-        self.with_artifact_cache(Box::pin(
-            self.create_server_holding_the_cache(request, options, cancel),
-        ))
-        .await
+        let commit = self
+            .with_artifact_cache(Box::pin(
+                self.create_server_holding_the_cache(request, options, cancel),
+            ))
+            .await?;
+        self.record_host_event(
+            crate::mods::InstalledHost::Server(commit.record.id),
+            ephervex_storage::HostEventKind::Created,
+            crate::host_events::storage_event_subject(commit.record.storage),
+            "",
+        );
+        Ok(commit)
     }
 
     async fn create_server_holding_the_cache(
@@ -1241,6 +1295,11 @@ impl App {
             capture: self.paths().server_capture_dir(id),
             operation,
             claim: Some(claim),
+            history: Some(ServerHistory {
+                paths: self.paths().clone(),
+                id,
+                address: format!("localhost:{}", record.network.port),
+            }),
         })
     }
 
@@ -1250,6 +1309,16 @@ impl App {
         hosting: Hosting,
     ) -> CoreResult<ephervex_server::ServerExit> {
         let operation = prepared.operation;
+        let history = prepared.history.clone();
+        // The run reports to its own observer, which passes everything on and
+        // notes in the history the moment the server really started.
+        let (supervised, forwarding) = match history.clone() {
+            Some(history) => {
+                let (supervised, task) = recording_observer(observer, history);
+                (supervised, Some(task))
+            }
+            None => (observer.clone(), None),
+        };
         let exit = match hosting {
             Hosting::Attached => {
                 ServerSupervisor::run_holding(
@@ -1257,7 +1326,7 @@ impl App {
                     &prepared.command,
                     &prepared.root,
                     &prepared.capture,
-                    observer,
+                    &supervised,
                 )
                 .await
             }
@@ -1269,7 +1338,7 @@ impl App {
                 };
                 match crate::runner::runner_executable() {
                     Ok(executable) => {
-                        crate::runner::run_server(&executable, &spec, prepared.claim, observer)
+                        crate::runner::run_server(&executable, &spec, prepared.claim, &supervised)
                             .await
                     }
                     Err(error) => Err(ephervex_server::ServerError::HostedRun {
@@ -1278,6 +1347,22 @@ impl App {
                 }
             }
         };
+        // Everything the run reported reaches the observer before the run is
+        // said to be finished.
+        drop(supervised);
+        if let Some(task) = forwarding {
+            let _ = task.await;
+        }
+        if let (Some(history), Ok(exit)) = (&history, &exit) {
+            let subject = exit.code.map_or_else(
+                || {
+                    exit.signal
+                        .map_or_else(|| "unknown".to_owned(), |signal| format!("signal:{signal}"))
+                },
+                |code| code.to_string(),
+            );
+            history.record(ephervex_storage::HostEventKind::ServerStopped, &subject);
+        }
         match &exit {
             Ok(exit) => {
                 tracing::info!(%operation, code = ?exit.code, signal = ?exit.signal, "server exited");
@@ -2709,6 +2794,7 @@ mod tests {
             let root = tempfile::tempdir().expect("root");
             let (observer, mut events) = ServerObserver::channel();
             let prepared = PreparedServerStart {
+                history: None,
                 command: ephervex_server::ServerCommand {
                     java: PathBuf::from("/bin/sh"),
                     arguments: vec!["-c".to_owned(), format!("exit {code}")],
@@ -2798,6 +2884,7 @@ mod tests {
 
     fn stand_in_prepared(root: &Path, script: &str) -> PreparedServerStart {
         PreparedServerStart {
+            history: None,
             command: ephervex_server::ServerCommand {
                 java: PathBuf::from("/bin/sh"),
                 arguments: vec!["-c".to_owned(), script.to_owned()],
@@ -2808,6 +2895,69 @@ mod tests {
             operation: OperationReporter::silent("test-server-cancel").id(),
             claim: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_server_run_records_that_it_started_and_how_it_stopped() {
+        let base = tempfile::tempdir().expect("base");
+        let root = tempfile::tempdir().expect("root");
+        let paths = ephervex_storage::Paths::rooted_at(base.path());
+        let id = ServerId::new();
+        let mut prepared = stand_in_prepared(root.path(), "echo 'Done (1s)!'; exit 3");
+        prepared.history = Some(ServerHistory {
+            paths: paths.clone(),
+            id,
+            address: "localhost:25565".to_owned(),
+        });
+        let (observer, mut events) = ServerObserver::channel();
+
+        let _ = App::run_prepared_server(prepared, &observer, Hosting::Attached).await;
+
+        let recorded =
+            ephervex_storage::read_host_events(&paths, ephervex_storage::EventHost::Server(id));
+        assert_eq!(
+            recorded.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            [
+                ephervex_storage::HostEventKind::ServerStarted,
+                ephervex_storage::HostEventKind::ServerStopped
+            ]
+        );
+        assert_eq!(recorded[0].subject, "localhost:25565");
+        assert_eq!(recorded[1].subject, "3");
+        // The run's own events still reach whoever watches it, in order, and
+        // end with the finish.
+        let mut last = None;
+        while let Ok(event) = events.try_recv() {
+            last = Some(event);
+        }
+        assert!(matches!(
+            last,
+            Some(ephervex_server::ServerEvent::Finished { exit: Some(_) })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_never_started_has_no_start_in_its_history() {
+        let base = tempfile::tempdir().expect("base");
+        let root = tempfile::tempdir().expect("root");
+        let paths = ephervex_storage::Paths::rooted_at(base.path());
+        let id = ServerId::new();
+        let mut prepared = stand_in_prepared(root.path(), "exit 0");
+        prepared.command.java = PathBuf::from("/nonexistent/java");
+        prepared.history = Some(ServerHistory {
+            paths: paths.clone(),
+            id,
+            address: "localhost:25565".to_owned(),
+        });
+        let (observer, _events) = ServerObserver::channel();
+
+        let result = App::run_prepared_server(prepared, &observer, Hosting::Attached).await;
+
+        assert!(result.is_err());
+        assert!(
+            ephervex_storage::read_host_events(&paths, ephervex_storage::EventHost::Server(id))
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -2896,6 +3046,7 @@ mod tests {
         let server_root = root.path().to_path_buf();
         let (observer, mut events) = ServerObserver::channel();
         let prepared = PreparedServerStart {
+            history: None,
             command: ephervex_server::ServerCommand {
                 java: PathBuf::from("/bin/sh"),
                 arguments: vec![
@@ -5179,6 +5330,7 @@ mod tests {
     ) {
         let (observer, mut events) = ServerObserver::channel();
         let prepared = PreparedServerStart {
+            history: None,
             command: ephervex_server::ServerCommand {
                 java: PathBuf::from("/bin/sh"),
                 arguments: vec![

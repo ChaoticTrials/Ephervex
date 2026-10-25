@@ -16,8 +16,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use crate::host_events::storage_event_subject;
 use crate::instance::{CreatedClient, PreferenceContext, validated_entity_name};
 use crate::issue_link::validated_issue_link;
+use crate::mods::InstalledHost;
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -726,6 +728,12 @@ impl App {
             discard_unpublished(registry, &record);
             return Err(error.into());
         }
+        self.record_host_event(
+            InstalledHost::Instance(record.id),
+            ephervex_storage::HostEventKind::Created,
+            storage_event_subject(record.storage),
+            "",
+        );
         Ok(CreatedClient {
             record,
             preferences,
@@ -2311,6 +2319,50 @@ mod tests {
         assert!(
             app.watched_download_folders().is_empty(),
             "an explicit empty list must not fall back to the OS Downloads folder"
+        );
+    }
+
+    #[test]
+    fn creating_a_client_starts_its_history() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let events = app.host_events(InstalledHost::Instance(record.id));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, ephervex_storage::HostEventKind::Created);
+        assert_eq!(events[0].subject, "temporary");
+    }
+
+    #[test]
+    fn removing_a_client_forgets_its_history() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        assert!(
+            !app.host_events(InstalledHost::Instance(record.id))
+                .is_empty()
+        );
+
+        app.delete_client(record.id, FileDisposition::Remove)
+            .expect("remove");
+
+        assert!(
+            app.host_events(InstalledHost::Instance(record.id))
+                .is_empty()
         );
     }
 

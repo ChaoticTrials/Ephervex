@@ -278,6 +278,12 @@ impl App {
             return Err(error.into());
         }
 
+        self.record_host_event(
+            crate::mods::InstalledHost::Instance(record.id),
+            ephervex_storage::HostEventKind::Created,
+            crate::host_events::storage_event_subject(record.storage),
+            "",
+        );
         info!(
             instance_id = %record.id,
             pack = %analysis.recipe.original_name,
