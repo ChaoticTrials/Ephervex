@@ -1426,6 +1426,9 @@ enum CaseAction {
         #[arg(long)]
         reset: bool,
     },
+    /// List what happened to the instance: when it was created, launched and
+    /// stopped, and what its log complained about.
+    History,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2757,6 +2760,10 @@ fn run_instance_case(
         }
         Some(CaseAction::Reproduced { reset: false }) => app.count_case_reproduced(id)?,
         Some(CaseAction::Reproduced { reset: true }) => app.reset_case_reproduced(id)?,
+        Some(CaseAction::History) => {
+            print_instance_history(app, id, json);
+            return Ok(());
+        }
     }
     let case = app.organization()?.case_of(id);
     if json {
@@ -2796,6 +2803,43 @@ fn run_instance_case(
     }
     outln!("reproduced: {}", case.reproduced);
     Ok(())
+}
+
+/// Lists what happened to an instance, oldest first.
+fn print_instance_history(app: &App, id: InstanceId, json: bool) {
+    let events = app.host_events(ephervex_core::InstalledHost::Instance(id));
+    if json {
+        print_json(&serde_json::json!({
+            "id": id.to_string(),
+            "events": events
+                .iter()
+                .map(|event| serde_json::json!({
+                    "at": event.at.to_rfc3339(),
+                    "kind": event.kind,
+                    "subject": event.subject,
+                    "detail": event.detail,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+    if events.is_empty() {
+        outln!("nothing has happened to this instance yet");
+    }
+    for event in &events {
+        let kind = serde_json::to_value(event.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        outln!(
+            "{}  {kind}  {}",
+            event.at.format("%Y-%m-%d %H:%M:%S UTC"),
+            terminal_safe(&event.subject)
+        );
+        for line in event.detail.lines() {
+            outln!("    {}", terminal_safe(line));
+        }
+    }
 }
 
 fn run_instance_organization_command(

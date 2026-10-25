@@ -206,3 +206,24 @@ fn a_case_command_for_an_unknown_instance_is_refused() {
     ]);
     assert!(!refused.status.success());
 }
+
+#[test]
+fn what_happened_to_an_instance_is_listed_oldest_first() {
+    let sandbox = Sandbox::new();
+    let id = sandbox.create("Alpha");
+    sandbox.ok(&["instance", "case", &id, "reproduced"]);
+
+    let history = sandbox.json(&["--json", "instance", "case", &id, "history"]);
+    let events = history["events"].as_array().expect("events");
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event["kind"].as_str().expect("kind"))
+        .collect();
+    assert_eq!(kinds, ["created", "reproduced"]);
+    assert_eq!(events[0]["subject"], "temporary");
+    assert_eq!(events[1]["subject"], "1");
+
+    let text = stdout(&sandbox.ok(&["instance", "case", &id, "history"]));
+    assert!(text.contains("created  temporary"), "{text}");
+    assert!(text.contains("reproduced  1"), "{text}");
+}

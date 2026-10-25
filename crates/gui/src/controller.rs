@@ -5464,6 +5464,15 @@ impl Workspace {
             load_host(ui, host);
             java_runtime::load(&self.commands, host, false);
         }
+        // What happened to the hosts shown changes whenever one of them runs
+        // or stops, which is also when the lists refresh.
+        // Only a client shows its history, on the Case tab.
+        for &host in shown
+            .iter()
+            .filter(|host| matches!(host, InstalledHost::Instance(_)))
+        {
+            send(&self.commands, Command::LoadHostEvents(host));
+        }
     }
 
     /// Changes what a feature reported about a host, in every pane showing it.
@@ -5700,6 +5709,29 @@ fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) 
         }
         _ => {}
     }
+}
+
+/// Writes what happened to a host into every pane showing it.
+fn apply_host_events(
+    workspace: &Workspace,
+    host: InstalledHost,
+    rows: &[crate::history_view::HistoryRow],
+) {
+    workspace.update(host, |view| {
+        // Written into the list already on screen, so a read that found
+        // nothing new rebuilds nothing.
+        view.events = workspace::reuse(
+            &view.events,
+            rows.iter()
+                .map(|row| crate::ui::CaseEventRow {
+                    time: row.time.as_str().into(),
+                    text: row.text.as_str().into(),
+                    detail: row.detail.as_str().into(),
+                    tone: row.tone.into(),
+                })
+                .collect(),
+        );
+    });
 }
 
 /// Asks for everything a host's workspace shows, once, as it enters the workspace.
@@ -8943,6 +8975,7 @@ fn apply_event(
             java_runtime::load(&workspace.commands, host, true);
         }
         Event::HostJava(data) => java_runtime::apply_host_java(workspace, &data),
+        Event::HostEvents { host, rows } => apply_host_events(workspace, host, &rows),
         Event::HostJavaPathChecked { host, result } => {
             java_runtime::apply_path_checked(workspace, host, &result);
         }
@@ -14726,10 +14759,16 @@ mod tests {
                 failure: Some("replacement failed".to_owned()),
             },
         );
-        // The shown hosts also read their Java again; only diagnoses count here.
+        // The shown hosts also read their Java and history again; only
+        // diagnoses count here.
         let sent: Vec<_> = commands
             .try_iter()
-            .filter(|command| !matches!(command, Command::LoadHostJava { .. }))
+            .filter(|command| {
+                !matches!(
+                    command,
+                    Command::LoadHostJava { .. } | Command::LoadHostEvents(_)
+                )
+            })
             .collect();
         assert!(
             matches!(sent.as_slice(), [Command::ExplainServerFailure { server: id, failure, .. }]
@@ -14885,6 +14924,42 @@ mod tests {
             .iter()
             .map(|pane| (pane.id, pane.overlay))
             .collect()
+    }
+
+    #[test]
+    fn what_happened_to_a_host_reaches_every_pane_showing_it() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Case);
+        let rows = vec![crate::history_view::HistoryRow {
+            time: "14:02".to_owned(),
+            text: "Created in temporary storage".to_owned(),
+            detail: String::new(),
+            tone: "neutral",
+        }];
+
+        deliver_event(&ui, &workspace, Event::HostEvents { host: client, rows });
+
+        let events = first_view(&ui).events;
+        assert_eq!(events.row_count(), 1);
+        assert_eq!(
+            events.row_data(0).expect("a row").text,
+            "Created in temporary storage"
+        );
+    }
+
+    #[test]
+    fn a_host_entering_the_workspace_asks_what_happened_to_it() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Case);
+
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::LoadHostEvents(asked) if asked == host))
+        );
     }
 
     #[test]

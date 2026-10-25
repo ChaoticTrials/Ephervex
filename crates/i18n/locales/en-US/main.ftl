@@ -4099,3 +4099,25 @@ gui-server-pack-drop = Drop a server pack (.zip) here, or choose one
 gui-server-pack-drop-detail = Optional. Without one, the instance's server-side mods are installed.
 gui-server-pack-remove = Remove
 gui-accounts = Accounts
+
+gui-event-storage-temporary = temporary
+gui-event-storage-persistent = persistent
+gui-event-created = Created in { $value } storage
+gui-event-launched = Launched as { $value }
+gui-event-exited-clean = The game exited normally
+gui-event-exited-code = The game exited with code { $value }
+gui-event-exited-signal = The game was stopped by signal { $value }
+gui-event-exited-unknown = The game ended
+gui-event-stopped-clean = The server stopped normally
+gui-event-stopped-code = The server exited with code { $value }
+gui-event-stopped-signal = The server was stopped by signal { $value }
+gui-event-stopped-unknown = The server stopped
+gui-event-server-started = The server started on { $value }
+gui-event-log-error = Error in the log: { $value }
+gui-event-reproduced = { $count ->
+    [one] Seen again, now 1 time
+   *[other] Seen again, now { $count } times
+}
+gui-event-other = Something else happened
+gui-case-what-happened = What happened
+gui-case-what-happened-empty = Nothing has happened to this instance yet.

@@ -6,6 +6,7 @@ mod branding;
 pub mod controller;
 pub mod diagnosis_view;
 pub mod file_drop;
+mod history_view;
 pub mod java_view;
 mod jvm_arguments;
 mod memory_input;

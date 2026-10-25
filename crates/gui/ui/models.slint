@@ -31,6 +31,15 @@ export struct CaseStepRow {
     done: bool,
 }
 
+// One line of what happened to a host: when, what, and the text under it.
+export struct CaseEventRow {
+    time: string,
+    text: string,
+    detail: string,
+    // "neutral", "good", "bad" or "notice".
+    tone: string,
+}
+
 export struct InstanceRow {
     snapshot-deletion-note: string,
     // The issue or bug report the instance reproduces, empty when none is set.
@@ -975,6 +984,8 @@ export struct HostView {
     diagnosis-problems: [DiagnosticFindingRow],
     diagnosis-customized: [DiagnosticFindingRow],
     diagnosis-checks: [DiagnosticCheckRow],
+    // What happened to the host, oldest first.
+    events: [CaseEventRow],
     diagnosis-crash-report: string,
     // The fix under review: "", "loading", "ready", "failed", or "applying".
     fix-state: string,

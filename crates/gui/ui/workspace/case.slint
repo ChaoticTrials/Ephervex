@@ -5,7 +5,7 @@ import { AcknowledgementToggle, AppButton, IconButton, TextField } from "../comp
 import { Plate } from "../components/surface.slint";
 import { BodyText, DisplayHeading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { CaseStepRow } from "../models.slint";
+import { CaseEventRow, CaseStepRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
 // One line of what happened: a square that says whether it was good news,
@@ -149,6 +149,8 @@ export component CaseSurface inherits ScrollView {
     // Whose case this is; drafts do not follow a pane to another instance.
     in property <string> host-id;
     in property <[CaseStepRow]> steps;
+    // What happened to the instance, oldest first.
+    in property <[CaseEventRow]> events;
     in property <string> note;
     in property <int> reproduced;
     // How many steps are checked off.
@@ -168,7 +170,25 @@ export component CaseSurface inherits ScrollView {
         note-input.text = root.note;
         root.shown-note = root.note;
     }
-    VerticalLayout {
+    // Two columns when the page can hold both: what to do to reproduce the bug
+    // on the left, what happened on the right. Placed by hand, because the
+    // right one moves under the left when the page is narrow.
+    columns := Rectangle {
+        // Placed at the top left: an element outside a layout is centered
+        // by default.
+        x: 0px;
+        y: 0px;
+        // The shadows of the cards fall right and below.
+        width: root.visible-width - Theme.shadow-room;
+        property <bool> wide: self.width >= 900px;
+        property <length> gap: 24px;
+        property <length> left-width: self.wide ? (self.width - self.gap) * 0.55 : self.width;
+        height: self.wide ? max(left.preferred-height, right.preferred-height) : left.preferred-height + self.gap + right.preferred-height;
+    left := VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: parent.left-width;
+        height: self.preferred-height;
         alignment: start;
         spacing: 22px;
         // The shadows of the cards fall right and below.
@@ -241,6 +261,13 @@ export component CaseSurface inherits ScrollView {
                 }
             }
         }
+    }
+    right := Timeline {
+        x: parent.wide ? parent.left-width + parent.gap : 0px;
+        y: parent.wide ? 0px : left.preferred-height + parent.gap;
+        width: parent.wide ? parent.width - parent.left-width - parent.gap : parent.width;
+        events: root.events;
+    }
     }
     changed note => {
         if (note-input.text == root.shown-note) {

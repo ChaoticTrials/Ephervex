@@ -8,7 +8,7 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, CaseStepRow, InstanceRow};
+use ephervex_gui::ui::{AppWindow, CaseEventRow, CaseStepRow, InstanceRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::platform::{Key, PointerEventButton, WindowEvent};
@@ -283,4 +283,49 @@ fn an_unsaved_step_does_not_follow_the_pane_to_another_instance() {
 
     assert_eq!(draft(&ui), "");
     assert!(calls.borrow().is_empty());
+}
+
+fn event(time: &str, text: &str, detail: &str) -> CaseEventRow {
+    CaseEventRow {
+        time: time.into(),
+        text: text.into(),
+        detail: detail.into(),
+        tone: "good".into(),
+    }
+}
+
+#[test]
+fn what_happened_is_told_beside_the_steps_with_the_lines_a_log_error_quoted() {
+    let (ui, _) = shown(client(&[("Place a belt", false)], "", 0));
+    ui.window().set_size(PhysicalSize::new(1800, 1200));
+    support::update_host(&ui, 0, |view| {
+        view.events = ModelRc::new(VecModel::from(vec![
+            event("14:02", "Created in temporary storage", ""),
+            event(
+                "14:22",
+                "Error in the log: Exception",
+                "java.lang.IllegalStateException",
+            ),
+        ]));
+    });
+    slint::platform::update_timers_and_animations();
+
+    labeled(&ui, &lookup("gui-case-what-happened"));
+    let created = labeled(&ui, "Created in temporary storage");
+    labeled(&ui, "java.lang.IllegalStateException");
+    let step = labeled(&ui, "Place a belt");
+    assert!(
+        created.absolute_position().x > step.absolute_position().x + step.size().width,
+        "on a wide page the history sits beside the steps"
+    );
+}
+
+#[test]
+fn an_instance_without_a_history_says_so() {
+    let (ui, _) = shown(client(&[], "", 0));
+    // On a narrow page the history is under the steps, the note, and the rest.
+    ui.window().set_size(PhysicalSize::new(1000, 1600));
+    slint::platform::update_timers_and_animations();
+
+    labeled(&ui, &lookup("gui-case-what-happened-empty"));
 }

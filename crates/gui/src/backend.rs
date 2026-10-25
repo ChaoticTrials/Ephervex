@@ -104,6 +104,8 @@ pub enum Command {
         host: InstalledHost,
         choices: bool,
     },
+    /// Reads what happened to a host.
+    LoadHostEvents(InstalledHost),
     /// Probes an executable the user named and gives a host's verdict on it.
     CheckHostJavaPath {
         host: InstalledHost,
@@ -1855,6 +1857,11 @@ pub enum Event {
     HostRuntime(HostRuntimeData),
     /// A host's Java, as [`Command::LoadHostJava`] read it.
     HostJava(Box<HostJavaData>),
+    /// What happened to a host, as [`Command::LoadHostEvents`] read it.
+    HostEvents {
+        host: InstalledHost,
+        rows: Vec<crate::history_view::HistoryRow>,
+    },
     /// A launch chose its Java runtime or ended, either of which may follow
     /// the install of a managed one.
     JavaPlanned,
@@ -6535,6 +6542,10 @@ fn run_worker(
                         send_snapshot(&mut app, &events);
                     }
                 }
+            }
+            Command::LoadHostEvents(host) => {
+                let rows = crate::history_view::rows(&app.host_events(host), chrono::Local::now());
+                let _ = events.send(Event::HostEvents { host, rows });
             }
             Command::LoadHostJava { host, choices } => {
                 let inventory = Arc::clone(&java_inventory);

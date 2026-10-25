@@ -2485,6 +2485,7 @@ export component AppWindow inherits Window {
                                 }
                                 if host.available && host.kind == "client" && pane.surface == "Case" : CaseSurface {
                                     host-id: host.id;
+                                    events: host.events;
                                     steps: host.client.case-steps;
                                     done-count: host.client.case-done;
                                     note: host.client.case-note;
