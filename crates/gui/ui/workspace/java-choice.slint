@@ -1,0 +1,69 @@
+// One Java runtime a host could use, drawn as a card with a radio mark.
+
+import { AppButton, Pill } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { JavaChoiceRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+// The runtime in use is filled in; one the host refuses says so beside it and
+// gives its reason underneath, and cannot be chosen.
+export component JavaChoiceItem inherits Rectangle {
+    in property <JavaChoiceRow> choice;
+    in property <bool> enabled;
+    // Why choosing waits while `enabled` is false.
+    in property <string> hint;
+    callback chosen();
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: Theme.border-strong;
+    background: root.choice.current ? Theme.state-running.mix(Theme.surface, 0.55) : Theme.surface;
+    height: row.preferred-height;
+    accessible-role: AccessibleRole.groupbox;
+    accessible-label: root.choice.title;
+    row := HorizontalLayout {
+        padding: 10px;
+        spacing: 12px;
+        VerticalLayout {
+            alignment: center;
+            // The radio mark: a ring, with a dot when this runtime is in use.
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 9px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: Theme.surface;
+                if root.choice.current : Rectangle {
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Theme.border-strong;
+                }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 2px;
+            BodyText { text: root.choice.title; color: root.choice.compatible ? Theme.text : Theme.text-muted; font-weight: 600; wrap: word-wrap; }
+            if root.choice.detail != "" : BodyText { text: root.choice.detail; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; wrap: word-wrap; }
+            if root.choice.reason != "" : BodyText { text: root.choice.reason; color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
+        }
+        VerticalLayout {
+            alignment: center;
+            padding-right: Theme.shadow-room;
+            if root.choice.current : Pill { text: GuiI18n.text("gui-java-choice-current"); fill: Theme.surface; caption: Theme.text; tone-color: Theme.border-strong; }
+            if !root.choice.current && !root.choice.compatible : Pill { text: GuiI18n.text("gui-java-choice-wont-run"); fill: Theme.danger-soft; caption: Theme.text; tone-color: Theme.border-strong; }
+            if !root.choice.current && root.choice.compatible : AppButton {
+                text: GuiI18n.text("gui-java-choice-use");
+                accessible-name: GuiI18n.value("gui-java-choice-use-named", root.choice.title);
+                compact: true;
+                enabled: root.enabled;
+                hint: root.hint;
+                clicked => { root.chosen(); }
+            }
+        }
+    }
+}

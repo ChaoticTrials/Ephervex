@@ -203,10 +203,7 @@ fn problems_and_customizations_say_which_they_are_in_words() {
             )
         ));
         assert!(
-            visible(
-                &ui,
-                &lookup_args("gui-diagnosis-requires", [("value", Arg::from("Flywheel"))])
-            ),
+            visible(&ui, "Flywheel"),
             "the chain says why the dependency is needed"
         );
         assert!(visible(&ui, &lookup("gui-diagnosis-checked-title")));
@@ -233,7 +230,13 @@ fn after_a_failed_run_the_likely_cause_leads_and_customizations_fold_away() {
     });
     settle(&ui);
 
-    assert!(visible(&ui, &lookup("gui-diagnosis-likely-cause")));
+    assert!(visible(
+        &ui,
+        &format!(
+            "{}: Flywheel is turned off",
+            lookup("gui-diagnosis-badge-likely-cause")
+        )
+    ));
     let customized = format!(
         "{}: Custom JVM arguments",
         lookup("gui-diagnosis-badge-customized")

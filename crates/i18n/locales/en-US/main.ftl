@@ -1555,19 +1555,14 @@ gui-diagnosis-summary-quick = Checked at { $time } after the last run failed. Re
 gui-diagnosis-failed = Diagnosis could not finish
 gui-diagnosis-canceled = Diagnosis stopped before it finished. Nothing was changed.
 gui-diagnosis-stale = The host changed. The last result stays on screen until it is checked again.
-gui-diagnosis-likely-cause = Likely cause
 gui-diagnosis-customized-detail = Differs from what Ephervex would choose and still works. Not a problem.
 gui-diagnosis-other-findings = Other findings ({ $count })
 gui-diagnosis-show = Show
-gui-diagnosis-requires = requires { $value }
-gui-diagnosis-problems-heading = { $count ->
-    [one] Problem
-   *[other] Problems ({ $count })
-}
-gui-diagnosis-customized-heading = Valid, customized ({ $count })
 gui-diagnosis-copy-report-hint = Diagnose this host first. The report summarizes what a diagnosis found.
 gui-diagnosis-hide = Hide
 gui-diagnosis-badge-problem = Problem
+gui-diagnosis-badge-likely-cause = likely cause
+gui-diagnosis-customized-title = Valid, customized
 gui-diagnosis-badge-customized = Customized
 gui-diagnosis-checked-title = What was checked
 gui-diagnosis-check-ok = OK
@@ -1737,6 +1732,7 @@ gui-java-installing = Java is being installed for this host.
 gui-java-choices = Available runtimes
 gui-java-choices-detail = Automatic follows the best compatible runtime.
 gui-java-choice-current = In use
+gui-java-choice-wont-run = won't run
 gui-java-choice-requires = This host requires Java { $required }.
 gui-java-choice-use = Use
 gui-java-choice-use-named = Use { $value }

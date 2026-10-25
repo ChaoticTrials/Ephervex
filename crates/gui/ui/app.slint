@@ -2509,6 +2509,8 @@ export component AppWindow inherits Window {
                                     apply-fix => { root.apply-fix(host.kind, host.id); }
                                     copy-report => { root.copy-diagnosis-report(host.kind, host.id); }
                                     open-logs => { root.show-pane-surface(pane.id, "Logs"); }
+                                    choose-java(key) => { root.choose-host-java(host.kind, host.id, key); }
+                                    load-java => { root.load-host-java(host.kind, host.id); }
                                     // Offered on a client alone, which is what the install flow takes.
                                     install-mod(provider, project) => { root.install-from-diagnostics(host.kind, host.id, provider, project); }
                                     open-route(route) => {
