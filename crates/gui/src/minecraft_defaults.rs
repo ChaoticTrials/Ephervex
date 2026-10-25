@@ -4742,7 +4742,7 @@ mod tests {
             &[("simulation_distance", ReleaseSupport::Unsupported)],
             &[],
         ));
-        model.select_category(0);
+        category_of(&mut model, "simulation_distance");
 
         let row = status_row(&model, "simulation_distance");
         assert_eq!(row.status_kind, "unavailable");

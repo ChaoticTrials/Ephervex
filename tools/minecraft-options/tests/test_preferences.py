@@ -1380,6 +1380,13 @@ class RealCanonicalShape(unittest.TestCase):
         bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
         preferences.validate(bundled, self.dataset_document)
 
+    def test_the_bundled_catalog_places_every_preference_in_its_datasets_category(self):
+        # Categories come from the compatibility dataset alone, so they can be
+        # compared without analyzer output.
+        bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
+        expected = {d["id"]: d["category"] for d in self.catalog["descriptors"]}
+        self.assertEqual({d["id"]: d["category"] for d in bundled["descriptors"]}, expected)
+
     def test_the_bundled_catalog_steps_match_what_the_game_stores(self):
         bundled = json.loads(BUNDLED_CATALOG.read_text(encoding="utf-8"))
         steps = {d["id"]: d["presentation"].get("step") for d in bundled["descriptors"]}
