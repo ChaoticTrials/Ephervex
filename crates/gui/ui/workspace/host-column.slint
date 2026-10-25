@@ -1,15 +1,124 @@
-// The cards in the column beside a host page: the servers linked to an
-// instance, and where a host keeps its files.
+// The cards in the column beside a host page: how to run the host, the
+// servers linked to an instance, the text for a bug report, the files a
+// diagnostic bundle would carry, and where the host keeps its files.
 
-import { AppButton, IconButton, InlineToggle, Pill, StatePill } from "../components/controls.slint";
+import { AppButton, Chip, IconButton, InlineToggle, KeyboardFocus, LaunchAsButton, Pill, StatePill, StateTone } from "../components/controls.slint";
 import { PopupMenu } from "../components/menus.slint";
 import { BodyText, DisplayHeading, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
-import { PendingEntityRow, ServerRow } from "../models.slint";
+import { BundlePartRow, HostView, MenuRow, PendingEntityRow, ServerRow } from "../models.slint";
+import { HostActions } from "host-actions.slint";
 import { SideCard } from "../home/side-card.slint";
 import { Plate } from "../components/surface.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Theme } from "../theme.slint";
+
+// What can be done to the host on the page: whether it runs and the way to
+// start or stop it, and the other host of its pair beside it.
+export component RunCard inherits SideCard {
+    in property <HostView> host;
+    // The account a launch is made as, empty when there is none.
+    in property <string> account-name;
+    in property <[MenuRow]> account-entries;
+    // A workflow is changing this host's files, and what it says.
+    in property <bool> busy;
+    in property <string> busy-text;
+    property <bool> client: root.host.kind == "client";
+    property <string> state-kind: root.client ? root.host.client.state-kind : root.host.server.state-kind;
+    property <string> state-text: root.client ? root.host.client.state : root.host.server.state;
+    property <string> restart-stage: root.client ? root.host.client.restart-stage : root.host.server.restart-stage;
+    property <bool> pair-starting: root.client ? root.host.client.pair-starting : root.host.server.pair-starting;
+    // A change, a restart, or a pair start is under way: the host's own
+    // actions wait. A side that already runs can still be stopped during a
+    // pair start, which is how one is ended.
+    property <bool> occupied: root.busy || root.restart-stage != "" || root.pair-starting;
+    property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !HostActions.running(root.host));
+    property <string> occupied-text: root.busy ? root.busy-text
+        : root.pair-starting ? GuiI18n.text("gui-pair-starting")
+        : root.restart-stage == "stopping" ? GuiI18n.text("gui-restart-stage-stopping")
+        : GuiI18n.text("gui-restart-stage-starting");
+    property <string> pair-id: root.client ? root.host.client.paired-server-id : root.host.server.paired-client-id;
+    callback primary();
+    callback restart();
+    callback kill();
+    callback launch-as(string, bool);
+    callback add-account();
+    callback show-log();
+    callback show-pair();
+    HorizontalLayout {
+        spacing: 8px;
+        DisplayHeading { text: GuiI18n.text("gui-run-title"); font-size: Theme.item-title-size; horizontal-stretch: 1; }
+        if root.client && root.account-name != "" : VerticalLayout { alignment: center; Chip { text: root.account-name; width: min(self.natural-width, 140px); } }
+    }
+    HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: StateTone.fill-of(root.state-kind);
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            BodyText { text: root.client ? GuiI18n.text("gui-client") : GuiI18n.text("gui-server"); color: Theme.text; font-weight: 700; overflow: elide; }
+            BodyText { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.state-text; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
+        }
+        VerticalLayout { alignment: center; padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-run-log"); compact: true; clicked => { root.show-log(); } } }
+    }
+    // The buttons raise a hard shadow to the right and below.
+    VerticalLayout {
+        spacing: 8px;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        AppButton {
+            text: HostActions.primary-label(root.host);
+            tone: HostActions.primary-tone(root.host);
+            icon: HostActions.running(root.host) ? @image-url("../../../../assets/icons/stop.svg") : @image-url("../../../../assets/icons/play.svg");
+            enabled: HostActions.primary-enabled(root.host) && !root.primary-waits;
+            hint: root.primary-waits ? root.occupied-text : HostActions.primary-hint(root.host);
+            clicked => { root.primary(); }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            if root.client : LaunchAsButton {
+                account-entries: root.account-entries;
+                enabled: HostActions.primary-enabled(root.host) && !root.occupied;
+                hint: root.occupied ? root.occupied-text : HostActions.primary-hint(root.host);
+                alongside: root.host.client.can-kill;
+                horizontal-stretch: 1;
+                launch-as(account, alongside) => { root.launch-as(account, alongside); }
+                add-account => { root.add-account(); }
+            }
+            if !root.client : AppButton {
+                text: GuiI18n.text("gui-kill");
+                tone: "danger";
+                horizontal-stretch: 1;
+                enabled: HostActions.kill-enabled(root.host);
+                hint: HostActions.kill-hint(root.host);
+                clicked => { root.kill(); }
+            }
+            AppButton {
+                text: GuiI18n.text("gui-restart");
+                horizontal-stretch: 1;
+                enabled: HostActions.restart-enabled(root.host) && !root.occupied;
+                hint: root.occupied ? root.occupied-text : HostActions.restart-hint(root.host);
+                clicked => { root.restart(); }
+            }
+        }
+        if root.pair-id != "" && !root.host.pair-shown : AppButton {
+            text: root.client ? GuiI18n.text("gui-run-server-beside") : GuiI18n.text("gui-run-client-beside");
+            icon: @image-url("../../../../assets/icons/split-beside.svg");
+            enabled: root.host.pair-room;
+            hint: GuiI18n.text("gui-pair-no-room");
+            clicked => { root.show-pair(); }
+        }
+    }
+}
 
 // One linked server: its name, state and address, and the few things done to
 // it often. The rest are in its menu.
@@ -21,56 +130,74 @@ component LinkedServerRow inherits VerticalLayout {
     callback stop-requested();
     callback connect();
     callback activated(string);
-    spacing: 6px;
+    spacing: 8px;
     HorizontalLayout {
-        spacing: 8px;
-        Heading { text: root.server.name; font-size: Theme.row-heading-size; overflow: elide; horizontal-stretch: 1; }
-        if root.paired : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-paired"); tone-color: Theme.accent; } }
-    }
-    HorizontalLayout {
-        spacing: 8px;
-        VerticalLayout { alignment: center; StatePill { state: root.server.state; state-kind: root.server.state-kind; restarting: root.server.restart-stage != ""; } }
-        BodyText { text: root.server.address; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
-    }
-    if root.server.needs-attention : BodyText { text: GuiI18n.text("gui-linked-server-attention"); color: Theme.warning; overflow: elide; }
-    // The buttons raise a hard shadow to the right and below.
-    HorizontalLayout {
-        spacing: 8px;
-        padding-right: Theme.shadow-room;
-        alignment: start;
-        if root.server.can-start || root.server.can-stop : AppButton {
-            compact: true;
-            text: root.server.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop");
-            accessible-name: GuiI18n.value(root.server.can-start ? "gui-linked-server-start" : "gui-home-stop-host", root.server.name);
-            tone: root.server.can-start ? "primary" : "danger";
-            clicked => { if root.server.can-start { root.start-requested(); } else { root.stop-requested(); } }
+        spacing: 10px;
+        VerticalLayout {
+            alignment: start;
+            padding-top: 3px;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: StateTone.fill-of(root.server.state-kind);
+                accessible-role: text;
+                accessible-label: root.server.state;
+            }
         }
-        AppButton {
-            compact: true;
-            text: GuiI18n.text("gui-open");
-            accessible-name: GuiI18n.value("gui-home-open-host", root.server.name);
-            icon: @image-url("../../../../assets/icons/chevron-right.svg");
-            clicked => { root.open(); }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            spacing: 4px;
+            Heading { text: root.server.name; font-size: Theme.row-heading-size; overflow: elide; }
+            HorizontalLayout {
+                spacing: 8px;
+                if root.paired : VerticalLayout { alignment: center; Chip { text: GuiI18n.text("gui-paired"); tone: "running"; } }
+                BodyText { text: root.server.address; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+            if root.server.needs-attention : BodyText { text: GuiI18n.text("gui-linked-server-attention"); color: Theme.warning; overflow: elide; }
         }
-        IconButton {
-            width: Theme.button-height-small;
-            height: Theme.button-height-small;
-            icon: @image-url("../../../../assets/icons/more.svg");
-            accessible-name: GuiI18n.value("gui-home-more-host", root.server.name);
-            clicked => { more.show({ x: 0px, y: self.height + 4px }); }
-            more := PopupMenu {
-                entries: [
-                    { id: "pair", label: root.paired ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-this-server") },
-                    { id: "folder", label: GuiI18n.text("gui-open-folder") },
-                    { id: "repair", label: GuiI18n.text("gui-repair-server"), hidden: root.server.state-kind != "needs-recovery" },
-                    { id: "rule", separator: true },
-                    { id: "delete", label: GuiI18n.text("gui-delete-server") },
-                ];
-                activated(id) => { root.activated(id); }
+        // The buttons raise a hard shadow to the right and below.
+        HorizontalLayout {
+            spacing: 6px;
+            padding-right: Theme.shadow-room;
+            alignment: end;
+            if root.server.can-start || root.server.can-stop : IconButton {
+                width: Theme.button-height-small;
+                height: Theme.button-height-small;
+                icon: root.server.can-start ? @image-url("../../../../assets/icons/play.svg") : @image-url("../../../../assets/icons/stop.svg");
+                accessible-name: GuiI18n.value(root.server.can-start ? "gui-linked-server-start" : "gui-home-stop-host", root.server.name);
+                tooltip: root.server.can-start ? GuiI18n.text("gui-start") : GuiI18n.text("gui-stop");
+                clicked => { if root.server.can-start { root.start-requested(); } else { root.stop-requested(); } }
+            }
+            IconButton {
+                width: Theme.button-height-small;
+                height: Theme.button-height-small;
+                icon: @image-url("../../../../assets/icons/chevron-right.svg");
+                accessible-name: GuiI18n.value("gui-home-open-host", root.server.name);
+                tooltip: GuiI18n.text("gui-open");
+                clicked => { root.open(); }
+            }
+            IconButton {
+                width: Theme.button-height-small;
+                height: Theme.button-height-small;
+                icon: @image-url("../../../../assets/icons/more.svg");
+                accessible-name: GuiI18n.value("gui-home-more-host", root.server.name);
+                clicked => { more.show({ x: 0px, y: self.height + 4px }); }
+                more := PopupMenu {
+                    entries: [
+                        { id: "pair", label: root.paired ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-this-server") },
+                        { id: "folder", label: GuiI18n.text("gui-open-folder") },
+                        { id: "repair", label: GuiI18n.text("gui-repair-server"), hidden: root.server.state-kind != "needs-recovery" },
+                        { id: "rule", separator: true },
+                        { id: "delete", label: GuiI18n.text("gui-delete-server") },
+                    ];
+                    activated(id) => { root.activated(id); }
+                }
             }
         }
     }
-    // The buttons raise a hard shadow to the right and below.
+    // The button raises a hard shadow to the right and below.
     HorizontalLayout {
         padding-right: Theme.shadow-room;
         padding-bottom: Theme.shadow-room;
@@ -104,7 +231,11 @@ export component LinkedServersCard inherits SideCard {
     callback repair(string);
     callback delete(ServerRow);
     callback create();
-    DisplayHeading { text: GuiI18n.text("gui-linked-servers-title"); font-size: Theme.item-title-size; }
+    HorizontalLayout {
+        spacing: 8px;
+        DisplayHeading { text: GuiI18n.text("gui-linked-servers-title"); font-size: Theme.item-title-size; horizontal-stretch: 1; }
+        VerticalLayout { alignment: center; Chip { text: root.servers.length; } }
+    }
     if root.servers.length == 0 && root.pending.length == 0 : BodyText {
         text: GuiI18n.text("gui-no-linked-server-detail");
         color: Theme.text-muted;
@@ -141,6 +272,7 @@ export component LinkedServersCard inherits SideCard {
         AppButton {
             text: GuiI18n.text("gui-create-linked-server");
             icon: @image-url("../../../../assets/icons/add.svg");
+            tone: "success";
             horizontal-stretch: 1;
             enabled: root.pending.length == 0;
             hint: GuiI18n.text("gui-linked-server-being-built");
@@ -149,36 +281,66 @@ export component LinkedServersCard inherits SideCard {
     }
 }
 
-// Where a host keeps its files, and the way to open the folder.
+// Where a host keeps its files, whether they stay, and what can be done to
+// them.
 export component HostStorageCard inherits SideCard {
     // "temporary" or "persistent", and how it reads to the user.
     in property <string> storage;
+    in property <string> storage-kind;
     in property <string> lifecycle;
     in property <string> path;
+    // Whether the host is one that can be kept, which a temporary client is,
+    // whether it can be right now, and why not.
+    in property <bool> keepable;
+    in property <bool> can-keep;
+    in property <string> keep-hint;
     callback open-folder();
-    DisplayHeading { text: GuiI18n.text("gui-storage"); font-size: Theme.item-title-size; }
-    BodyText { text: root.storage; color: Theme.text; font-weight: 700; overflow: elide; }
-    if root.lifecycle != "" : BodyText { text: root.lifecycle; font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
-    BodyText { text: root.path; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
-    // The button raises a hard shadow to the right and below.
+    callback keep();
+    callback delete();
     HorizontalLayout {
+        spacing: 8px;
+        DisplayHeading { text: GuiI18n.text("gui-storage"); font-size: Theme.item-title-size; horizontal-stretch: 1; }
+        VerticalLayout { alignment: center; Chip { text: root.storage; } }
+    }
+    BodyText { text: root.path; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; overflow: elide; }
+    // The buttons raise a hard shadow to the right and below.
+    HorizontalLayout {
+        spacing: 8px;
         padding-right: Theme.shadow-room;
         padding-bottom: Theme.shadow-room;
-        alignment: start;
-        AppButton {
+        if root.keepable : AppButton {
+            text: GuiI18n.text("gui-storage-keep");
+            tone: "info";
+            icon: @image-url("../../../../assets/icons/folder.svg");
             compact: true;
+            horizontal-stretch: 1;
+            enabled: root.can-keep;
+            hint: root.keep-hint;
+            clicked => { root.keep(); }
+        }
+        if !root.keepable : AppButton {
             text: GuiI18n.text("gui-open-folder");
             icon: @image-url("../../../../assets/icons/folder.svg");
+            compact: true;
+            horizontal-stretch: 1;
             clicked => { root.open-folder(); }
         }
+        AppButton {
+            text: GuiI18n.text("gui-storage-delete");
+            tone: "danger";
+            icon: @image-url("../../../../assets/icons/trash.svg");
+            compact: true;
+            horizontal-stretch: 1;
+            clicked => { root.delete(); }
+        }
     }
+    if root.lifecycle != "" : BodyText { text: root.lifecycle; font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
 }
 
 // The text an instance adds to a bug report, shown as it will be copied.
 export component ReportCard inherits SideCard {
     in property <string> summary;
     callback copy(string);
-    callback open-bundle();
     DisplayHeading { text: GuiI18n.text("gui-report-title"); font-size: Theme.item-title-size; }
     BodyText { text: GuiI18n.text("gui-report-detail"); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
     // Long summaries scroll inside the preview rather than growing the card.
@@ -188,6 +350,7 @@ export component ReportCard inherits SideCard {
             width: parent.width;
             height: parent.height;
             radius: Theme.small-radius;
+            lift: 0px;
             fill: Theme.field;
             ScrollView {
                 x: 10px;
@@ -212,19 +375,102 @@ export component ReportCard inherits SideCard {
             }
         }
     }
-    // The buttons raise a hard shadow to the right and below.
+    // The button raises a hard shadow to the right and below.
     VerticalLayout {
-        spacing: 8px;
         padding-right: Theme.shadow-room;
         padding-bottom: Theme.shadow-room;
         AppButton {
             text: GuiI18n.text("gui-report-copy");
             tone: "primary";
+            icon: @image-url("../../../../assets/icons/copy.svg");
             clicked => { root.copy(root.summary); }
         }
+    }
+}
+
+// One file the diagnostic bundle can carry, with the box that takes it or
+// leaves it out.
+component BundleFileRow inherits Rectangle {
+    in property <BundlePartRow> part;
+    in property <bool> enabled;
+    callback toggled(bool);
+    height: Theme.control-height;
+    accessible-role: checkbox;
+    accessible-label: root.part.name;
+    accessible-checkable: true;
+    accessible-checked: root.part.selected;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.toggled(!root.part.selected); } }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.toggled(!root.part.selected); } }
+    HorizontalLayout {
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: root.part.selected ? Theme.text : Theme.field;
+                if root.part.selected : Image {
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../assets/icons/check.svg");
+                    colorize: Theme.surface;
+                }
+            }
+        }
+        BodyText { text: root.part.name; color: Theme.text; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+        BodyText { text: root.part.size; color: Theme.text-muted; font-family: Theme.mono-family; font-size: Theme.caption-size; vertical-alignment: center; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.part.selected); }
+    }
+}
+
+// What a diagnostic bundle would carry, and the way to save it.
+export component BundleCard inherits SideCard {
+    in property <[BundlePartRow]> parts;
+    in property <string> selection;
+    in property <int> selected-count;
+    in property <bool> exporting;
+    in property <string> result;
+    in property <string> error;
+    // The host the files belong to; the offer is asked for again when it
+    // changes, since the files do.
+    in property <string> host-id;
+    callback toggle(string, bool);
+    callback export();
+    callback plan();
+    init => { root.plan(); }
+    changed host-id => { root.plan(); }
+    DisplayHeading { text: GuiI18n.text("gui-bundle-card-title"); font-size: Theme.item-title-size; }
+    if root.parts.length == 0 : BodyText { text: GuiI18n.text("gui-bundle-empty"); color: Theme.text-muted; wrap: word-wrap; }
+    for part in root.parts : BundleFileRow {
+        part: part;
+        enabled: !root.exporting;
+        toggled(value) => { root.toggle(part.name, value); }
+    }
+    if root.parts.length > 0 : Rectangle { height: 1px; background: Theme.border-strong; }
+    if root.parts.length > 0 : BodyText { text: root.selection; color: Theme.text; font-weight: 700; wrap: word-wrap; }
+    if root.error != "" : BodyText { text: root.error; color: Theme.danger; font-size: Theme.label-size; wrap: word-wrap; }
+    if root.result != "" : BodyText { text: root.result; color: Theme.text-secondary; font-size: Theme.label-size; wrap: word-wrap; }
+    // The button raises a hard shadow to the right and below.
+    VerticalLayout {
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
         AppButton {
-            text: GuiI18n.text("gui-report-bundle");
-            clicked => { root.open-bundle(); }
+            text: GuiI18n.text("gui-bundle-card-save");
+            icon: @image-url("../../../../assets/icons/import.svg");
+            enabled: root.selected-count > 0 && !root.exporting;
+            hint: root.exporting ? GuiI18n.text("gui-hint-export-running") : GuiI18n.text("gui-hint-select-export-item");
+            clicked => { root.export(); }
         }
     }
+    BodyText { text: GuiI18n.text("gui-bundle-card-note"); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
 }

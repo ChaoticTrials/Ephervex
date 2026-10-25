@@ -2,7 +2,7 @@
 
 import { HostIcon, LoaderGlyph } from "../components/artwork.slint";
 import { AppButton, BusySpinner, Chip, IconButton, KeyboardFocus, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
-import { BodyText, Divider, Heading } from "../components/text.slint";
+import { BodyText, Divider, DisplayHeading, Heading } from "../components/text.slint";
 import { GuiI18n, HostIcons } from "../globals.slint";
 import {
     MenuRow,
@@ -101,8 +101,10 @@ export component SurfaceTabs inherits Rectangle {
     in property <[WorkspaceSurfaceRow]> surfaces;
     in property <string> selected;
     in property <int> selected-index;
+    // How wide each tab is, for labels longer than a surface name.
+    in property <length> tab-size: Theme.workspace-tab-width;
     callback chosen(string);
-    property <length> tab-width: min(Theme.workspace-tab-width, root.width / 2);
+    property <length> tab-width: min(root.tab-size, root.width / 2);
     property <bool> all-fit: root.surfaces.length * root.tab-width <= root.width;
     // Tabs shown besides More, never fewer than the selected one.
     property <int> fitting: root.all-fit ? root.surfaces.length : max(1, floor((root.width - root.tab-width) / root.tab-width));
@@ -237,6 +239,50 @@ export component SurfaceTabs inherits Rectangle {
     }
 }
 
+// The host's state as a stamp: what it is doing or what it needs, and one
+// line more, on a fill that says which kind of state it is.
+component HostStamp inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <color> tone;
+    width: max(caption.preferred-width, detail-text.preferred-width) / 2 + 36px;
+    height: (caption.preferred-height + detail-text.preferred-height) / 2 + 14px;
+    horizontal-stretch: 0;
+    accessible-role: text;
+    accessible-label: root.detail == "" ? root.label : root.label + ". " + root.detail;
+    // Stamped on slightly crooked, like a rubber stamp. The stamp is drawn at
+    // twice its size into a layer, and the layer is shrunk and turned, so the
+    // turned edges and letters are sampled down instead of stretched.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        transform-rotation: -6deg;
+        Rectangle {
+            x: -root.width / 2;
+            y: -root.height / 2;
+            width: 2 * root.width;
+            height: 2 * root.height;
+            transform-scale: 50%;
+            cache-rendering-hint: true;
+            Plate {
+                width: parent.width;
+                height: parent.height;
+                radius: 2 * Theme.small-radius;
+                outline-width: 2 * Theme.strong-border-width;
+                lift: 2 * Theme.shadow-offset-card;
+                fill: root.tone;
+            }
+            VerticalLayout {
+                alignment: center;
+                caption := DisplayHeading { text: root.label.to-uppercase(); font-size: Theme.item-title-size * 2; letter-spacing: 2px; color: Theme.text; horizontal-alignment: center; }
+                detail-text := Text { text: root.detail; color: Theme.text; font-family: Theme.mono-family; font-size: Theme.caption-size * 2; font-weight: 600; horizontal-alignment: center; }
+            }
+        }
+    }
+}
+
 // The visual boundary for one installed client or local server. It owns
 // host status/actions, data-driven surface navigation, and durable
 // workflow affordances. Surface bodies remain independent children that
@@ -342,6 +388,36 @@ export component HostWorkspace inherits Rectangle {
     in property <string> linked-tone: "server";
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
+    // What the stamp says: whether this is a client, how many recorded
+    // reasons say it needs attention, and how often its bug showed up again.
+    in property <bool> stamp-client;
+    in property <int> stamp-problems;
+    in property <int> stamp-reproduced;
+    property <bool> stamp-busy: root.restart-stage != "" || root.status-kind == "starting" || root.status-kind == "stopping" || root.status-kind == "restarting";
+    // A process that may still run, or files that need recovery: the state
+    // text says it, in the stamp's own place.
+    property <bool> stamp-unsettled: root.status-kind == "orphaned" || root.status-kind == "unknown" || root.status-kind == "needs-recovery" || root.status-kind == "failed";
+    property <string> stamp-label: root.restart-stage == "stopping" || root.status-kind == "stopping" ? GuiI18n.text("gui-stamp-stopping")
+        : root.stamp-busy ? GuiI18n.text("gui-stamp-starting")
+        : root.status-kind == "running" ? GuiI18n.text("gui-stamp-running")
+        : root.stamp-unsettled ? root.status
+        : root.stamp-problems > 0 ? GuiI18n.text("gui-stamp-needs-fix")
+        : !root.stamp-client ? GuiI18n.text("gui-stamp-stopped")
+        : root.stamp-reproduced > 0 ? GuiI18n.count("gui-stamp-reproduced", root.stamp-reproduced)
+        : GuiI18n.text("gui-stamp-not-yet");
+    property <string> stamp-detail: root.stamp-busy ? "..."
+        : root.status-kind == "running" ? (root.stamp-client ? GuiI18n.text("gui-stamp-in-game") : root.address)
+        : root.stamp-unsettled ? root.address
+        : root.stamp-problems > 0 ? GuiI18n.count("gui-stamp-problems", root.stamp-problems)
+        : !root.stamp-client ? root.address
+        : root.stamp-reproduced > 0 ? GuiI18n.text("gui-stamp-reproduced-detail")
+        : GuiI18n.text("gui-stamp-not-yet-detail");
+    property <color> stamp-tone: root.status-kind == "running" ? Theme.state-running
+        : root.stamp-busy ? (root.stamp-client ? Theme.state-running : Theme.primary-fill)
+        : root.stamp-unsettled || root.stamp-problems > 0 ? Theme.state-attention
+        : !root.stamp-client ? Theme.well
+        : root.stamp-reproduced > 0 ? Theme.primary-fill
+        : Theme.state-stopped;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
     // Which host the pane shows, so state kept for one does not carry over to
     // another when the pane is pointed elsewhere.
@@ -352,6 +428,9 @@ export component HostWorkspace inherits Rectangle {
     in property <bool> has-issue-link;
     callback set-issue-link(string);
     callback open-issue-link();
+    // The column beside the page is on screen and carries the Run card, so
+    // the header leaves the run actions to it.
+    in property <bool> actions-in-column;
     // Whether a button opens the column of cards that does not fit beside the
     // page, which it offers on a page that has one.
     in property <bool> show-column-button;
@@ -368,7 +447,64 @@ export component HostWorkspace inherits Rectangle {
         VerticalLayout {
             // The header runs edge to edge over the page color; the
             // body under it keeps its own padding.
-            if !root.compact : Rectangle {
+            if root.quick : Rectangle {
+                height: quick-head.preferred-height;
+                background: Theme.background;
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: Theme.strong-border-width;
+                    background: Theme.border-strong;
+                }
+                quick-head := VerticalLayout {
+                    padding-top: 16px; padding-bottom: 16px; padding-left: 22px; padding-right: 22px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                VerticalLayout { alignment: center; Rectangle { width: 12px; height: 12px; border-width: Theme.chip-border-width; border-color: Theme.border-strong; background: StateTone.of(root.restart-stage != "" ? "restarting" : root.status-kind); } }
+                                VerticalLayout { alignment: center; BodyText { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; overflow: elide; } }
+                                if root.address != "" : VerticalLayout { alignment: center; Chip { text: root.address; } }
+                            }
+                            DisplayHeading { text: root.title; font-size: Theme.item-title-size; overflow: elide; }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            horizontal-stretch: 0;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: end;
+                                padding-right: Theme.shadow-room;
+                                padding-bottom: Theme.shadow-room;
+                                AppButton { text: GuiI18n.text("gui-quick-view-open-as-page"); icon: @image-url("../../../../assets/icons/external-link.svg"); clicked => { root.open-quick-as-page(); } }
+                                AppButton {
+                                    text: root.quick-fullscreen ? GuiI18n.text("gui-quick-view-exit-fullscreen") : GuiI18n.text("gui-quick-view-fullscreen");
+                                    icon: root.quick-fullscreen ? @image-url("../../../../assets/icons/collapse.svg") : @image-url("../../../../assets/icons/expand.svg");
+                                    tone: "info";
+                                    clicked => { root.toggle-quick-fullscreen(); }
+                                }
+                                IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-quick-view-close"); lift: Theme.shadow-offset-card; clicked => { root.close-pane(); } }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        min-height: Theme.chip-height;
+                        spacing: 8px;
+                        alignment: start;
+                        if root.minecraft != "" : VerticalLayout { alignment: center; Chip { text: root.minecraft; } }
+                        if root.loader != "" : VerticalLayout { alignment: center; Chip { text: root.loader; tone: root.loader-kind; } }
+                        if root.mods >= 0 : VerticalLayout { alignment: center; Chip { text: GuiI18n.count("gui-host-chip-mods", root.mods); } }
+                        if root.storage != "" : VerticalLayout { alignment: center; Chip { text: root.storage; } }
+                    }
+                }
+            }
+            if !root.compact && !root.quick : header-band := Rectangle {
+                // Whether the actions sit on a row under what identifies the host.
+                property <bool> actions-below: self.width - 44px < identity.min-width + 8px + header-actions.preferred-width;
                 height: head.preferred-height;
                 background: Theme.background;
                 Rectangle {
@@ -379,21 +515,31 @@ export component HostWorkspace inherits Rectangle {
                 head := VerticalLayout {
                     padding-top: 18px; padding-bottom: 18px; padding-left: 22px; padding-right: 22px;
                     spacing: 10px;
-                    HorizontalLayout {
-                        spacing: 8px;
-                        if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
-                        VerticalLayout { alignment: center; Text { text: root.host-kind-label; color: Theme.text-muted; font-size: Theme.caption-size; font-weight: 700; } }
-                        VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
-                        if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-                        if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-                        if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
-                        Rectangle { horizontal-stretch: 1; }
-                        HorizontalLayout {
+                    GridLayout {
+                        spacing-horizontal: 8px;
+                        spacing-vertical: 10px;
+                        identity := HorizontalLayout {
+                            col: 0;
+                            row: 0;
+                            horizontal-stretch: 1;
+                            alignment: start;
+                            spacing: 8px;
+                            if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
+                            VerticalLayout { alignment: center; Text { text: root.host-kind-label; color: Theme.text-muted; font-size: Theme.caption-size; font-weight: 700; } }
+                            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+                            if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                            if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+                        }
+                        header-actions := HorizontalLayout {
+                            col: header-band.actions-below ? 0 : 1;
+                            row: header-band.actions-below ? 1 : 0;
                             spacing: 12px;
-                            if root.show-column-button : IconButton { icon: @image-url("../../../../assets/icons/server.svg"); accessible-name: root.column-button-label; clicked => { root.show-column(); } }
-                            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
+                            alignment: end;
+                            if root.show-column-button : IconButton { icon: @image-url("../../../../assets/icons/server.svg"); accessible-name: root.column-button-label; lift: Theme.shadow-offset-card; clicked => { root.show-column(); } }
+                            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); lift: Theme.shadow-offset-card; clicked => { root.split-beside(); } }
                             AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
-                            if root.show-launch-as : LaunchAsButton {
+                            if root.show-launch-as && !root.actions-in-column : LaunchAsButton {
                                 account-entries: root.account-entries;
                                 enabled: root.primary-enabled && !root.occupied;
                                 hint: root.occupied ? root.occupied-text : root.primary-hint;
@@ -401,9 +547,9 @@ export component HostWorkspace inherits Rectangle {
                                 launch-as(account, alongside) => { root.launch-as(account, alongside); }
                                 add-account => { root.add-account(); }
                             }
-                            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-                            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-                            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                            if root.kill-visible && !root.actions-in-column : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                            if root.restart-visible && !root.actions-in-column : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                            if !root.actions-in-column : AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
                         }
                     }
                     if root.has-issue-link : IssueLinkRow {
@@ -412,7 +558,11 @@ export component HostWorkspace inherits Rectangle {
                         save(link) => { root.set-issue-link(link); }
                         open => { root.open-issue-link(); }
                     }
-                    Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        DisplayHeading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        VerticalLayout { alignment: center; HostStamp { label: root.stamp-label; detail: root.stamp-detail; tone: root.stamp-tone; } }
+                    }
                     HorizontalLayout {
                         // The header keeps its height whichever chips a host has.
                         min-height: Theme.chip-height;

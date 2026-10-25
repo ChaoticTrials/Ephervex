@@ -49,6 +49,58 @@ fn the_header_chips_say_what_the_host_is() {
     labeled(&ui, &mods);
 }
 
+fn stamped(mut row: InstanceRow, label: &str, detail: &str) {
+    let ui = support::test_window();
+    support::set_narrowest_with_list(&ui);
+    row.id = "client".into();
+    support::show_client(&ui, row, "Overview");
+    labeled(
+        &ui,
+        &if detail.is_empty() {
+            label.to_owned()
+        } else {
+            format!("{label}. {detail}")
+        },
+    );
+}
+
+#[test]
+fn the_stamp_says_what_the_host_is_doing_or_what_it_needs() {
+    let idle = InstanceRow {
+        state: "Ready".into(),
+        state_kind: "idle".into(),
+        ..InstanceRow::default()
+    };
+    stamped(client(), "Running", "in game");
+    stamped(
+        InstanceRow {
+            problems: 2,
+            needs_attention: true,
+            ..idle.clone()
+        },
+        "Needs fix",
+        "2 problems before it can start",
+    );
+    stamped(
+        InstanceRow {
+            case_reproduced: 3,
+            ..idle.clone()
+        },
+        "Reproduced \u{d7}3",
+        "seen again",
+    );
+    stamped(idle, "Not yet", "not reproduced yet");
+    stamped(
+        InstanceRow {
+            state: "Orphaned".into(),
+            state_kind: "orphaned".into(),
+            ..InstanceRow::default()
+        },
+        "Orphaned",
+        "",
+    );
+}
+
 #[test]
 fn a_host_with_no_mods_still_says_so_in_its_header() {
     let ui = support::test_window();

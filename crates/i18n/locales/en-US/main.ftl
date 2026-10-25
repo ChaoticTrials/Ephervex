@@ -4003,10 +4003,9 @@ gui-issue-link-placeholder = https://github.com/owner/repo/issues/42
 gui-issue-link-open = Open the issue link { $value }
 gui-issue-link-open-failed = The issue link could not be opened in the browser.
 
-gui-report-title = Report
+gui-report-title = Copy summary for the issue
 gui-report-detail = Exactly this text is copied. Paste it into the bug report.
 gui-report-copy = Copy summary
-gui-report-bundle = Diagnostic bundle...
 
 gui-issue-link-optional = Issue link (optional)
 gui-create-with-server = Also create a linked server
@@ -4059,3 +4058,27 @@ gui-source-page-unavailable = Could not open a browser. The source is at the pro
 gui-file-unavailable = Could not open the file with the desktop.
 gui-open-slint-page = Open the Slint website
 gui-slint-page-unavailable = Could not open a browser. The Slint website is slint.dev.
+gui-stamp-running = Running
+gui-stamp-starting = Starting
+gui-stamp-stopping = Stopping
+gui-stamp-stopped = Stopped
+gui-stamp-needs-fix = Needs fix
+gui-stamp-in-game = in game
+gui-stamp-problems = { $count ->
+    [one] 1 problem before it can start
+   *[other] { $count } problems before it can start
+}
+gui-stamp-reproduced = Reproduced ×{ $count }
+gui-stamp-reproduced-detail = seen again
+gui-stamp-not-yet = Not yet
+gui-stamp-not-yet-detail = not reproduced yet
+gui-run-title = Run
+gui-run-log = Log
+gui-run-server-beside = Server beside
+gui-run-client-beside = Client beside
+gui-storage-keep = Keep it
+gui-storage-delete = Delete...
+gui-storage-temporary-note = Temporary folders can be cleared by the system at any time. Keep it moves the folder somewhere permanent.
+gui-bundle-card-title = Diagnostic bundle (.zip)
+gui-bundle-card-save = Save zip...
+gui-bundle-card-note = Files are copied as-is and never uploaded. Logs may contain server addresses and player names.

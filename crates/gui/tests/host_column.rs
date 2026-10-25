@@ -8,9 +8,9 @@ mod support;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, HostView, InstanceRow, ServerRow, Theme};
+use ephervex_gui::ui::{AppWindow, BundlePartRow, HostView, InstanceRow, ServerRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::ElementHandle;
+use i_slint_backend_testing::{AccessibleRole, ElementHandle};
 use slint::{ComponentHandle, ModelRc, PhysicalSize, VecModel};
 
 fn settle(ui: &AppWindow) {
@@ -52,7 +52,8 @@ fn client_with_server() -> HostView {
 
 fn window(width: u32, host: HostView) -> AppWindow {
     let ui = support::test_window();
-    ui.window().set_size(PhysicalSize::new(width, 900));
+    // Tall enough for every card, since one below the fold is not drawn.
+    ui.window().set_size(PhysicalSize::new(width, 2400));
     support::show(&ui, vec![host], vec![support::pane(1, 0, "Overview")]);
     settle(&ui);
     ui
@@ -205,14 +206,150 @@ fn a_server_page_has_no_report_card() {
 }
 
 #[test]
-fn the_report_card_leads_to_the_diagnostic_bundle() {
-    let ui = window(1600, client_with_server());
-    let requests = support::follow_surface_requests(&ui);
-    press(&ui, &lookup("gui-report-bundle"));
+fn the_bundle_card_lists_the_files_and_saves_the_chosen_ones() {
+    let mut view = client_with_server();
+    view.bundle_parts = ModelRc::new(VecModel::from(vec![
+        BundlePartRow {
+            name: "logs/latest.log".into(),
+            kind: "Game log".into(),
+            size: "812 KiB".into(),
+            selected: true,
+            ..BundlePartRow::default()
+        },
+        BundlePartRow {
+            name: "logs/debug.log".into(),
+            kind: "Game log".into(),
+            size: "1.4 MiB".into(),
+            selected: false,
+            ..BundlePartRow::default()
+        },
+    ]));
+    view.bundle_selected_count = 1;
+    view.bundle_selection = "1 file, 812 KiB".into();
+    let ui = window(1600, view);
+    assert!(drawn(&ui, "BundleCard"));
+    let toggled = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&toggled);
+    ui.on_toggle_bundle_part(move |kind, id, name, chosen| {
+        sink.borrow_mut()
+            .push((kind.to_string(), id.to_string(), name.to_string(), chosen));
+    });
+    let exported = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&exported);
+    ui.on_export_bundle(move |kind, id| sink.borrow_mut().push((kind.to_string(), id.to_string())));
+
+    press(&ui, "logs/debug.log");
+    press(&ui, &lookup("gui-bundle-card-save"));
+
     assert_eq!(
-        requests.borrow().last(),
-        Some(&(1, "Diagnostics".to_owned()))
+        toggled.borrow().as_slice(),
+        [(
+            "client".to_owned(),
+            "client".to_owned(),
+            "logs/debug.log".to_owned(),
+            true
+        )]
     );
+    assert_eq!(
+        exported.borrow().as_slice(),
+        [("client".to_owned(), "client".to_owned())]
+    );
+}
+
+#[test]
+fn the_bundle_offer_is_asked_for_when_the_card_appears_and_when_the_host_changes() {
+    let ui = support::test_window();
+    ui.window().set_size(PhysicalSize::new(1600, 2400));
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    ui.on_plan_host_bundle(move |kind, id| {
+        sink.borrow_mut().push((kind.to_string(), id.to_string()))
+    });
+    support::show(
+        &ui,
+        vec![client_with_server()],
+        vec![support::pane(1, 0, "Overview")],
+    );
+    settle(&ui);
+    assert_eq!(
+        asked.borrow().last(),
+        Some(&("client".to_owned(), "client".to_owned()))
+    );
+
+    support::show(
+        &ui,
+        vec![support::server_view(linked_server())],
+        vec![support::pane(1, 0, "Overview")],
+    );
+    settle(&ui);
+    assert_eq!(
+        asked.borrow().last(),
+        Some(&("server".to_owned(), "server".to_owned()))
+    );
+}
+
+#[test]
+fn the_run_card_starts_and_stops_the_host_the_page_shows() {
+    let mut view = client_with_server();
+    view.client.can_launch = true;
+    let ui = window(1600, view);
+    let launched = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&launched);
+    ui.on_launch_client(move |id| sink.borrow_mut().push(id.to_string()));
+    press(&ui, &lookup("gui-launch"));
+    assert_eq!(launched.borrow().as_slice(), ["client"]);
+}
+
+#[test]
+fn the_run_card_waits_while_the_host_restarts() {
+    let mut view = client_with_server();
+    view.client.can_kill = true;
+    view.client.can_restart = true;
+    view.client.restart_stage = "stopping".into();
+    let ui = window(1600, view);
+    let stop = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-stop-game"))
+        .find(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .expect("the Stop button");
+    assert_eq!(stop.accessible_enabled(), Some(false));
+    let restart = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-restart"))
+        .find(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .expect("the Restart button");
+    assert_eq!(restart.accessible_enabled(), Some(false));
+}
+
+#[test]
+fn a_server_page_offers_no_keep_it_on_its_storage_card() {
+    let mut server = linked_server();
+    server.storage_kind = "temporary".into();
+    let ui = window(1600, support::server_view(server));
+    assert!(drawn(&ui, "HostStorageCard"));
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-storage-keep"))
+            .all(|element| element.size().width == 0.0)
+    );
+}
+
+#[test]
+fn the_header_leaves_the_run_actions_to_the_card_while_the_column_is_beside_the_page() {
+    let ui = window(1600, client_with_server());
+    let launches = ElementHandle::find_by_accessible_label(&ui, &lookup("gui-launch"))
+        .filter(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .count();
+    assert_eq!(launches, 1, "one Launch button, in the Run card");
+
+    let narrow = window(1300, client_with_server());
+    let launches = ElementHandle::find_by_accessible_label(&narrow, &lookup("gui-launch"))
+        .filter(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .count();
+    assert_eq!(launches, 1, "one Launch button, in the header");
 }
 
 fn text_shown(ui: &AppWindow, label: &str) -> bool {

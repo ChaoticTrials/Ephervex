@@ -65,7 +65,8 @@ import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint"
 import { HomePage } from "home/home-page.slint";
 import { CaseSurface } from "workspace/case.slint";
 import { StorageCard } from "home/storage-card.slint";
-import { HostStorageCard, LinkedServersCard, ReportCard } from "workspace/host-column.slint";
+import { HostActions } from "workspace/host-actions.slint";
+import { BundleCard, HostStorageCard, LinkedServersCard, ReportCard, RunCard } from "workspace/host-column.slint";
 import { TipsCard } from "home/tips-card.slint";
 import { PendingCard } from "host-list/host-card.slint";
 import { HostList } from "host-list/host-list.slint";
@@ -1042,6 +1043,8 @@ export component AppWindow inherits Window {
     callback dismiss-run-failure(string, string);
     // (kind, id, part, chosen)
     callback toggle-bundle-part(string, string, string, bool);
+    // (kind, id): asks for what a bundle for the host could carry.
+    callback plan-host-bundle(string, string);
     // (kind, id, chosen)
     callback select-all-bundle-parts(string, string, bool);
     callback export-bundle(string, string);
@@ -1484,6 +1487,7 @@ export component AppWindow inherits Window {
                                 issue-link: self.is-client ? host.client.issue-link : "";
                                 set-issue-link(link) => { root.set-issue-link(host.id, link); }
                                 open-issue-link => { root.open-issue-link(host.client.issue-link); }
+                                actions-in-column: shell.side-inline && root.shows-host-column && !split;
                                 show-column-button: !shell.side-inline && root.shows-host-column;
                                 column-button-label: self.is-client ? GuiI18n.text("gui-workspace-show-column") : GuiI18n.text("gui-workspace-show-storage");
                                 show-column => { shell.open-side(); }
@@ -1512,6 +1516,9 @@ export component AppWindow inherits Window {
                                 linked-name: self.is-client ? host.client.paired-server-name : host.server.paired-client-name;
                                 linked-tone: self.is-client ? "server" : "neutral";
                                 restart-required: !self.is-client && host.server.restart-required;
+                                stamp-client: self.is-client;
+                                stamp-problems: self.is-client ? host.client.problems : host.server.problems;
+                                stamp-reproduced: self.is-client ? host.client.case-reproduced : 0;
                                 choose-host => { root.pane-host-picker-pane = pane.id; root.pane-host-picker-kind = host.kind; root.pane-host-picker-id = host.id; root.pane-host-query = ""; root.pane-host-query-changed(); root.modal = "pane-host"; }
                                 split-beside => { root.split-pane-beside(pane.id); }
                                 split-below => { root.split-pane-below(pane.id); }
@@ -1526,16 +1533,16 @@ export component AppWindow inherits Window {
                                 account-entries: root.account-launch-entries;
                                 show-launch-as: self.is-client;
                                 launch-alongside: self.is-client && host.client.can-kill;
-                                primary-label: self.is-client ? (host.client.can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch")) : (host.server.can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start"));
-                                primary-tone: self.is-client && host.client.can-kill ? "danger" : "primary";
-                                primary-enabled: host.available && (self.is-client ? host.client.can-launch || host.client.can-kill : host.server.can-start || host.server.can-stop);
-                                primary-hint: !host.available ? GuiI18n.text("gui-workspace-host-gone") : self.is-client ? (host.client.needs-attention ? GuiI18n.text("gui-hint-needs-attention") : GuiI18n.text("gui-hint-state-changing")) : ServerHints.start(host.server.state-kind, host.server.installed);
+                                primary-label: HostActions.primary-label(host);
+                                primary-tone: HostActions.primary-tone(host);
+                                primary-enabled: HostActions.primary-enabled(host);
+                                primary-hint: HostActions.primary-hint(host);
                                 kill-visible: !self.is-client;
-                                kill-enabled: host.available && !self.is-client && host.server.can-kill;
-                                kill-hint: !host.available ? GuiI18n.text("gui-workspace-host-gone") : ServerHints.kill(host.server.state-kind);
+                                kill-enabled: HostActions.kill-enabled(host);
+                                kill-hint: HostActions.kill-hint(host);
                                 restart-visible: true;
-                                restart-enabled: host.available && (self.is-client ? host.client.can-kill && host.client.can-restart : host.server.can-restart);
-                                restart-hint: !host.available ? GuiI18n.text("gui-workspace-host-gone") : self.is-client ? (!host.client.can-kill ? GuiI18n.text("gui-hint-restart-client-stopped") : !host.client.can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "") : ServerHints.restart(host.server.state-kind);
+                                restart-enabled: HostActions.restart-enabled(host);
+                                restart-hint: HostActions.restart-hint(host);
                                 restart-stage: self.is-client ? host.client.restart-stage : host.server.restart-stage;
                                 workflow-id: host.workflow-id;
                                 workflow-here: host.workflow-pane == 0 || host.workflow-pane == pane.id;
@@ -2599,6 +2606,26 @@ export component AppWindow inherits Window {
                 x: parent.inset;
                 y: parent.inset;
                 height: parent.height - 2 * parent.inset;
+                if root.shows-host-column : RunCard {
+                    host: root.column-host;
+                    account-name: root.default-account-name;
+                    account-entries: root.account-launch-entries;
+                    busy: root.host-busy-kind == root.column-host.kind && root.host-busy-id == root.column-host.id;
+                    busy-text: root.host-busy-text;
+                    primary => {
+                        if root.column-host.kind == "client" {
+                            if root.column-host.client.can-kill { root.kill-instance(root.column-host.id, ""); } else { root.launch-client(root.column-host.id); }
+                        } else {
+                            if root.column-host.server.can-stop { root.server-stop(root.column-host.id); } else { root.server-start(root.column-host.id); }
+                        }
+                    }
+                    restart => { if root.column-host.kind == "client" { root.client-restart(root.column-host.id); } else { root.server-restart(root.column-host.id); } }
+                    kill => { root.pending-action-id = root.column-host.id; root.pending-action-name = root.column-host.server.name; root.modal = "kill"; }
+                    launch-as(account, alongside) => { root.launch-client-as(root.column-host.id, account, alongside); }
+                    add-account => { root.open-settings("Accounts"); }
+                    show-log => { root.show-pane-surface(root.column-pane.id, "Logs"); shell.side-open = false; }
+                    show-pair => { root.show-linked-pair(root.column-pane.id, root.column-host.kind == "client" ? "server" : "client", root.column-host.kind == "client" ? root.column-host.client.paired-server-id : root.column-host.server.paired-client-id); }
+                }
                 if root.shows-host-column && root.column-host.kind == "client" : LinkedServersCard {
                     servers: root.column-host.linked-servers;
                     pending: root.column-host.pending-servers;
@@ -2619,13 +2646,45 @@ export component AppWindow inherits Window {
                 if root.shows-host-column && root.column-host.kind == "client" : ReportCard {
                     summary: root.column-host.client.summary;
                     copy(text) => { root.copy-text(text); }
-                    open-bundle => { root.show-pane-surface(root.column-pane.id, "Diagnostics"); shell.side-open = false; }
+                }
+                if root.shows-host-column : BundleCard {
+                    parts: root.column-host.bundle-parts;
+                    selection: root.column-host.bundle-selection;
+                    selected-count: root.column-host.bundle-selected-count;
+                    exporting: root.column-host.bundle-exporting;
+                    result: root.column-host.bundle-result;
+                    error: root.column-host.bundle-error;
+                    host-id: root.column-host.id;
+                    plan => { root.plan-host-bundle(root.column-host.kind, root.column-host.id); }
+                    toggle(name, value) => { root.toggle-bundle-part(root.column-host.kind, root.column-host.id, name, value); }
+                    export => { root.export-bundle(root.column-host.kind, root.column-host.id); }
                 }
                 if root.shows-host-column : HostStorageCard {
                     storage: root.column-host.kind == "client" ? root.column-host.client.storage : root.column-host.server.storage;
-                    lifecycle: root.column-host.kind != "client" ? "" : root.column-host.client.storage-kind == "temporary" ? GuiI18n.text("gui-temporary-lifecycle") : GuiI18n.text("gui-persistent-lifecycle");
+                    storage-kind: root.column-host.kind == "client" ? root.column-host.client.storage-kind : root.column-host.server.storage-kind;
+                    lifecycle: root.column-host.kind != "client" ? "" : root.column-host.client.storage-kind == "temporary" ? GuiI18n.text("gui-storage-temporary-note") : GuiI18n.text("gui-persistent-lifecycle");
                     path: root.column-host.kind == "client" ? root.column-host.client.path : root.column-host.server.path;
+                    keepable: root.column-host.kind == "client" && root.column-host.client.storage-kind == "temporary";
+                    can-keep: root.column-host.kind == "client" && !root.column-host.client.can-kill;
+                    keep-hint: GuiI18n.text("gui-make-persistent-while-running");
                     open-folder => { if root.column-host.kind == "client" { root.open-client-folder(root.column-host.id); } else { root.open-server-folder(root.column-host.id); } }
+                    keep => { root.open-make-persistent(root.column-host.id); }
+                    delete => {
+                        root.pending-action-id = root.column-host.id;
+                        root.modal-error = "";
+                        if root.column-host.kind == "client" {
+                            root.pending-action-name = root.column-host.client.name;
+                            root.pending-snapshot-deletion-note = root.column-host.client.snapshot-deletion-note;
+                            root.pending-action-linked-servers = root.column-host.client.linked-servers;
+                            root.pending-action-stoppable-linked-servers = root.column-host.client.stoppable-linked-servers;
+                            root.pending-action-unstoppable-linked-servers = root.column-host.client.unstoppable-linked-servers;
+                            root.modal = "delete-instance";
+                        } else {
+                            root.pending-action-name = root.column-host.server.name;
+                            root.pending-snapshot-deletion-note = root.column-host.server.snapshot-deletion-note;
+                            root.modal = "delete-server";
+                        }
+                    }
                 }
                 if root.shows-home : StorageCard {
                     temporary: root.home-temporary-count;

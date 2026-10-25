@@ -1231,6 +1231,13 @@ fn register_apply(ui: &AppWindow, commands: &Sender<Command>, workspace: &Worksp
 
 fn register_bundle(ui: &AppWindow, commands: &Sender<Command>, workspace: &Workspace) {
     let views = workspace.clone();
+    let planner = commands.clone();
+    ui.on_plan_host_bundle(move |kind, id| {
+        if let Some(host) = backend::parse_mod_host(&kind, &id) {
+            open(&views, &planner, host);
+        }
+    });
+    let views = workspace.clone();
     ui.on_toggle_bundle_part(move |kind, id, name, selected| {
         let Some(host) = backend::parse_mod_host(&kind, &id) else {
             return;
