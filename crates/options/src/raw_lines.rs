@@ -40,6 +40,17 @@ pub enum RawLineProblem {
 }
 
 impl RawLineProblem {
+    /// A short stable name, for machine-readable reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingSeparator => "missing-separator",
+            Self::EmptyKey => "empty-key",
+            Self::ControlCharacter => "control-character",
+            Self::DataVersionMarker => "data-version",
+        }
+    }
+
     /// The `ephervex-i18n` message id describing this problem to a user.
     #[must_use]
     pub const fn message_id(self) -> &'static str {
@@ -221,5 +232,25 @@ mod tests {
         for text in ["", "\n\n", "  \r\n", "no separator"] {
             assert!(RawOptionLines::parse(text).is_empty(), "{text:?}");
         }
+    }
+
+    #[test]
+    fn every_problem_has_its_own_stable_name() {
+        let names = [
+            RawLineProblem::MissingSeparator,
+            RawLineProblem::EmptyKey,
+            RawLineProblem::ControlCharacter,
+            RawLineProblem::DataVersionMarker,
+        ]
+        .map(RawLineProblem::as_str);
+        assert_eq!(
+            names,
+            [
+                "missing-separator",
+                "empty-key",
+                "control-character",
+                "data-version"
+            ]
+        );
     }
 }

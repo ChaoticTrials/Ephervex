@@ -548,3 +548,81 @@ fn preferences_are_stored_in_the_configuration_file_and_survive_a_restart() {
     assert_eq!(language["managed"], true);
     assert_eq!(language["value"], "de_de");
 }
+
+/// Writes a configuration whose raw `options.txt` text holds one writable line
+/// and three that cannot be written.
+fn write_raw_options_with_rejected_lines(sandbox: &Sandbox) {
+    let config = sandbox.base().join("config/ephervex");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        "schema_version = 1\nminecraft_raw_options = \"key_key.modmenu.open:key.keyboard.m\\nno separator\\n:no key\\nversion:5\\n\"\n",
+    )
+    .expect("write config");
+}
+
+#[test]
+fn a_raw_option_line_that_cannot_be_written_is_listed_in_the_json_report() {
+    let sandbox = Sandbox::new();
+    write_raw_options_with_rejected_lines(&sandbox);
+
+    let created = sandbox.create("Raw lines", "1.20.1");
+
+    let options = options_of(&created);
+    assert!(
+        options.contains("key_key.modmenu.open:key.keyboard.m"),
+        "{options}"
+    );
+    assert!(!options.contains("no separator"), "{options}");
+    assert!(!options.contains("version:5"), "{options}");
+
+    let preferences = &created["preferences"];
+    assert_eq!(preferences["raw_lines_applied"], 1);
+    assert_eq!(
+        preferences["raw_lines_rejected"],
+        serde_json::json!([
+            { "line": 2, "problem": "missing-separator" },
+            { "line": 3, "problem": "empty-key" },
+            { "line": 4, "problem": "data-version" },
+        ])
+    );
+}
+
+#[test]
+fn a_raw_option_line_that_cannot_be_written_is_named_in_the_human_report() {
+    let sandbox = Sandbox::new();
+    write_raw_options_with_rejected_lines(&sandbox);
+
+    let output = sandbox.run(&["instance", "create", "Raw lines", "--minecraft", "1.20.1"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Line 2 has no \":\""), "{stderr}");
+    assert!(stderr.contains("Line 3 has no key"), "{stderr}");
+    assert!(stderr.contains("Line 4 sets the data version"), "{stderr}");
+    assert!(!stderr.contains("Line 1"), "{stderr}");
+}
+
+#[test]
+fn a_creation_with_only_writable_raw_option_lines_reports_no_rejections() {
+    let sandbox = Sandbox::new();
+    let config = sandbox.base().join("config/ephervex");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        "schema_version = 1\nminecraft_raw_options = \"key_key.modmenu.open:key.keyboard.m\\n\"\n",
+    )
+    .expect("write config");
+
+    let created = sandbox.create("Clean raw lines", "1.20.1");
+
+    assert_eq!(created["preferences"]["raw_lines_applied"], 1);
+    assert_eq!(
+        created["preferences"]["raw_lines_rejected"],
+        serde_json::json!([])
+    );
+}

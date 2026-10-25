@@ -8892,6 +8892,9 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
             )
         );
     }
+    if let Some(applied) = &imported.preferences {
+        print_rejected_raw_lines(applied);
+    }
     report_rejected_addresses(&imported.analysis.rejected_urls, json);
     Ok(())
 }
@@ -9103,7 +9106,22 @@ fn print_created_instance(app: &App, created: &CreatedClient, json: bool) -> any
         };
         print_preference_note(message, &skipped.id, version);
     }
+    print_rejected_raw_lines(applied);
     Ok(())
+}
+
+/// Prints one line per raw `options.txt` line that was not written, so a
+/// hand-edited configuration does not lose a line silently.
+fn print_rejected_raw_lines(applied: &PreferenceApplication) {
+    for rejected in &applied.raw_lines_rejected {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                rejected.problem.message_id(),
+                [("line", MessageArg::from(rejected.line_number))]
+            )
+        );
+    }
 }
 
 /// Prints one "this preference was not applied" line.
@@ -9136,6 +9154,17 @@ fn preferences_applied_json(applied: Option<&PreferenceApplication>) -> serde_js
                     serde_json::json!({
                         "preference": skipped.id.as_str(),
                         "reason": skipped.reason.as_str(),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            "raw_lines_applied": applied.raw_lines_applied,
+            "raw_lines_rejected": applied
+                .raw_lines_rejected
+                .iter()
+                .map(|rejected| {
+                    serde_json::json!({
+                        "line": rejected.line_number,
+                        "problem": rejected.problem.as_str(),
                     })
                 })
                 .collect::<Vec<_>>(),
