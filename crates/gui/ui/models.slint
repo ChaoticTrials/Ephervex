@@ -696,6 +696,32 @@ export struct JavaChoiceRow {
     reason: string,
 }
 
+// One operator in a server's list.
+export struct OperatorRow {
+    name: string,
+    // The permission level as text, or empty when the entry sets none.
+    level: string,
+}
+
+// A server's live statistics as its Overview shows them. A section with
+// nothing to show leaves its content empty and says why in its note.
+export struct ServerStatisticsView {
+    tick-note: string,
+    // The newest tick rate, and the top of the chart's scale, as text.
+    tick-current: string,
+    tick-scale: string,
+    // The tick-rate history as SVG path commands in a 100 by 40 box.
+    tick-path: string,
+    players-note: string,
+    players-summary: string,
+    players: [string],
+    // How many players the list leaves out, as text, empty when none.
+    players-more: string,
+    operators-note: string,
+    operators: [OperatorRow],
+    operators-more: string,
+}
+
 // One host the workspace shows, as every pane showing it reads it. Built
 // once per host rather than per pane, so two panes on one host cannot
 // disagree about it.
@@ -725,6 +751,7 @@ export struct HostView {
     crash-failure: string,
     crash-client-code-on-server: bool,
     crash-suggested: int,
+    statistics: ServerStatisticsView,
     snapshots: [SnapshotRow],
     snapshot-total: string,
     snapshots-have-plain-copies: bool,

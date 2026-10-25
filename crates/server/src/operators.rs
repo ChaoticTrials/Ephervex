@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::statistics::bounded_display_name;
+
+/// How many operators one listing carries.
+pub const MAX_LISTED_OPERATORS: usize = 200;
+
 /// One operator entry in Minecraft's `ops.json` format.
 ///
 /// Minecraft reads `level` and `bypassesPlayerLimit` as optional and accepts any
@@ -186,6 +191,44 @@ impl OperatorsDocument {
     }
 }
 
+/// One operator as shown to a user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedOperator {
+    /// The entry's name, shortened and stripped of control characters.
+    pub name: String,
+    /// The entry's permission level, or `None` when it has no integer level.
+    pub level: Option<i64>,
+}
+
+/// The operators of an `ops.json` document, bounded for display.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct OperatorListing {
+    /// The first [`MAX_LISTED_OPERATORS`] operators, in file order.
+    pub operators: Vec<ListedOperator>,
+    /// How many operators the document holds beyond those listed.
+    pub omitted: usize,
+}
+
+impl OperatorsDocument {
+    /// The document's operators for display, without changing the document.
+    #[must_use]
+    pub fn listing(&self) -> OperatorListing {
+        let mut entries = self.entries();
+        let operators: Vec<ListedOperator> = entries
+            .by_ref()
+            .take(MAX_LISTED_OPERATORS)
+            .map(|entry| ListedOperator {
+                name: bounded_display_name(&entry.name),
+                level: entry.level(),
+            })
+            .collect();
+        OperatorListing {
+            operators,
+            omitted: entries.count(),
+        }
+    }
+}
+
 /// A malformed or unserializable `ops.json` document.
 #[derive(Debug, thiserror::Error)]
 pub enum OperatorsDocumentError {
@@ -205,6 +248,37 @@ mod tests {
 
     fn uuid(value: &str) -> Uuid {
         Uuid::parse_str(value).expect("uuid")
+    }
+
+    #[test]
+    fn a_listing_is_bounded_and_leaves_out_entries_minecraft_skips() {
+        let mut entries: Vec<String> = (0..MAX_LISTED_OPERATORS + 3)
+            .map(|index| {
+                format!(
+                    r#"{{"uuid":"00000000-0000-4000-8000-{index:012}","name":"Op\n{index}","level":{}}}"#,
+                    index % 5
+                )
+            })
+            .collect();
+        entries.push(r#"{"name":"NoUuid","level":4}"#.to_owned());
+        entries.push(
+            r#"{"uuid":"ffffffff-ffff-4fff-8fff-ffffffffffff","name":"Unleveled"}"#.to_owned(),
+        );
+        let document =
+            OperatorsDocument::parse(&format!("[{}]", entries.join(","))).expect("parse");
+
+        let listing = document.listing();
+
+        assert_eq!(listing.operators.len(), MAX_LISTED_OPERATORS);
+        assert_eq!(listing.omitted, 4);
+        assert_eq!(listing.operators[1].name, "Op 1");
+        assert_eq!(listing.operators[1].level, Some(1));
+        assert!(
+            listing
+                .operators
+                .iter()
+                .all(|operator| operator.name != "NoUuid")
+        );
     }
 
     #[test]

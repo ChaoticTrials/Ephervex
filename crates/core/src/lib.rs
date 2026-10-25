@@ -373,10 +373,12 @@ pub use ephervex_pack::{
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
-    EULA_CONFIRMATION_PHRASE, EulaStatus, MINECRAFT_EULA_REFERENCE, ProcessEvidence, ProcessRole,
+    EULA_CONFIRMATION_PHRASE, EulaStatus, ListedOperator, MAX_LISTED_OPERATORS,
+    MINECRAFT_EULA_REFERENCE, OperatorListing, PlayerRoster, ProcessEvidence, ProcessRole,
     PropertiesDocument, PropertyDefinition, PropertyGroup, PropertyValueKind, PropertyValueProblem,
     RuntimeClassification, RuntimeEvidence, SERVER_PROPERTY_CATALOG, ServerEvent, ServerEvents,
-    ServerExit, ServerObserver, ServerWarning, check_property_value, property_definition,
+    ServerExit, ServerObserver, ServerStatistics, ServerWarning, check_property_value,
+    property_definition,
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,

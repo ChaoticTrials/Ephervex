@@ -40,6 +40,7 @@ import {
     SelectableText
 } from "components/text.slint";
 import { ServerFiles, ServerCommandInput } from "workspace/server-tools.slint";
+import { ServerStatisticsCard } from "workspace/server-statistics.slint";
 import { ModBrowser } from "workspace/mod-browser.slint";
 import { GuiI18n, NameRules, ServerHints, ServerPackRules } from "globals.slint";
 import { ActivityCard, RunningCard } from "home/activity-cards.slint";
@@ -889,6 +890,7 @@ export component AppWindow inherits Window {
     callback log-select-word-at(int, int, int);
     callback log-select-all(int);
     callback load-server-workspace(string);
+    callback refresh-server-statistics(string);
     callback load-server-mods(string);
     callback load-running();
     // The instance, and which of its launches to end.
@@ -1684,7 +1686,13 @@ export component AppWindow inherits Window {
                                 } }
                                     HorizontalLayout { spacing: 8px; alignment: start; AppButton { text: GuiI18n.text("gui-view-logs"); clicked => { root.show-pane-surface(pane.id, "Logs"); } } if host.server.linked-client-id != "" : AppButton { text: GuiI18n.text("gui-launch-client-connect"); tone: "primary"; enabled: host.server.can-connect; hint: host.server.connect-reason; clicked => { root.launch-and-connect(host.server.linked-client-id, host.id); } } if host.server.paired-client-id != "" && !host.pair-shown : AppButton { text: GuiI18n.text("gui-pair-show-beside"); enabled: host.pair-room; hint: host.pair-room ? "" : GuiI18n.text("gui-pair-no-room"); clicked => { root.show-linked-pair(pane.id, "client", host.server.paired-client-id); } } if host.server.state-kind == "needs-recovery" : AppButton { text: GuiI18n.text("gui-repair-server"); tone: "primary"; clicked => { root.repair-server(host.id); } } if !server-overview.narrow && host.server.linked-client-id != "" : AppButton { text: host.server.paired-client-id != "" ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-with-client"); clicked => { if host.server.paired-client-id != "" { root.clear-linked-pair(host.server.paired-client-id); } else { root.set-linked-pair(host.server.linked-client-id, host.id, false); } } } if !server-overview.narrow : AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } }
                                     if server-overview.narrow : HorizontalLayout { spacing: 8px; alignment: start; if host.server.linked-client-id != "" : AppButton { text: host.server.paired-client-id != "" ? GuiI18n.text("gui-unpair") : GuiI18n.text("gui-pair-with-client"); clicked => { if host.server.paired-client-id != "" { root.clear-linked-pair(host.server.paired-client-id); } else { root.set-linked-pair(host.server.linked-client-id, host.id, false); } } } AppButton { text: GuiI18n.text("gui-delete-server"); tone: "danger"; clicked => { root.pending-action-id = host.id; root.pending-action-name = host.server.name; root.pending-snapshot-deletion-note = host.server.snapshot-deletion-note; root.modal-error = ""; root.modal = "delete-server"; } } }
-                                    if host.server.paired-client-id != "" : InlineToggle { label: GuiI18n.text("gui-pair-start-together"); checked: host.server.pair-start-together; toggled(value) => { root.set-linked-pair(host.server.paired-client-id, host.id, value); } } } }
+                                    if host.server.paired-client-id != "" : InlineToggle { label: GuiI18n.text("gui-pair-start-together"); checked: host.server.pair-start-together; toggled(value) => { root.set-linked-pair(host.server.paired-client-id, host.id, value); } }
+                                    ServerStatisticsCard {
+                                        statistics: host.statistics;
+                                        running: host.server.state-kind == "running";
+                                        refresh => { root.refresh-server-statistics(host.id); }
+                                    }
+                                } }
                                 if host.available && host.kind == "server" && pane.surface == "Snapshots" : SnapshotPanel {
                                     items: host.snapshots; total: host.snapshot-total; has-plain-copies: host.snapshots-have-plain-copies;
                                     create => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-label = ""; root.recompute-snapshot-label(); root.modal-error = ""; root.modal = "snapshot-create"; }

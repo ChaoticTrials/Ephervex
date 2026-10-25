@@ -84,6 +84,27 @@ impl WorkspaceState {
         self.layout.as_ref()
     }
 
+    /// The servers whose Overview a pane shows, once each, with whether the
+    /// server runs.
+    pub(super) fn shown_server_overviews(&self) -> Vec<(ephervex_model::ServerId, bool)> {
+        let Some(layout) = self.layout.as_ref() else {
+            return Vec::new();
+        };
+        let mut shown = Vec::new();
+        for placed in layout.panes() {
+            let InstalledHost::Server(server) = placed.pane.host() else {
+                continue;
+            };
+            if placed.pane.surface() != Surface::Overview
+                || shown.iter().any(|(known, _)| *known == server)
+            {
+                continue;
+            }
+            shown.push((server, self.server_runs(server)));
+        }
+        shown
+    }
+
     /// Where a host's icon is in the icon pool, or -1.
     pub(super) fn icon_slot(&self, kind: &str, id: &str) -> i32 {
         match kind {
@@ -106,6 +127,26 @@ impl WorkspaceState {
     pub(super) fn set_rows(&mut self, clients: Vec<InstanceRow>, servers: Vec<ServerRow>) {
         self.clients = clients;
         self.servers = servers;
+        // What a server's console reported belongs to the run that printed it.
+        for row in self
+            .servers
+            .iter()
+            .filter(|row| row.state_kind != "running")
+        {
+            if let Some(server) = backend::parse_server_id(&row.id)
+                && let Some(reported) = self.reported.get_mut(&InstalledHost::Server(server))
+            {
+                crate::server_statistics_view::forget_console_values(&mut reported.statistics);
+            }
+        }
+    }
+
+    /// Whether a server's row says it runs.
+    pub(super) fn server_runs(&self, server: ephervex_model::ServerId) -> bool {
+        let id = server.to_string();
+        self.servers
+            .iter()
+            .any(|row| row.id == id && row.state_kind == "running")
     }
 
     /// Replaces the workspace with one pane on `host`.

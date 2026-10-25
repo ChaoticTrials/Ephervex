@@ -14,6 +14,7 @@ pub mod process;
 pub mod properties;
 pub mod property_catalog;
 pub mod runtime;
+pub mod statistics;
 #[cfg(test)]
 mod test_support;
 
@@ -29,7 +30,10 @@ pub use eula::{
     EULA_CONFIRMATION_PHRASE, EulaConsentRecord, EulaStatus, MINECRAFT_EULA_REFERENCE,
     accepted_record, materialize_eula_file, revoked_record,
 };
-pub use operators::{OperatorEntry, OperatorUpdate, OperatorsDocument, OperatorsDocumentError};
+pub use operators::{
+    ListedOperator, MAX_LISTED_OPERATORS, OperatorEntry, OperatorListing, OperatorUpdate,
+    OperatorsDocument, OperatorsDocumentError,
+};
 pub use pending_properties::{
     PENDING_PROPERTIES_FILE, PENDING_PROPERTIES_FORMAT_VERSION, PendingProperties, PropertiesLock,
     apply_pending_properties, pending_properties_path, read_properties_file, save_while_running,
@@ -53,3 +57,4 @@ pub use runtime::{
     control_socket_path, read_runtime_evidence, runtime_path, validate_control_socket_directory,
     write_runtime_evidence,
 };
+pub use statistics::{PlayerRoster, ServerStatistics, bounded_display_name};

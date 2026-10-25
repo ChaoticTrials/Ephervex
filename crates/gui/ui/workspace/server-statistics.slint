@@ -1,0 +1,100 @@
+// A running server's live statistics: tick rate over time, the players
+// online, and the operators. The server reports every value on its console,
+// so none of it is authoritative and each section says when it has nothing.
+import { AppButton } from "../components/controls.slint";
+import { BodyText, Eyebrow } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ServerStatisticsView } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component ServerStatisticsCard inherits Rectangle {
+    in property <ServerStatisticsView> statistics;
+    // Whether the server runs. Its tick rate and players are read from its
+    // console, so a stopped server shows neither.
+    in property <bool> running;
+    callback refresh();
+    height: content.preferred-height;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.surface;
+    content := VerticalLayout {
+        padding: 18px;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 8px;
+            Eyebrow { text: GuiI18n.text("gui-server-statistics"); horizontal-stretch: 1; vertical-alignment: center; }
+            AppButton {
+                text: GuiI18n.text("gui-refresh");
+                enabled: root.running;
+                hint: root.running ? GuiI18n.text("gui-server-statistics-refresh-hint") : GuiI18n.text("gui-server-statistics-stopped");
+                clicked => { root.refresh(); }
+            }
+        }
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 8px;
+                BodyText { text: GuiI18n.text("gui-tick-rate"); color: Theme.text; font-weight: 600; horizontal-stretch: 1; }
+                if root.running && root.statistics.tick-current != "" : BodyText { text: root.statistics.tick-current; horizontal-alignment: right; }
+            }
+            if !root.running : BodyText { text: GuiI18n.text("gui-server-statistics-stopped"); wrap: word-wrap; }
+            if root.running && root.statistics.tick-note != "" : BodyText { text: root.statistics.tick-note; wrap: word-wrap; }
+            if root.running && root.statistics.tick-path != "" : HorizontalLayout {
+                spacing: 6px;
+                VerticalLayout {
+                    BodyText { text: root.statistics.tick-scale; font-size: Theme.caption-size; color: Theme.text-muted; }
+                    Rectangle { vertical-stretch: 1; }
+                    BodyText { text: "0"; font-size: Theme.caption-size; color: Theme.text-muted; }
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 64px;
+                    background: Theme.well;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border;
+                    Path {
+                        x: 8px;
+                        y: 8px;
+                        width: parent.width - 16px;
+                        height: parent.height - 16px;
+                        viewbox-width: 100;
+                        viewbox-height: 40;
+                        commands: root.statistics.tick-path;
+                        stroke: Theme.accent;
+                        stroke-width: 1.5px;
+                        stroke-line-join: round;
+                    }
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 8px;
+                BodyText { text: GuiI18n.text("gui-players-online"); color: Theme.text; font-weight: 600; horizontal-stretch: 1; }
+                if root.running && root.statistics.players-summary != "" : BodyText { text: root.statistics.players-summary; horizontal-alignment: right; }
+            }
+            if !root.running : BodyText { text: GuiI18n.text("gui-server-statistics-stopped"); wrap: word-wrap; }
+            if root.running && root.statistics.players-note != "" : BodyText { text: root.statistics.players-note; wrap: word-wrap; }
+            if root.running : VerticalLayout {
+                spacing: 4px;
+                for name in root.statistics.players : BodyText { text: name; overflow: elide; }
+            }
+            if root.running && root.statistics.players-more != "" : BodyText { text: root.statistics.players-more; color: Theme.text-muted; }
+        }
+        VerticalLayout {
+            spacing: 4px;
+            BodyText { text: GuiI18n.text("gui-operators"); color: Theme.text; font-weight: 600; }
+            if root.statistics.operators-note != "" : BodyText { text: root.statistics.operators-note; wrap: word-wrap; }
+            for operator in root.statistics.operators : HorizontalLayout {
+                spacing: 8px;
+                BodyText { text: operator.name; overflow: elide; horizontal-stretch: 1; }
+                BodyText { text: operator.level; color: Theme.text-muted; horizontal-alignment: right; }
+            }
+            if root.statistics.operators-more != "" : BodyText { text: root.statistics.operators-more; color: Theme.text-muted; }
+            BodyText { text: GuiI18n.text("gui-operators-edit-hint"); font-size: Theme.caption-size; color: Theme.text-muted; wrap: word-wrap; }
+        }
+    }
+}

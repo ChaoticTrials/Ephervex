@@ -17,11 +17,11 @@ use ephervex_pack::{
 };
 use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,
-    EulaConsentRecord, EulaStatus, NetworkProperties, OperatorsDocument, PendingProperties,
-    PropertiesDocument, PropertiesLock, RuntimeClassification, SERVER_PROPERTIES_FILE, ServerBind,
-    ServerCommand, ServerObserver, ServerSupervisor, ServerWarning, accepted_record,
-    classify_runtime, clear_stale_runtime, materialize_eula_file, read_properties_file,
-    revoked_record, save_while_running, send_control,
+    EulaConsentRecord, EulaStatus, NetworkProperties, OperatorListing, OperatorsDocument,
+    PendingProperties, PropertiesDocument, PropertiesLock, RuntimeClassification,
+    SERVER_PROPERTIES_FILE, ServerBind, ServerCommand, ServerObserver, ServerStatistics,
+    ServerSupervisor, ServerWarning, accepted_record, classify_runtime, clear_stale_runtime,
+    materialize_eula_file, read_properties_file, revoked_record, save_while_running, send_control,
 };
 use ephervex_storage::{
     FileDisposition, MetadataError, NetworkAccess, NewServer, RegistryError, ServerCommit,
@@ -42,6 +42,10 @@ use crate::{CoreError, CoreResult};
 
 const EULA_FILE: &str = "eula.txt";
 const OPERATORS_FILE: &str = "ops.json";
+/// The most of `ops.json` read for display.
+const OPERATORS_FILE_LIMIT_BYTES: u64 = 1024 * 1024;
+/// How many captured lines of the latest run are read for statistics.
+const STATISTICS_CAPTURE_LINES: usize = 2_000;
 const DEFAULT_SERVER_PORT: u16 = 25_565;
 const AUTOMATIC_PORT_CANDIDATES: usize = 100;
 
@@ -1304,6 +1308,76 @@ impl App {
         Ok(send_control(&record.root, &ControlAction::Console(command)).await?)
     }
 
+    /// What the server's latest run reported about itself on its console.
+    ///
+    /// Read from the captured output, so it holds for a server whichever
+    /// process runs it and for a run that has ended.
+    pub fn server_statistics(&self, id: ServerId) -> CoreResult<ServerStatistics> {
+        let snapshot = self.server_latest_run_output(id, STATISTICS_CAPTURE_LINES)?;
+        Ok(ServerStatistics::from_lines(&snapshot.lines))
+    }
+
+    /// The console command that makes a server report its tick rate, or
+    /// `None` when its version has none to ask.
+    ///
+    /// A selection this build cannot rank gets no command rather than a
+    /// guessed one.
+    pub fn server_tick_rate_command(&self, id: ServerId) -> CoreResult<Option<&'static str>> {
+        let record = self.server(id)?;
+        Ok(tick_rate_command(
+            record.loader.kind,
+            &record.minecraft_version,
+        ))
+    }
+
+    /// Asks a running server to report its players and, where its version has
+    /// a command for it, its tick rate. The answers arrive on the console and
+    /// are read back by [`Self::server_statistics`].
+    pub async fn request_server_statistics(&self, id: ServerId) -> CoreResult<()> {
+        let record = self.server(id)?;
+        let tick_rate = tick_rate_command(record.loader.kind, &record.minecraft_version);
+        for command in ["list"].into_iter().chain(tick_rate) {
+            send_control(&record.root, &ControlAction::Console(command.to_owned())).await?;
+        }
+        Ok(())
+    }
+
+    /// The server's operators as `ops.json` holds them, for display. The file
+    /// is only read: Minecraft owns it while the server runs, and changes go
+    /// through the `op` and `deop` console commands.
+    pub fn server_operators(&self, id: ServerId) -> CoreResult<OperatorListing> {
+        use std::io::Read as _;
+
+        let record = self.server(id)?;
+        let path = ephervex_storage::metadata::server_game_dir(&record.root).join(OPERATORS_FILE);
+        let io_error = |source| ephervex_server::ServerError::Io {
+            path: path.clone(),
+            source,
+        };
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(OperatorListing::default());
+            }
+            Err(source) => return Err(io_error(source).into()),
+        };
+        let mut text = String::new();
+        file.take(OPERATORS_FILE_LIMIT_BYTES + 1)
+            .read_to_string(&mut text)
+            .map_err(io_error)?;
+        if text.len() as u64 > OPERATORS_FILE_LIMIT_BYTES {
+            return Err(io_error(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "the operator list is too large to show",
+            ))
+            .into());
+        }
+        let document = OperatorsDocument::parse(&text).map_err(|source| {
+            io_error(std::io::Error::new(std::io::ErrorKind::InvalidData, source))
+        })?;
+        Ok(document.listing())
+    }
+
     pub fn recover_server_runtime(&self, id: ServerId) -> CoreResult<()> {
         let record = self.server(id)?;
         Ok(clear_stale_runtime(&record.root)?)
@@ -1901,6 +1975,29 @@ fn emit_network_advisories_with(
         ));
     }
     Ok(())
+}
+
+/// The console command that reports a server's tick rate, by loader and
+/// Minecraft version.
+///
+/// Forge and NeoForge answer `tps` under their own namespace, which NeoForge
+/// moved from `forge` in 1.20.2. Vanilla reports it through `tick query` from
+/// 1.20.3. Other versions have no command.
+fn tick_rate_command(
+    loader: ephervex_model::LoaderKind,
+    minecraft_version: &str,
+) -> Option<&'static str> {
+    use ephervex_model::LoaderKind;
+
+    let version = ephervex_minecraft::MinecraftVersionId::parse(minecraft_version);
+    let at_least = |floor: &str| {
+        version.at_least(&ephervex_minecraft::MinecraftVersionId::parse(floor)) == Some(true)
+    };
+    match loader {
+        LoaderKind::NeoForge if at_least("1.20.2") => Some("neoforge tps"),
+        LoaderKind::Forge | LoaderKind::NeoForge => Some("forge tps"),
+        LoaderKind::Vanilla => at_least("1.20.3").then_some("tick query"),
+    }
 }
 
 fn materialize_operator_setup(
@@ -3323,6 +3420,129 @@ mod tests {
         let profile = setup.profile.expect("usable default profile");
         assert_eq!(profile.id, ephervex_auth::offline_uuid("DefaultDeveloper"));
         assert_eq!(profile.identity, ServerOperatorIdentity::Offline);
+    }
+
+    fn scaffold_server(app: &App) -> ServerRecord {
+        app.registry_for_services()
+            .create_server(NewServer::new(
+                "stats",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("scaffold")
+    }
+
+    #[test]
+    fn tick_rate_commands_follow_the_loader_and_version_that_provide_them() {
+        use ephervex_model::LoaderKind::{Forge, NeoForge, Vanilla};
+
+        assert_eq!(tick_rate_command(Forge, "1.20.1"), Some("forge tps"));
+        assert_eq!(tick_rate_command(Forge, "1.12.2"), Some("forge tps"));
+        assert_eq!(tick_rate_command(NeoForge, "1.20.1"), Some("forge tps"));
+        assert_eq!(tick_rate_command(NeoForge, "1.20.2"), Some("neoforge tps"));
+        assert_eq!(tick_rate_command(NeoForge, "1.21.1"), Some("neoforge tps"));
+        assert_eq!(tick_rate_command(Vanilla, "1.20.2"), None);
+        assert_eq!(tick_rate_command(Vanilla, "1.20.3"), Some("tick query"));
+        assert_eq!(tick_rate_command(Vanilla, "1.21.4"), Some("tick query"));
+    }
+
+    #[test]
+    fn a_version_this_build_cannot_rank_gets_no_vanilla_tick_command() {
+        assert_eq!(
+            tick_rate_command(ephervex_model::LoaderKind::Vanilla, "not-a-version"),
+            None
+        );
+    }
+
+    #[test]
+    fn statistics_are_read_from_the_latest_run_only() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let record = scaffold_server(&app);
+        let capture = app.paths().server_capture_dir(record.id);
+        std::fs::create_dir_all(&capture).expect("capture dir");
+        let line = |text: &str| {
+            let captured = CapturedLine {
+                timestamp: Utc::now(),
+                stream: ephervex_server::CaptureStream::Stdout,
+                text: text.to_owned(),
+                truncated: false,
+                omitted_bytes: 0,
+            };
+            format!("{}\n", serde_json::to_string(&captured).expect("serialize"))
+        };
+        std::fs::write(
+            capture.join("capture-0001.jsonl"),
+            line("[12:00:00] [Server thread/INFO]: There are 3 of a max of 20 players online: A, B, C"),
+        )
+        .expect("first run");
+        std::fs::write(
+            capture.join("capture-0002.jsonl"),
+            line("[12:10:00] [Server thread/INFO]: There are 1 of a max of 20 players online: D"),
+        )
+        .expect("second run");
+
+        let statistics = app.server_statistics(record.id).expect("statistics");
+
+        let roster = statistics.players().expect("roster");
+        assert_eq!(roster.names, ["D"]);
+        assert_eq!(roster.online, 1);
+    }
+
+    #[test]
+    fn a_server_that_never_ran_has_no_statistics() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let record = scaffold_server(&app);
+
+        let statistics = app.server_statistics(record.id).expect("statistics");
+
+        assert!(statistics.players().is_none());
+        assert!(statistics.tick_rates().is_empty());
+    }
+
+    #[test]
+    fn operators_are_listed_from_ops_json_and_the_file_is_left_alone() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let record = scaffold_server(&app);
+        let game = ephervex_storage::metadata::server_game_dir(&record.root);
+        std::fs::create_dir_all(&game).expect("game dir");
+        assert!(
+            app.server_operators(record.id)
+                .expect("absent file")
+                .operators
+                .is_empty()
+        );
+
+        let text = r#"[{"uuid":"11111111-1111-4111-8111-111111111111","name":"Alice","level":4}]"#;
+        std::fs::write(game.join(OPERATORS_FILE), text).expect("ops");
+
+        let listing = app.server_operators(record.id).expect("listing");
+
+        assert_eq!(listing.operators.len(), 1);
+        assert_eq!(listing.operators[0].name, "Alice");
+        assert_eq!(listing.operators[0].level, Some(4));
+        assert_eq!(
+            std::fs::read_to_string(game.join(OPERATORS_FILE)).expect("ops"),
+            text
+        );
+    }
+
+    #[test]
+    fn an_unreadable_or_oversized_operator_list_is_refused() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = test_app(directory.path());
+        let record = scaffold_server(&app);
+        let game = ephervex_storage::metadata::server_game_dir(&record.root);
+        std::fs::create_dir_all(&game).expect("game dir");
+
+        std::fs::write(game.join(OPERATORS_FILE), "not json").expect("ops");
+        assert!(app.server_operators(record.id).is_err());
+
+        let padding = " ".repeat(usize::try_from(OPERATORS_FILE_LIMIT_BYTES).expect("limit"));
+        std::fs::write(game.join(OPERATORS_FILE), format!("[]{padding}")).expect("ops");
+        assert!(app.server_operators(record.id).is_err());
     }
 
     #[test]

@@ -390,6 +390,24 @@ and crash reports are reported as unavailable; opening them does not create
 empty directories. Arbitrary file editing stays in the user's desktop tools.
 The Properties shortcut opens the existing structured server settings.
 
+A running server's Overview also shows live statistics: its tick rate over time,
+the players online, and its operators. `ephervex-server` reads the first two from
+the latest run's captured console output, so they hold whichever process runs the
+server, and `ephervex-core` exposes them as `server_statistics`. Only the `list`
+report (the current form and the one before 1.13), the join and leave notices,
+the Forge and NeoForge `tps` overall reports (each loader's own wording, with
+either a point or a comma as the decimal separator), and the vanilla `tick query`
+report (1.20.3 and later) are recognized. A server version without a tick command
+shows no tick rate, with a one-line explanation, and a stopped server shows none
+of the console values. Every value is checked and bounded before it is kept, and
+a line that is not exactly a known report is ignored, so chat or a mod's output
+cannot pose as one. While an Overview is shown, the interface rereads the capture
+every few seconds and asks the running server to report (`list` and the version's
+tick command) about every thirty seconds, or at once through Refresh. The answers
+appear in the console and the server's own log. Operators are listed from
+`ops.json`, which is only read, with a size bound. They change through the `op`
+and `deop` console commands, so the file is never rewritten while the server runs.
+
 The workspace header shows a server's address and port beside its name and
 state. Gameplay properties can be saved while the
 server runs under Ephervex; they are written at once, kept until the next

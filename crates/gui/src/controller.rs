@@ -38,6 +38,7 @@ use crate::presentation::{
     validate_port,
 };
 use crate::server_property_form;
+use crate::server_statistics_view::{self, ServerStatisticsData};
 use crate::settings_drafts::{DraftField, SettingsDrafts, SettingsSave};
 use crate::ui::{
     AccountRow, ActivityRow, AppWindow, BlockedFileRow, DiagnosticRow, DiskUsageRow, GuiI18n,
@@ -74,6 +75,8 @@ pub struct Controller {
     /// Notices a new local date that starts or ends a season, so a season's
     /// theme comes and goes while Ephervex stays open.
     _season_timer: Timer,
+    /// Rereads the statistics of the servers whose Overview is shown.
+    _statistics_timer: Timer,
     /// Kept so a later hook, such as [`accept_file_drops`], can send the same
     /// commands the callbacks registered here do.
     commands: Sender<Command>,
@@ -2661,6 +2664,36 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         }
     });
 
+    // Rereads what the servers shown on an Overview printed, and asks the
+    // running ones to report again now and then.
+    let statistics_weak = ui.as_weak();
+    let statistics_commands = backend.commands.clone();
+    let statistics_state = Rc::clone(&workspace.state);
+    let statistics_schedule = RefCell::new(server_tools::StatisticsSchedule::default());
+    let statistics_timer = Timer::default();
+    statistics_timer.start(
+        TimerMode::Repeated,
+        server_tools::STATISTICS_READ_INTERVAL,
+        move || {
+            if statistics_weak.upgrade().is_none() {
+                return;
+            }
+            let shown = statistics_state.borrow().shown_server_overviews();
+            let due = statistics_schedule
+                .borrow_mut()
+                .due(std::time::Instant::now(), &shown);
+            for read in due {
+                send(
+                    &statistics_commands,
+                    Command::RefreshServerStatistics {
+                        server: read.server,
+                        request: read.request,
+                    },
+                );
+            }
+        },
+    );
+
     let season_weak = ui.as_weak();
     let season_commands = backend.commands.clone();
     let season_watch = RefCell::new(SeasonWatch {
@@ -2687,6 +2720,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         _poll_timer: poll_timer,
         _running_timer: running_timer,
         _season_timer: season_timer,
+        _statistics_timer: statistics_timer,
         commands: backend.commands,
         import_flow,
         workspace: workspace.state,
@@ -5994,6 +6028,19 @@ fn register_server_actions(ui: &AppWindow, commands: &Sender<Command>, workspace
         }
     });
 
+    let sender = commands.clone();
+    ui.on_refresh_server_statistics(move |id| {
+        if let Some(server) = backend::parse_server_id(&id) {
+            send(
+                &sender,
+                Command::RefreshServerStatistics {
+                    server,
+                    request: true,
+                },
+            );
+        }
+    });
+
     register_host_starts(ui, workspace);
 
     let sender = commands.clone();
@@ -8404,6 +8451,7 @@ fn apply_event(
         }
         Event::LinkedResult(result) => apply_linked_result(ui, result),
         Event::ServerWorkspace(data) => apply_server_workspace(workspace, data),
+        Event::ServerStatistics(data) => apply_server_statistics(workspace, &data),
         Event::LiveLog(_) => {}
         Event::Diagnostics {
             rows,
@@ -10051,6 +10099,22 @@ fn apply_server_workspace(workspace: &Workspace, data: ServerWorkspaceData) {
         view.property_address = data.network.bind_address.unwrap_or_default().into();
         view.property_port = data.network.port.to_string().into();
         view.properties_revision = view.properties_revision.wrapping_add(1);
+    });
+}
+
+/// A server's statistics, in every pane showing it.
+fn apply_server_statistics(workspace: &Workspace, data: &ServerStatisticsData) {
+    let Some(server) = backend::parse_server_id(&data.server) else {
+        return;
+    };
+    let mut statistics = server_statistics_view::present(data);
+    // A read that finishes after the server stopped describes the run that
+    // ended.
+    if !workspace.state.borrow().server_runs(server) {
+        server_statistics_view::forget_console_values(&mut statistics);
+    }
+    workspace.update(InstalledHost::Server(server), |view| {
+        view.statistics = statistics;
     });
 }
 
@@ -15421,6 +15485,152 @@ mod tests {
         assert_eq!(
             views.row_data(0).expect("view").snapshot_total,
             "2 snapshots"
+        );
+    }
+
+    fn server_row(host: InstalledHost, running: bool) -> ServerRow {
+        ServerRow {
+            id: server_host_id(host).to_string().into(),
+            state_kind: if running { "running" } else { "stopped" }.into(),
+            ..ServerRow::default()
+        }
+    }
+
+    fn tick_report(host: InstalledHost) -> ServerStatisticsData {
+        ServerStatisticsData {
+            server: server_host_id(host).to_string(),
+            tick_rates: vec![19.5],
+            reports_tick_rate: true,
+            players: None,
+            operators: None,
+        }
+    }
+
+    #[test]
+    fn a_running_servers_statistics_reach_every_pane_showing_it() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = server_host();
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), vec![server_row(host, true)]);
+        workspace.open(&ui, host, Surface::Overview);
+
+        apply_server_statistics(&workspace, &tick_report(host));
+
+        let view = ui.get_host_views().row_data(0).expect("view");
+        assert_eq!(
+            view.statistics.tick_current,
+            ephervex_i18n::lookup_args(
+                "gui-tick-rate-value",
+                [("value", ephervex_i18n::Arg::from("19.5".to_owned()))]
+            )
+        );
+        assert_eq!(
+            view.statistics.operators_note,
+            ephervex_i18n::lookup("gui-operators-unreadable")
+        );
+    }
+
+    #[test]
+    fn a_read_finishing_after_the_server_stopped_shows_no_console_values() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = server_host();
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), vec![server_row(host, false)]);
+        workspace.open(&ui, host, Surface::Overview);
+
+        apply_server_statistics(&workspace, &tick_report(host));
+
+        let view = ui.get_host_views().row_data(0).expect("view");
+        assert_eq!(view.statistics.tick_current, "");
+        assert_eq!(view.statistics.tick_note, "");
+        assert_eq!(
+            view.statistics.operators_note,
+            ephervex_i18n::lookup("gui-operators-unreadable")
+        );
+    }
+
+    #[test]
+    fn a_run_that_ended_leaves_no_console_values_for_the_next_one() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = server_host();
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), vec![server_row(host, true)]);
+        workspace.open(&ui, host, Surface::Overview);
+        apply_server_statistics(&workspace, &tick_report(host));
+
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), vec![server_row(host, false)]);
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(Vec::new(), vec![server_row(host, true)]);
+        workspace.refresh(&ui);
+
+        let view = ui.get_host_views().row_data(0).expect("view");
+        assert_eq!(view.statistics.tick_current, "");
+    }
+
+    #[test]
+    fn statistics_of_a_server_no_pane_shows_land_nowhere() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        workspace.open(&ui, server_host(), Surface::Overview);
+
+        apply_server_statistics(
+            &workspace,
+            &ServerStatisticsData {
+                server: ephervex_model::ServerId::new().to_string(),
+                tick_rates: vec![19.5],
+                reports_tick_rate: true,
+                players: None,
+                operators: None,
+            },
+        );
+
+        let view = ui.get_host_views().row_data(0).expect("view");
+        assert_eq!(view.statistics.tick_current, "");
+    }
+
+    #[test]
+    fn refreshing_the_statistics_asks_the_server_to_report() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_server_actions(&ui, &workspace.commands, &workspace);
+        let server = ephervex_model::ServerId::new();
+
+        ui.invoke_refresh_server_statistics(server.to_string().into());
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::RefreshServerStatistics { server: asked, request: true } if asked == server
+        )));
+    }
+
+    #[test]
+    fn only_a_shown_overview_is_listed_for_statistics() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let host = server_host();
+        workspace.open(&ui, host, Surface::Console);
+        assert!(workspace.state.borrow().shown_server_overviews().is_empty());
+
+        workspace.open(&ui, host, Surface::Overview);
+
+        assert_eq!(
+            workspace.state.borrow().shown_server_overviews(),
+            [(server_host_id(host), false)],
+            "a server whose row is not running is listed as stopped"
         );
     }
 

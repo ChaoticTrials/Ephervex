@@ -62,6 +62,7 @@ use crate::presentation::{
     ModImpactPresentation, ModRequirementPresentation, PairPresentation, ServerPresentation,
     diagnostic_kind_label, diagnostic_scope_label,
 };
+use crate::server_statistics_view::ServerStatisticsData;
 use crate::settings_drafts::SettingsSave;
 use crate::workspace_layout::PaneId;
 
@@ -582,6 +583,12 @@ pub enum Command {
         command: String,
     },
     LoadServerWorkspace(ServerId),
+    /// Read what a server reported about itself. With `request`, the running
+    /// server is first asked to report its players and tick rate.
+    RefreshServerStatistics {
+        server: ServerId,
+        request: bool,
+    },
     LoadServerMods(ServerId),
     /// Turn off every mod the newest crash report stated, in one step.
     DisableSuggestedMods(ServerId),
@@ -1953,6 +1960,7 @@ pub enum Event {
     /// What one finished operation did to each target it touched.
     LinkedResult(LinkedResultData),
     ServerWorkspace(ServerWorkspaceData),
+    ServerStatistics(ServerStatisticsData),
     LiveLog(LiveLogUpdate),
     Diagnostics {
         rows: Vec<DiagnosticData>,
@@ -5504,6 +5512,13 @@ fn run_worker(
                     ServerControl::Console(command),
                 );
             }
+            Command::RefreshServerStatistics { server, request } => {
+                if request {
+                    spawn_server_statistics_request(app.paths().clone(), &events, server);
+                } else {
+                    send_server_statistics(&app, server, &events);
+                }
+            }
             Command::LoadServerWorkspace(server) => {
                 // The crash notice comes with the workspace rather than with
                 // the mods, so a server that failed to start says so on the tab
@@ -5512,6 +5527,7 @@ fn run_worker(
                 let review = app.crash_review(host).ok().flatten();
                 let _ = events.send(Event::CrashNotice(crash_notice_data(host, review.as_ref())));
                 send_server_workspace(&app, server, &events);
+                send_server_statistics(&app, server, &events);
                 // Only here, on a restore, and after a save: a run ending or
                 // a Properties save leaves the runtime as it was, and reading
                 // it again would undo what is being typed on the form.
@@ -8585,6 +8601,41 @@ fn send_server_workspace(app: &App, server: ServerId, events: &Sender<Event>) {
         }
         Err(error) => send_error(events, &error),
     }
+}
+
+/// What a server reported about itself and its operators, to the views that
+/// show it. A failed read shows as nothing reported: this runs on a timer, and
+/// a toast for it would repeat.
+fn send_server_statistics(app: &App, server: ServerId, events: &Sender<Event>) {
+    let statistics = app.server_statistics(server).unwrap_or_default();
+    let reports_tick_rate = app
+        .server_tick_rate_command(server)
+        .is_ok_and(|command| command.is_some());
+    let _ = events.send(Event::ServerStatistics(ServerStatisticsData {
+        server: server.to_string(),
+        tick_rates: statistics.tick_rates(),
+        reports_tick_rate,
+        players: statistics.players().cloned(),
+        operators: app.server_operators(server).ok(),
+    }));
+}
+
+/// How long a server gets to print its answers before they are read.
+const STATISTICS_ANSWER_WAIT: Duration = Duration::from_millis(600);
+
+/// Asks a running server to report, waits for the answers to reach its
+/// captured output, and sends what they say.
+fn spawn_server_statistics_request(paths: Paths, events: &Sender<Event>, server: ServerId) {
+    spawn_detached(paths, events.clone(), move |app, events, runtime| {
+        // A stopped server cannot be asked; its earlier output is still read.
+        if runtime
+            .block_on(app.request_server_statistics(server))
+            .is_ok()
+        {
+            thread::sleep(STATISTICS_ANSWER_WAIT);
+        }
+        send_server_statistics(&app, server, &events);
+    });
 }
 
 fn open_live_log(

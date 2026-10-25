@@ -102,6 +102,10 @@ pub(crate) const UI_SOURCES: &[(&str, &str)] = &[
         include_str!("../ui/workspace/packs.slint"),
     ),
     (
+        "workspace/server-statistics.slint",
+        include_str!("../ui/workspace/server-statistics.slint"),
+    ),
+    (
         "workspace/server-tools.slint",
         include_str!("../ui/workspace/server-tools.slint"),
     ),

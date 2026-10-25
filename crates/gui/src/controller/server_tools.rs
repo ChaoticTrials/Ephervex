@@ -1,12 +1,63 @@
 //! Server actions and transient status shared by every view of a server.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ServerId;
 
 use crate::backend::{ConsoleOutcome, ServerToolEvent};
 use crate::ui::ServerRow;
+
+/// How often a shown Overview rereads what its server printed.
+pub(super) const STATISTICS_READ_INTERVAL: Duration = Duration::from_secs(5);
+/// How often a shown Overview asks its running server to report again. The
+/// answers are printed in the console and the server's log, so asking is rarer
+/// than reading.
+const STATISTICS_REQUEST_INTERVAL: Duration = Duration::from_secs(30);
+
+/// One server's statistics read that is due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StatisticsRead {
+    pub server: ServerId,
+    /// Whether the running server is asked to report before the read.
+    pub request: bool,
+}
+
+/// When the servers whose Overview is on screen are asked and read.
+#[derive(Debug, Default)]
+pub(super) struct StatisticsSchedule {
+    last_request: HashMap<ServerId, Instant>,
+}
+
+impl StatisticsSchedule {
+    /// The reads due now for the servers shown, each with whether it is
+    /// running. A server that left the screen or stopped is forgotten, so
+    /// showing it again asks at once.
+    pub(super) fn due(&mut self, now: Instant, shown: &[(ServerId, bool)]) -> Vec<StatisticsRead> {
+        self.last_request.retain(|server, _| {
+            shown
+                .iter()
+                .any(|(shown, running)| shown == server && *running)
+        });
+        shown
+            .iter()
+            .map(|&(server, running)| {
+                let due = running
+                    && self.last_request.get(&server).is_none_or(|last| {
+                        now.saturating_duration_since(*last) >= STATISTICS_REQUEST_INTERVAL
+                    });
+                if due {
+                    self.last_request.insert(server, now);
+                }
+                StatisticsRead {
+                    server,
+                    request: due,
+                }
+            })
+            .collect()
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ServerAction {
@@ -396,6 +447,74 @@ pub(super) fn console_unavailable(state_kind: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_running_server_is_asked_at_once_and_then_at_the_slower_interval() {
+        let server = ServerId::new();
+        let mut schedule = StatisticsSchedule::default();
+        let start = Instant::now();
+
+        let first = schedule.due(start, &[(server, true)]);
+        let soon = schedule.due(start + STATISTICS_READ_INTERVAL, &[(server, true)]);
+        let later = schedule.due(start + STATISTICS_REQUEST_INTERVAL, &[(server, true)]);
+
+        assert_eq!(
+            first,
+            [StatisticsRead {
+                server,
+                request: true
+            }]
+        );
+        assert_eq!(
+            soon,
+            [StatisticsRead {
+                server,
+                request: false
+            }]
+        );
+        assert_eq!(
+            later,
+            [StatisticsRead {
+                server,
+                request: true
+            }]
+        );
+    }
+
+    #[test]
+    fn a_stopped_server_is_read_but_never_asked() {
+        let server = ServerId::new();
+        let mut schedule = StatisticsSchedule::default();
+
+        let due = schedule.due(Instant::now(), &[(server, false)]);
+
+        assert_eq!(
+            due,
+            [StatisticsRead {
+                server,
+                request: false
+            }]
+        );
+    }
+
+    #[test]
+    fn a_server_that_left_the_screen_is_asked_again_when_it_returns() {
+        let server = ServerId::new();
+        let mut schedule = StatisticsSchedule::default();
+        let start = Instant::now();
+        schedule.due(start, &[(server, true)]);
+
+        assert!(schedule.due(start, &[]).is_empty());
+        let returned = schedule.due(start + STATISTICS_READ_INTERVAL, &[(server, true)]);
+
+        assert_eq!(
+            returned,
+            [StatisticsRead {
+                server,
+                request: true
+            }]
+        );
+    }
 
     fn row(id: ServerId, running: bool) -> ServerRow {
         ServerRow {
