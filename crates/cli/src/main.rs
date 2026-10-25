@@ -1375,6 +1375,57 @@ enum InstanceCommand {
         #[arg(long)]
         clear: bool,
     },
+    /// Show or change the case notes of an instance.
+    ///
+    /// The case is what you write down while reproducing a bug: the steps, a
+    /// note, and how often the bug showed up again. With no action, prints
+    /// them. Steps are named by the number shown beside them. `--json` reports
+    /// `steps` (each with `id`, `text` and `done`), `note` and `reproduced`.
+    Case {
+        id: InstanceId,
+        #[command(subcommand)]
+        action: Option<CaseAction>,
+    },
+}
+
+/// What a case command changes.
+#[derive(Debug, Subcommand)]
+enum CaseAction {
+    /// Add a step at the end of the list.
+    AddStep {
+        /// What to do, such as "Place a belt and fill it".
+        text: String,
+    },
+    /// Mark a step as done.
+    Done {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Mark a step as not done.
+    Undo {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Remove a step.
+    RemoveStep {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Replace the note, or remove it with `--clear`.
+    Note {
+        /// The new note.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        text: Option<String>,
+        /// Remove the note.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Count one more time the bug showed up, or start over with `--reset`.
+    Reproduced {
+        /// Set the count back to zero.
+        #[arg(long)]
+        reset: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -2653,6 +2704,9 @@ async fn run_instance_command(
         InstanceCommand::Issue { id, url, clear } => {
             run_instance_issue(app, *id, url.as_deref(), *clear, json)?;
         }
+        InstanceCommand::Case { id, action } => {
+            run_instance_case(app, *id, action.as_ref(), json)?;
+        }
     }
     Ok(())
 }
@@ -2681,6 +2735,67 @@ fn run_instance_issue(
     }
     app.set_client_issue_link(id, url.filter(|_| !clear))?;
     print_instance(app, &app.current_client(id)?, json)
+}
+
+/// Shows the case notes of an instance, after applying the change asked for.
+fn run_instance_case(
+    app: &App,
+    id: InstanceId,
+    action: Option<&CaseAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Refuses an instance that does not exist before anything is written.
+    app.current_client(id)?;
+    match action {
+        None => {}
+        Some(CaseAction::AddStep { text }) => app.add_case_step(id, text)?,
+        Some(CaseAction::Done { step }) => app.set_case_step_done(id, *step, true)?,
+        Some(CaseAction::Undo { step }) => app.set_case_step_done(id, *step, false)?,
+        Some(CaseAction::RemoveStep { step }) => app.remove_case_step(id, *step)?,
+        Some(CaseAction::Note { text, clear }) => {
+            app.set_case_note(id, text.as_deref().filter(|_| !clear).unwrap_or_default())?;
+        }
+        Some(CaseAction::Reproduced { reset: false }) => app.count_case_reproduced(id)?,
+        Some(CaseAction::Reproduced { reset: true }) => app.reset_case_reproduced(id)?,
+    }
+    let case = app.organization()?.case_of(id);
+    if json {
+        print_json(&serde_json::json!({
+            "id": id.to_string(),
+            "steps": case
+                .steps
+                .iter()
+                .map(|step| serde_json::json!({
+                    "id": step.id,
+                    "text": step.text,
+                    "done": step.done,
+                }))
+                .collect::<Vec<_>>(),
+            "note": case.note,
+            "reproduced": case.reproduced,
+        }));
+        return Ok(());
+    }
+    if case.steps.is_empty() {
+        outln!("steps:      none");
+    } else {
+        outln!("steps:");
+        for step in &case.steps {
+            outln!(
+                "  {}. [{}] {}",
+                step.id,
+                if step.done { "x" } else { " " },
+                step.text
+            );
+        }
+    }
+    if case.note.is_empty() {
+        outln!("note:       none");
+    } else {
+        outln!("note:       {}", case.note);
+    }
+    outln!("reproduced: {}", case.reproduced);
+    Ok(())
 }
 
 fn run_instance_organization_command(
