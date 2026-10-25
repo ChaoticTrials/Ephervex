@@ -153,6 +153,14 @@ export global Theme {
     // headers, and the pane geometry arithmetic reads the same numbers.
     out property <length> workspace-pane-min-width: 360px;
     out property <length> workspace-pane-min-height: 260px;
+    // The column a Minecraft default row keeps its editor and Reset action in
+    // once the page is wide enough to split the row. Wide enough for the
+    // window size editor's second line beside Reset.
+    out property <length> preference-control-column-width: max(560px, 600px * text-scale);
+    // The narrowest row that is split: the control column, the row's inset and
+    // gap, and a text column wide enough for all four badges at the longest
+    // status. Narrower rows stack.
+    out property <length> preference-row-split-width: preference-control-column-width + 400px * text-scale + 34px;
     // One host surface tab. Every tab is this wide so a tab bar can tell
     // how many fit before the rest move under More.
     out property <length> workspace-tab-width: 112px * text-scale;

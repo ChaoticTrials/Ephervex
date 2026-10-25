@@ -129,9 +129,13 @@ export component PreferenceKeyBindingEditor inherits Rectangle {
     }
 }
 
-// One catalog-driven preference row: its identity and state on the first
-// line, its editor on the second, and any reason it will not be written
-// underneath.
+// One catalog-driven preference row.
+//
+// Below `Theme.preference-row-split-width` the identity and badges come
+// first, the editor second and any state or reason underneath. From that
+// width the text sits in a column on the left and the editor with its Reset
+// action in a fixed-width column on the right, so editors line up down the
+// page. The editor is one element placed by either arrangement.
 export component MinecraftPreferenceRowCard inherits Rectangle {
     in property <MinecraftPreferenceRow> item;
     in property <bool> compact;
@@ -157,211 +161,227 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     callback captured-key(string, string);
     callback captured-mouse(string, string);
     callback retry-languages();
+    property <bool> split: root.width >= Theme.preference-row-split-width;
+    property <length> inset: 12px;
+    property <length> gap: 10px;
+    property <length> line-gap: 6px;
+    property <length> inner-width: root.width - 2 * root.inset;
+    property <length> text-width: root.split ? root.inner-width - Theme.preference-control-column-width - root.gap : root.inner-width;
     property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
-    property <length> detail-lines: ((root.item.invalid ? 22px : 0px) + (root.item.description == "" ? 0px : 22px) + (root.item.notice == "" ? 0px : 22px) + (root.item.status-detail == "" ? 0px : 22px)) * Theme.text-scale;
-    // The window size row spends a second line on the ratio it projects
-    // with, which is the one editor that does not fit on one.
-    property <length> editor-lines: root.item.editor == "window" ? 42px * Theme.text-scale : 0px;
-    height: root.heading-height + 104px * Theme.text-scale + root.editor-lines + root.detail-lines;
+    property <length> head-height: root.split ? names.preferred-height + root.line-gap + badges.preferred-height : max(names.preferred-height, badges.preferred-height);
+    property <length> detail-gap: details.preferred-height > 0px ? root.line-gap : 0px;
+    property <length> text-height: root.split
+        ? root.head-height + root.detail-gap + details.preferred-height
+        : root.head-height;
+    property <length> content-height: root.split
+        ? max(root.text-height, controls.preferred-height)
+        : root.head-height + root.line-gap + controls.preferred-height + root.detail-gap + details.preferred-height;
+    height: root.heading-height + root.content-height + 2 * root.inset + 2px;
     background: transparent;
-    VerticalLayout {
-        spacing: 0px;
-        if root.item.section-heading != "" : Rectangle {
-            height: root.heading-height;
-            VerticalLayout {
-                alignment: end;
-                padding-bottom: 7px;
-                Eyebrow { text: root.item.section-heading; }
+    if root.item.section-heading != "" : Rectangle {
+        y: 0px;
+        height: root.heading-height;
+        VerticalLayout {
+            alignment: end;
+            padding-bottom: 7px;
+            Eyebrow { text: root.item.section-heading; }
+        }
+    }
+    Rectangle {
+        y: root.heading-height;
+        height: parent.height - root.heading-height;
+        border-radius: 8px;
+        border-width: 1px;
+        border-color: root.item.dirty ? Theme.accent.with-alpha(0.65) : Theme.border;
+        background: Theme.surface;
+        names := VerticalLayout {
+            x: root.inset;
+            y: root.inset + (root.split ? 0px : (root.head-height - self.preferred-height) / 2);
+            width: root.split ? root.text-width : max(0px, root.inner-width - badges.preferred-width - root.gap);
+            height: self.preferred-height;
+            alignment: center;
+            spacing: 1px;
+            Text { text: root.item.label; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; vertical-alignment: center; overflow: elide; }
+            Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: Theme.mono-family; overflow: elide; }
+        }
+        // Every badge in one cluster on one baseline. Split across the
+        // label column and this one they sat at different heights, and an
+        // override read as a second compatibility verdict.
+        badges := ActionRow {
+            x: root.split ? root.inset : root.inset + root.inner-width - self.preferred-width;
+            y: root.split ? root.inset + names.preferred-height + root.line-gap : root.inset + (root.head-height - self.preferred-height) / 2;
+            width: min(self.preferred-width, root.split ? root.text-width : root.inner-width);
+            height: self.preferred-height;
+            // Muted: a tier is a classification, not a state, and it must
+            // not compete with the three badges beside it that are.
+            if root.item.advanced : Pill { text: GuiI18n.text("gui-minecraft-advanced"); tone-color: Theme.text-muted; }
+            // Not the compatibility badge's green: what Ephervex writes and
+            // what a release supports are different sentences.
+            if root.item.overridden : Pill { text: GuiI18n.text("gui-minecraft-state-overridden"); tone-color: Theme.accent-secondary; }
+            if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
+            CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
+        }
+        controls := HorizontalLayout {
+            spacing: 10px;
+            x: root.split ? root.inset + root.text-width + root.gap : root.inset;
+            y: root.split
+                ? root.inset + (root.content-height - self.preferred-height) / 2
+                : root.inset + root.head-height + root.line-gap;
+            width: root.split ? Theme.preference-control-column-width : root.inner-width;
+            height: self.preferred-height;
+            if root.item.editor == "toggle" : Toggle {
+                accessible-name: root.item.label;
+                checked: root.item.bool-value;
+                toggled(value) => { root.set-boolean(root.item.id, value); }
+            }
+            if root.item.editor == "number" : number-field := TextField {
+                width: root.compact ? 150px : 190px;
+                accessible-name: root.item.label;
+                invalid: root.item.invalid;
+                input-type: InputType.text;
+                text: root.item.text-value;
+                edited(value) => { root.edit-number(root.item.id, value); }
+                accepted => { root.commit-number(root.item.id, number-field.text); }
+                focus-lost => { root.commit-number(root.item.id, number-field.text); }
+            }
+            if root.item.editor == "slider" : ValueSlider {
+                width: root.compact ? 170px : 240px;
+                accessible-label: root.item.label;
+                minimum: root.item.number-min;
+                maximum: root.item.number-max;
+                step: root.item.number-step;
+                // Committed on release rather than on every
+                // movement: the row re-renders when the draft
+                // changes, and a control that rebuilt itself
+                // mid-drag would drop the drag.
+                value: root.item.number-value;
+                released(value) => { root.set-number(root.item.id, value); }
+            }
+            // Wide enough for the longest reading a slider
+            // produces, so a named endpoint is never cut in half.
+            if root.item.editor == "slider" : BodyText { text: root.item.number-readout; color: Theme.text; width: 150px; }
+            // Shown only where the reading says more than the
+            // number itself does, such as a scale of zero that
+            // means "pick one to fit the window".
+            if root.item.editor == "number" && root.item.number-hint != "" : BodyText { text: root.item.number-hint; color: Theme.text; horizontal-stretch: 0; }
+            if root.item.editor == "enum" : IndexComboBox {
+                width: root.compact ? 210px : 280px;
+                label: root.item.label;
+                model: root.item.enum-labels;
+                index: root.item.enum-index;
+                selected(index) => { root.set-enumeration(root.item.id, index); }
+            }
+            if root.item.editor == "language" && root.languages-available : IndexComboBox {
+                width: root.compact ? 240px : 330px;
+                label: root.item.label;
+                model: root.item.enum-labels;
+                index: root.item.enum-index;
+                selected(index) => { root.set-language(root.item.id, index); }
+            }
+            if root.item.editor == "language" && !root.languages-available : AppButton {
+                text: GuiI18n.text("gui-minecraft-language-retry");
+                clicked => { root.retry-languages(); }
+            }
+            if root.item.editor == "keybinding" : PreferenceKeyBindingEditor {
+                text: root.item.binding-label;
+                capturing: root.capturing;
+                accessible-name: root.item.label;
+                begin => { root.begin-capture(root.item.id); }
+                cancel => { root.cancel-capture(); }
+                captured-key(reported) => { root.captured-key(root.item.id, reported); }
+                captured-mouse(reported) => { root.captured-mouse(root.item.id, reported); }
+            }
+            // One product preference, so both numbers are read
+            // and committed together: half a window size is not a
+            // window size. The ratio and the lock are the same
+            // value's other face, not a second one.
+            if root.item.editor == "window" : VerticalLayout {
+                spacing: 8px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    FieldLabel { text: GuiI18n.text("gui-minecraft-width"); vertical-alignment: center; }
+                    width-field := TextField {
+                        width: 96px;
+                        accessible-name: GuiI18n.text("gui-minecraft-width");
+                        invalid: root.item.invalid;
+                        text: root.item.text-value;
+                        edited(value) => { root.edit-window(root.item.id, value, height-field.text); }
+                        // The edited field is the one the ratio
+                        // holds still, so each field commits on
+                        // its own axis.
+                        accepted => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
+                        focus-lost => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
+                    }
+                    FieldLabel { text: GuiI18n.text("gui-minecraft-height"); vertical-alignment: center; }
+                    height-field := TextField {
+                        width: 96px;
+                        accessible-name: GuiI18n.text("gui-minecraft-height");
+                        invalid: root.item.invalid;
+                        text: root.item.height-text;
+                        edited(value) => { root.edit-window(root.item.id, width-field.text, value); }
+                        accepted => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
+                        focus-lost => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
+                    }
+                    Rectangle { horizontal-stretch: 1; min-width: 0px; }
+                }
+                // The second line is the same value by eye: the
+                // ratio it is held to, and the window that is it.
+                // Keeping it off the first line leaves the row's
+                // own actions their column at every width.
+                HorizontalLayout {
+                    spacing: 8px;
+                    IndexComboBox {
+                        width: root.compact ? 116px : 136px;
+                        label: GuiI18n.text("gui-minecraft-aspect");
+                        model: root.aspect-labels;
+                        index: root.item.aspect-index;
+                        selected(index) => { root.set-window-aspect(root.item.id, index); }
+                    }
+                    FieldLabel { text: GuiI18n.text("gui-minecraft-aspect-lock"); vertical-alignment: center; }
+                    Toggle {
+                        accessible-name: GuiI18n.text("gui-minecraft-aspect-lock");
+                        checked: root.item.aspect-locked;
+                        toggled(value) => { root.set-window-lock(root.item.id, value); }
+                    }
+                    // Sizing by eye means a window the size of the
+                    // window, not a drawing of one.
+                    AppButton {
+                        text: GuiI18n.text("gui-minecraft-window-open");
+                        clicked => { root.open-window-preview(root.item.id); }
+                    }
+                    Rectangle { horizontal-stretch: 1; min-width: 0px; }
+                }
+            }
+            if root.item.editor == "text" : text-field := TextField {
+                width: root.compact ? 210px : 280px;
+                accessible-name: root.item.label;
+                text: root.item.text-value;
+                accepted => { root.commit-text(root.item.id, text-field.text); }
+                focus-lost => { root.commit-text(root.item.id, text-field.text); }
+            }
+            Rectangle { horizontal-stretch: 1; min-width: 8px; }
+            // Never elided: which of absent, chosen, and applied a row is in
+            // is the sentence this screen exists to make legible, and the
+            // spacer beside it can shrink. In a split row it is the text
+            // column's first line instead.
+            if !root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
+            if root.item.can-reset : AppButton {
+                text: GuiI18n.text("gui-minecraft-forget");
+                min-width: 116px;
+                clicked => { root.forget(root.item.id); }
             }
         }
-        Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: root.item.dirty ? Theme.accent.with-alpha(0.65) : Theme.border;
-            background: Theme.surface;
-            VerticalLayout {
-                padding: 12px;
-                spacing: 6px;
-                // No explicit alignment on either line: an aligned layout
-                // keeps every child at its preferred width, which would
-                // collapse the stretching label column and push the row's
-                // contents into a huddle at one edge.
-                HorizontalLayout {
-                    spacing: 10px;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        alignment: center;
-                        spacing: 1px;
-                        Text { text: root.item.label; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; vertical-alignment: center; overflow: elide; }
-                        Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: Theme.mono-family; overflow: elide; }
-                    }
-                    // Every badge in one cluster on one baseline. Split
-                    // across the label column and this one they sat at
-                    // different heights, and an override read as a second
-                    // compatibility verdict.
-                    VerticalLayout { alignment: center; horizontal-stretch: 0;
-                        ActionRow {
-                            // Muted: a tier is a classification, not a
-                            // state, and it must not compete with the three
-                            // badges beside it that are.
-                            if root.item.advanced : Pill { text: GuiI18n.text("gui-minecraft-advanced"); tone-color: Theme.text-muted; }
-                            // Not the compatibility badge's green: what
-                            // Ephervex writes and what a release supports
-                            // are different sentences.
-                            if root.item.overridden : Pill { text: GuiI18n.text("gui-minecraft-state-overridden"); tone-color: Theme.accent-secondary; }
-                            if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
-                            CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
-                        }
-                    }
-                }
-                HorizontalLayout {
-                    spacing: 10px;
-                    if root.item.editor == "toggle" : Toggle {
-                        accessible-name: root.item.label;
-                        checked: root.item.bool-value;
-                        toggled(value) => { root.set-boolean(root.item.id, value); }
-                    }
-                    if root.item.editor == "number" : number-field := TextField {
-                        width: root.compact ? 150px : 190px;
-                        accessible-name: root.item.label;
-                        invalid: root.item.invalid;
-                        input-type: InputType.text;
-                        text: root.item.text-value;
-                        edited(value) => { root.edit-number(root.item.id, value); }
-                        accepted => { root.commit-number(root.item.id, number-field.text); }
-                        focus-lost => { root.commit-number(root.item.id, number-field.text); }
-                    }
-                    if root.item.editor == "slider" : ValueSlider {
-                        width: root.compact ? 170px : 240px;
-                        accessible-label: root.item.label;
-                        minimum: root.item.number-min;
-                        maximum: root.item.number-max;
-                        step: root.item.number-step;
-                        // Committed on release rather than on every
-                        // movement: the row re-renders when the draft
-                        // changes, and a control that rebuilt itself
-                        // mid-drag would drop the drag.
-                        value: root.item.number-value;
-                        released(value) => { root.set-number(root.item.id, value); }
-                    }
-                    // Wide enough for the longest reading a slider
-                    // produces, so a named endpoint is never cut in half.
-                    if root.item.editor == "slider" : BodyText { text: root.item.number-readout; color: Theme.text; width: 150px; }
-                    // Shown only where the reading says more than the
-                    // number itself does, such as a scale of zero that
-                    // means "pick one to fit the window".
-                    if root.item.editor == "number" && root.item.number-hint != "" : BodyText { text: root.item.number-hint; color: Theme.text; horizontal-stretch: 0; }
-                    if root.item.editor == "enum" : IndexComboBox {
-                        width: root.compact ? 210px : 280px;
-                        label: root.item.label;
-                        model: root.item.enum-labels;
-                        index: root.item.enum-index;
-                        selected(index) => { root.set-enumeration(root.item.id, index); }
-                    }
-                    if root.item.editor == "language" && root.languages-available : IndexComboBox {
-                        width: root.compact ? 240px : 330px;
-                        label: root.item.label;
-                        model: root.item.enum-labels;
-                        index: root.item.enum-index;
-                        selected(index) => { root.set-language(root.item.id, index); }
-                    }
-                    if root.item.editor == "language" && !root.languages-available : AppButton {
-                        text: GuiI18n.text("gui-minecraft-language-retry");
-                        clicked => { root.retry-languages(); }
-                    }
-                    if root.item.editor == "keybinding" : PreferenceKeyBindingEditor {
-                        text: root.item.binding-label;
-                        capturing: root.capturing;
-                        accessible-name: root.item.label;
-                        begin => { root.begin-capture(root.item.id); }
-                        cancel => { root.cancel-capture(); }
-                        captured-key(reported) => { root.captured-key(root.item.id, reported); }
-                        captured-mouse(reported) => { root.captured-mouse(root.item.id, reported); }
-                    }
-                    // One product preference, so both numbers are read
-                    // and committed together: half a window size is not a
-                    // window size. The ratio and the lock are the same
-                    // value's other face, not a second one.
-                    if root.item.editor == "window" : VerticalLayout {
-                        spacing: 8px;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            FieldLabel { text: GuiI18n.text("gui-minecraft-width"); vertical-alignment: center; }
-                            width-field := TextField {
-                                width: 96px;
-                                accessible-name: GuiI18n.text("gui-minecraft-width");
-                                invalid: root.item.invalid;
-                                text: root.item.text-value;
-                                edited(value) => { root.edit-window(root.item.id, value, height-field.text); }
-                                // The edited field is the one the ratio
-                                // holds still, so each field commits on
-                                // its own axis.
-                                accepted => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
-                                focus-lost => { root.commit-window-width(root.item.id, width-field.text, height-field.text); }
-                            }
-                            FieldLabel { text: GuiI18n.text("gui-minecraft-height"); vertical-alignment: center; }
-                            height-field := TextField {
-                                width: 96px;
-                                accessible-name: GuiI18n.text("gui-minecraft-height");
-                                invalid: root.item.invalid;
-                                text: root.item.height-text;
-                                edited(value) => { root.edit-window(root.item.id, width-field.text, value); }
-                                accepted => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
-                                focus-lost => { root.commit-window-height(root.item.id, width-field.text, height-field.text); }
-                            }
-                            Rectangle { horizontal-stretch: 1; min-width: 0px; }
-                        }
-                        // The second line is the same value by eye: the
-                        // ratio it is held to, and the window that is it.
-                        // Keeping it off the first line leaves the row's
-                        // own actions their column at every width.
-                        HorizontalLayout {
-                            spacing: 8px;
-                            IndexComboBox {
-                                width: root.compact ? 116px : 136px;
-                                label: GuiI18n.text("gui-minecraft-aspect");
-                                model: root.aspect-labels;
-                                index: root.item.aspect-index;
-                                selected(index) => { root.set-window-aspect(root.item.id, index); }
-                            }
-                            FieldLabel { text: GuiI18n.text("gui-minecraft-aspect-lock"); vertical-alignment: center; }
-                            Toggle {
-                                accessible-name: GuiI18n.text("gui-minecraft-aspect-lock");
-                                checked: root.item.aspect-locked;
-                                toggled(value) => { root.set-window-lock(root.item.id, value); }
-                            }
-                            // Sizing by eye means a window the size of the
-                            // window, not a drawing of one.
-                            AppButton {
-                                text: GuiI18n.text("gui-minecraft-window-open");
-                                clicked => { root.open-window-preview(root.item.id); }
-                            }
-                            Rectangle { horizontal-stretch: 1; min-width: 0px; }
-                        }
-                    }
-                    if root.item.editor == "text" : text-field := TextField {
-                        width: root.compact ? 210px : 280px;
-                        accessible-name: root.item.label;
-                        text: root.item.text-value;
-                        accepted => { root.commit-text(root.item.id, text-field.text); }
-                        focus-lost => { root.commit-text(root.item.id, text-field.text); }
-                    }
-                    Rectangle { horizontal-stretch: 1; min-width: 8px; }
-                    // Never elided: which of absent, chosen, and applied
-                    // a row is in is the sentence this screen exists to
-                    // make legible, and the spacer beside it can shrink.
-                    if root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
-                    if root.item.can-reset : AppButton {
-                        text: GuiI18n.text("gui-minecraft-forget");
-                        min-width: 116px;
-                        clicked => { root.forget(root.item.id); }
-                    }
-                }
-                if root.item.description != "" : Text { text: root.item.description; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
-                if root.item.invalid : Text { text: root.item.validation; color: Theme.danger; font-size: Theme.caption-size; overflow: elide; }
-                if root.item.notice != "" : Text { text: root.item.notice; color: Theme.warning; font-size: Theme.caption-size; overflow: elide; }
-                if root.item.status-detail != "" : Text { text: root.item.status-detail; color: Theme.text-muted; font-size: Theme.caption-size; overflow: elide; }
-            }
+        details := VerticalLayout {
+            x: root.inset;
+            y: root.inset + (root.split ? root.head-height + root.detail-gap : root.head-height + root.line-gap + controls.preferred-height + root.detail-gap);
+            width: root.text-width;
+            height: self.preferred-height;
+            spacing: 3px;
+            if root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; wrap: word-wrap; }
+            if root.item.description != "" : Text { text: root.item.description; color: Theme.text-muted; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
+            if root.item.invalid : Text { text: root.item.validation; color: Theme.danger; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
+            if root.item.notice != "" : Text { text: root.item.notice; color: Theme.warning; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
+            if root.item.status-detail != "" : Text { text: root.item.status-detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
         }
     }
 }
