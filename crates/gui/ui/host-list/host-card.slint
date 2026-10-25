@@ -102,7 +102,7 @@ export component HostCardFace inherits Rectangle {
                 alignment: stretch;
                 title := ElidedHeading {
                     text: root.name;
-                    font-size: Theme.row-heading-size;
+                    font-size: Theme.card-title-size;
                     clicked => { root.title-pressed(); }
                     context-requested(x, y) => { root.menu-requested(x, y); }
                 }
@@ -114,9 +114,23 @@ export component HostCardFace inherits Rectangle {
                     alignment: center;
                     FavoriteToggle {
                         size: 26px;
+                        flat: true;
                         host-name: root.name;
                         favorite: root.favorite;
                         toggled => { root.star-pressed(); }
+                        context-requested(x, y) => { root.menu-requested(x, y); }
+                    }
+                }
+                if root.quick-viewable : VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        width: 26px;
+                        height: 26px;
+                        glyph-size: 14px;
+                        icon: @image-url("../../../../assets/icons/expand.svg");
+                        accessible-name: GuiI18n.value("gui-quick-view-for", root.name);
+                        tooltip: GuiI18n.text("gui-quick-view");
+                        clicked => { root.quick-view-pressed(); }
                         context-requested(x, y) => { root.menu-requested(x, y); }
                     }
                 }
@@ -127,12 +141,16 @@ export component HostCardFace inherits Rectangle {
                 height: Theme.chip-height;
                 clip: true;
                 minecraft-chip := Chip {
+                    pressed => { root.title-pressed(); }
+                    context-requested(x, y) => { root.menu-requested(x, y); }
                     x: 0px;
                     text: root.minecraft;
                     visible: root.minecraft != "";
                     width: root.minecraft != "" ? min(self.natural-width, parent.width) : 0px;
                 }
                 loader-chip := Chip {
+                    pressed => { root.title-pressed(); }
+                    context-requested(x, y) => { root.menu-requested(x, y); }
                     x: minecraft-chip.width + (minecraft-chip.width > 0px ? root.chip-gap : 0px);
                     text: root.loader;
                     tone: root.loader-kind;
@@ -140,6 +158,8 @@ export component HostCardFace inherits Rectangle {
                     width: root.loader != "" ? max(0px, min(self.natural-width, parent.width - self.x - (root.extra-chip != "" ? extra.natural-width + root.chip-gap : 0px))) : 0px;
                 }
                 extra := Chip {
+                    pressed => { root.title-pressed(); }
+                    context-requested(x, y) => { root.menu-requested(x, y); }
                     x: loader-chip.x + loader-chip.width + (loader-chip.width > 0px ? root.chip-gap : 0px);
                     text: root.extra-chip;
                     tone: "server";
@@ -157,6 +177,18 @@ export component HostCardFace inherits Rectangle {
             }
             HorizontalLayout {
                 height: max(state-text.preferred-height, trailing-text.preferred-height);
+                spacing: 7px;
+                // The state as a mark that can be told apart without reading.
+                VerticalLayout {
+                    alignment: center;
+                    Rectangle {
+                        width: 12px;
+                        height: 12px;
+                        border-width: Theme.chip-border-width;
+                        border-color: Theme.border-strong;
+                        background: root.strip;
+                    }
+                }
                 Rectangle {
                     horizontal-stretch: 1;
                     state-text := Text {

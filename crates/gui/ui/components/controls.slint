@@ -309,6 +309,8 @@ export component FavoriteToggle inherits Rectangle {
     in property <string> hint;
     callback toggled();
     // A press of the secondary button over the control, in window coordinates,
+    // Drawn without a plate behind it, as on a list card.
+    in property <bool> flat: false;
     // for a card that offers its menu wherever it is pressed.
     callback context-requested(x: length, y: length);
     // The star has no caption, so hover says what pressing it does, or why
@@ -323,21 +325,22 @@ export component FavoriteToggle inherits Rectangle {
     accessible-checked: root.favorite;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.toggled(); } }
-    // Flat, like the other icon buttons. The star that is on is `warning`,
-    // darker than a pale gold so it stays readable on the note fill.
-    Plate {
+    // The star that is on is `warning`, darker than a pale gold so it stays
+    // readable on the note fill. A flat star is the glyph alone.
+    if !root.flat : Plate {
         width: root.width;
         height: root.height;
         lift: 0px;
         radius: Theme.small-radius;
         fill: root.favorite ? Theme.note-fill : Theme.surface;
         opacity: root.enabled ? 1 : Theme.disabled-opacity;
-        Image {
-            x: root.size * 2 / 9; y: root.size * 2 / 9; width: parent.width - root.size * 4 / 9; height: parent.height - root.size * 4 / 9;
-            source: root.favorite ? @image-url("../../../../assets/icons/favorite-filled.svg") : @image-url("../../../../assets/icons/favorite.svg");
-            image-fit: contain;
-            colorize: root.favorite ? Theme.warning : Theme.text-muted;
-        }
+    }
+    Image {
+        x: root.size * 2 / 9; y: root.size * 2 / 9; width: parent.width - root.size * 4 / 9; height: parent.height - root.size * 4 / 9;
+        source: root.favorite ? @image-url("../../../../assets/icons/favorite-filled.svg") : @image-url("../../../../assets/icons/favorite.svg");
+        image-fit: contain;
+        colorize: root.favorite ? Theme.warning : Theme.text-muted;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
     }
     KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.toggled(); } }
     // Always enabled, so a disabled star still reports hover and can explain
@@ -1018,6 +1021,10 @@ export component Chip inherits Rectangle {
     width: root.natural-width;
     horizontal-stretch: 0;
     accessible-role: AccessibleRole.text;
+    // A press of the chip, passed on while it is cut short, because its hover
+    // area then sits over whatever the chip is drawn on.
+    callback pressed();
+    callback context-requested(x: length, y: length);
     accessible-label: root.text;
     border-radius: Theme.chip-radius;
     border-width: Theme.chip-border-width;
@@ -1048,6 +1055,14 @@ export component Chip inherits Rectangle {
 
 // The tone of a host's lifecycle state, the same wherever the host is
 // drawn. A settled state takes `rest`.
+    // A chip that is cut says its whole text on hover.
+    if label.preferred-width > label.width : Rectangle {
+        area := ContextTouchArea {
+            clicked => { root.pressed(); }
+            context-requested(x, y) => { root.context-requested(x, y); }
+        }
+        HoverNote { text: root.text; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
+    }
 export global StateTone {
     pure public function of-or(state-kind: string, rest: color) -> color {
         if (state-kind == "running") {
