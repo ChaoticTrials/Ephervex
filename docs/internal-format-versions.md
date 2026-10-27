@@ -6,7 +6,7 @@ the three host-facing format versions at `1` until the 1.0.0 boundary.
 
 | Format | Version source | Current value | Compatibility rule |
 |---|---|---:|---|
-| Configuration | `CONFIG_SCHEMA_VERSION` | 1 | Additive fields default when absent. Unknown keys survive a load and save, including the key of a setting a later build removed. |
+| Configuration | `CONFIG_SCHEMA_VERSION` | 1 | Additive fields default when absent. Unknown keys survive a load and save. |
 | Instance and server metadata | `METADATA_VERSION` | 1 | Additive fields default when absent. New advisory attention reasons remain readable. |
 | Retained pack recipe | `RECIPE_VERSION` | 1 | Additive fields default when absent. Authoritative values that affect reconstruction fail closed when unknown. |
 | Download metadata envelope | `METADATA_ENVELOPE_VERSION` | 1 | Cache state may be discarded and fetched again. |

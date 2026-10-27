@@ -47,6 +47,38 @@ fn an_untouched_install_paints_the_light_workbench_page() {
     }
 }
 
+#[test]
+fn workbench_dark_paints_a_dark_page_the_widgets_read_on() {
+    let ui = window();
+    let theme = ui.global::<Theme>();
+    let palettes = ui.global::<BuiltInPalettes>();
+    theme.set_palette(palettes.get_workbench_dark());
+    assert_eq!(theme.get_widget_scheme(), ColorScheme::Dark);
+
+    for (surface, page) in [
+        ("background", theme.get_background()),
+        ("surface", theme.get_surface()),
+        ("field", theme.get_field()),
+        ("elevated", theme.get_elevated()),
+    ] {
+        for (foreground, ink) in [
+            ("text", theme.get_text()),
+            ("text-secondary", theme.get_text_secondary()),
+            ("text-muted", theme.get_text_muted()),
+        ] {
+            assert!(
+                luminance(ink) > luminance(page),
+                "{foreground} is not lighter than {surface}, so the widgets' dark scheme would not read"
+            );
+        }
+    }
+    assert_ne!(
+        theme.get_shadow_hard(),
+        theme.get_border_strong(),
+        "the hard shadow must stay visible against a light outline"
+    );
+}
+
 /// How bright a color reads, weighted the way an eye sees the three channels.
 fn luminance(color: Color) -> u32 {
     u32::from(color.red()) * 299 + u32::from(color.green()) * 587 + u32::from(color.blue()) * 114

@@ -1,9 +1,10 @@
 # Themes
 
-Ephervex ships one built-in theme, Workbench. You can add your own as TOML files
-or theme folders, and they appear in Settings > General > Interface theme next
-to it. A theme changes colors, and a theme folder can also replace
-the logo and the window icon. Text size is its own setting, and fonts and layout
+Ephervex ships two built-in themes, Light and Dark, which are the Workbench look
+on a light and on a dark page, and seasonal themes that show themselves on a few
+days of the year. You can add your own as TOML files or theme folders, and they
+appear in Settings > General > Interface theme next to the built-in ones. A theme
+changes colors, and a theme folder can also replace the logo and the window icon. Text size is its own setting, and fonts and layout
 cannot be changed by a theme.
 
 ## Where theme files go
@@ -70,21 +71,21 @@ your file was written, so a theme never ends up with a missing color. There is
 one exception: a theme that sets `accent`, `background` or `text` and leaves out
 `toggle-knob`, `field` or `on-primary` respectively gets the color it set, as it
 did before those could be set on their own. The standard scroll bars and lists
-are drawn light under every parent; see
+are drawn light or dark by the parent; see
 [What a theme does not reach](#what-a-theme-does-not-reach).
 
 ### Parents
 
 | `parent` | Starts from |
 |---|---|
-| `"workbench"` | The Workbench theme: a light page with ink outlines and pastel fills |
-| `"dark"` | Workbench. The name stays valid so existing themes and recorded choices keep loading. |
-| `"light"` | Workbench. The name stays valid so existing themes and recorded choices keep loading. |
+| `"workbench"` | The Light theme: a light page with ink outlines and pastel fills |
+| `"light"` | The same as `"workbench"`. The name stays valid so existing themes and recorded choices keep loading. |
+| `"dark"` | The Dark theme: the same look on a dark page, with light ink outlines and a black hard shadow |
 
-`"dark"` and `"light"` are accepted wherever a theme is named, and they paint as
-Workbench. A theme that sets all of its colors paints the same under any
-parent. No parent produces a dark page or dark scroll bars and lists: every
-parent is Workbench's light look.
+`"workbench"`, `"light"` and `"dark"` are accepted wherever a theme is named. A
+theme that sets all of its colors paints the same under any parent, except that
+the standard scroll bars and lists follow the parent: dark under `"dark"`, light
+under the others.
 
 Colors are written as `"#rrggbb"`, or `"#rrggbbaa"` with an alpha channel, in
 hexadecimal. Nothing looser is accepted.
@@ -157,6 +158,7 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 | `state-server` | The fill of a server tag, and of the strip down a server's card |
 | `note-fill` | The fill of the workflow banner and of a favorite star that is on |
 | `danger-soft` | The fill of a problem box. `danger` text is drawn on it. |
+| `ok-soft` | The fill of something that is fine or in use, such as a healthy diagnosis or the Java runtime in use. Text and the tones are drawn on it. |
 | `grid-line` | The hairline grid over the window floor; usually a faint translucent line |
 | `terminal` | The floor of a console or log that is drawn dark on any page |
 | `on-terminal` | Text on `terminal` |
@@ -192,8 +194,10 @@ A theme folder can name two images under `[branding]`:
 | `icon` | The window icon, where the desktop takes it from the window |
 
 Both are optional, and each one falls back to the Ephervex logo on its own:
-a theme that sets only `logo` keeps the default window icon. Workbench uses the
-Ephervex logo and window icon.
+a theme that sets only `logo` keeps the default window icon. A built-in theme's
+branding is compiled into the application and never read from disk. Light and
+Dark use the Ephervex logo and window icon, and each seasonal theme uses its own
+mascot as both logo and window icon.
 
 Each value is a file name inside the theme's own `branding/` folder, such as
 `"logo.png"` or `"icons/app.webp"`. Do not write `branding/` in front of it.
@@ -238,13 +242,92 @@ takes the icon from the window:
 - Ephervex is built for Linux only, so there is no macOS Dock or Windows
   taskbar icon to change.
 
+## Seasonal themes
+
+A seasonal theme stands in for Light or Dark while its season lasts. It is not
+in the theme list and cannot be chosen; there is one palette per season,
+whichever of Light and Dark you chose.
+
+| Theme | Season |
+|---|---|
+| Halloween | October 25 through October 31 |
+| Christmas | December 24 through December 26 |
+| Pride Month | June 1 through June 30 |
+| April Fools | April 1 |
+
+The season follows the computer's local date. It starts at midnight on its
+first day and ends at midnight after its last day, also while Ephervex stays
+open: the date is checked once a minute, and the theme changes once at each
+boundary.
+
+A theme of your own is never replaced. To keep Light or Dark during a season,
+turn off Settings > General > Seasonal themes; the theme you chose is shown
+straight away. The setting is only offered while a season is on, because it
+changes nothing on any other day.
+
+A season never changes your theme setting. The theme list keeps showing your
+choice, the Seasonal themes setting says which theme the season is showing,
+and your theme comes back when the season ends, also after a restart.
+
+A seasonal theme replaces the colors and the logo and window icon together, and
+is the Workbench look in the season's colors. Halloween is a charcoal page with
+bone outlines, pumpkin orange fills, and ghost green for running, with purple
+only as an accent. Christmas is a snowy page with pine-green outlines, candy-red
+shadows, and green highlights. Pride Month is a warm white page where each fill
+is another color of the rainbow. April Fools is a sunny yellow page with navy
+outlines, magenta shadows, and clashing hot pink, turquoise, lime, and violet fills.
+The icon Ephervex was installed with does not change, as described under
+[Window and taskbar icons](#window-and-taskbar-icons). A seasonal theme is not
+a `parent` a theme file can name.
+
+### Previewing a seasonal theme
+
+To see a seasonal theme outside its season, start Ephervex with the
+`SEASONS_THEME` environment variable set to the theme's name:
+
+```sh
+SEASONS_THEME=halloween ephervex-gui
+```
+
+Use `SEASONS_THEME=christmas`, `SEASONS_THEME=pride`, or
+`SEASONS_THEME=april-fools` to preview another season. The theme is shown on
+every day for as long as the variable is set, also across restarts and the
+once-a-minute date check. The value is matched without regard to case. An unset
+or empty variable leaves the date in charge.
+A value that names no seasonal theme is ignored and the date decides; the log
+says which values are accepted.
+
+The variable replaces only the date. A theme of your own is still never
+replaced, turning off Settings > General > Seasonal themes still shows the theme
+you chose, and your theme setting is never changed.
+
+### Adding a seasonal theme
+
+A seasonal theme has four parts:
+
+1. A `SeasonalTheme` value (`crates/core/src/seasonal_theme.rs`) and its first
+   and last day in `THEME_SEASONS` there. Seasons must not overlap, and one may
+   run over the turn of the year, such as December 24 to January 6.
+2. Its palette in `BuiltInPalettes` (`crates/gui/ui/palettes.slint`), which
+   sets every color token, read by `seasonal_palette` in
+   `crates/gui/src/palette.rs`.
+3. Its logo and icon, if it has its own, in `SEASONAL_BRANDING`
+   (`crates/gui/src/theme_files.rs`), compiled in from `assets/themes/`.
+4. Its name in the localization files, for the note the settings page shows
+   while it is active.
+
+`SEASONS_THEME` accepts the new theme's `SeasonalTheme::as_str` name with no
+further work, because it looks the name up in `THEME_SEASONS`. Nothing else
+checks dates. See ADR 0049 for the rules a season follows.
+
 ## What a theme does not reach
 
 Dropdowns, sliders, spinners and menus, including the one a right-click or a
 "Launch as" button opens, are drawn from the colors above. Scroll bars and lists
 are the toolkit's own controls: they take no colors from a theme and are drawn
-light for every theme, whatever its parent. A theme with a dark background
-leaves them looking out of place.
+light or dark by the theme's parent, and a theme cannot set that. A theme with a
+dark background therefore needs `parent = "dark"` to get dark scroll bars and
+lists.
 
 ## When a file has a problem
 
@@ -266,5 +349,5 @@ them, one line per file:
 - At most 100 themes, files and folders together, are read, and a theme file
   may be at most 64 KiB.
 
-If the theme you chose can no longer be read, Ephervex paints in the Workbench
+If the theme you chose can no longer be read, Ephervex paints in the Light
 theme and keeps your choice, so fixing the file brings the theme back.

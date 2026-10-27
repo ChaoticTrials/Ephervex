@@ -276,8 +276,8 @@ component HostStamp inherits Rectangle {
             }
             VerticalLayout {
                 alignment: center;
-                caption := DisplayHeading { text: root.label.to-uppercase(); font-size: Theme.item-title-size * 2; letter-spacing: 2px; color: Theme.text; horizontal-alignment: center; }
-                detail-text := Text { text: root.detail; color: Theme.text; font-family: Theme.mono-family; font-size: Theme.caption-size * 2; font-weight: 600; horizontal-alignment: center; }
+                caption := DisplayHeading { text: root.label.to-uppercase(); font-size: Theme.item-title-size * 2; letter-spacing: 2px; color: Theme.on-accent; horizontal-alignment: center; }
+                detail-text := Text { text: root.detail; color: Theme.on-accent; font-family: Theme.mono-family; font-size: Theme.caption-size * 2; font-weight: 600; horizontal-alignment: center; }
             }
         }
     }

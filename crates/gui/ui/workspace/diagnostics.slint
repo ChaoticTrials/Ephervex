@@ -425,7 +425,7 @@ export component DiagnosticsSurface inherits Rectangle {
             // The overall state first, in words and not only in color.
             status := Rectangle {
                 property <color> tone: root.state == "failed" ? Theme.danger-soft
-                    : root.state == "result" && root.host.diagnosis-healthy ? Theme.state-running.mix(Theme.surface, 0.55)
+                    : root.state == "result" && root.host.diagnosis-healthy ? Theme.ok-soft
                     : root.state == "result" ? Theme.danger-soft
                     : Theme.surface;
                 border-radius: Theme.card-radius;

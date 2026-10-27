@@ -12,10 +12,11 @@ use std::collections::HashSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use ephervex_core::seasonal_theme::{SeasonalTheme, ShownTheme};
 use ephervex_core::theme_package::{
-    self, BRANDING_FOLDER, BrandingImage, BrandingReference, BrandingReferenceError, BrandingRole,
-    MAX_BRANDING_DIMENSION, MAX_BRANDING_FILE_BYTES, MAX_REFERENCE_BYTES, MAX_REFERENCE_DEPTH,
-    THEME_MANIFEST, ThemePackageError,
+    self, BRANDING_FOLDER, BrandingFormat, BrandingImage, BrandingReference,
+    BrandingReferenceError, BrandingRole, MAX_BRANDING_DIMENSION, MAX_BRANDING_FILE_BYTES,
+    MAX_REFERENCE_BYTES, MAX_REFERENCE_DEPTH, THEME_MANIFEST, ThemePackageError,
 };
 use ephervex_core::{ApplicationColorScheme, ApplicationTheme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
@@ -382,18 +383,105 @@ fn read_theme_package(folder: &Path, id: &str) -> (Option<UserTheme>, Vec<Proble
     }
 }
 
-/// Decodes the branding of the chosen theme: a theme folder's own images. A
-/// built-in theme has none, so it shows the default logo and icon. Each image
-/// that cannot be used is reported in `themes.problems` and left at the
-/// default.
+/// Branding compiled into the application for a built-in or seasonal theme:
+/// the theme, what the image replaces, its bytes and their format. Nothing
+/// here is read from disk.
+type EmbeddedBranding<Theme> = (Theme, BrandingRole, &'static [u8], BrandingFormat);
+
+/// Dark and Light show the default logo, so they have no entries.
+const BUILT_IN_BRANDING: &[EmbeddedBranding<ApplicationColorScheme>] = &[];
+
+const HALLOWEEN_MASCOT: &[u8] = include_bytes!("../../../assets/themes/halloween.png");
+const CHRISTMAS_MASCOT: &[u8] = include_bytes!("../../../assets/themes/christmas.png");
+const PRIDE_MASCOT: &[u8] = include_bytes!("../../../assets/themes/pride.png");
+const APRIL_FOOLS_MASCOT: &[u8] = include_bytes!("../../../assets/themes/april-fools.png");
+
+/// The Halloween pumpkin ghost is both logo and window icon.
+const SEASONAL_BRANDING: &[EmbeddedBranding<SeasonalTheme>] = &[
+    (
+        SeasonalTheme::Halloween,
+        BrandingRole::Logo,
+        HALLOWEEN_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Halloween,
+        BrandingRole::Icon,
+        HALLOWEEN_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Christmas,
+        BrandingRole::Logo,
+        CHRISTMAS_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Christmas,
+        BrandingRole::Icon,
+        CHRISTMAS_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Pride,
+        BrandingRole::Logo,
+        PRIDE_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::Pride,
+        BrandingRole::Icon,
+        PRIDE_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::AprilFools,
+        BrandingRole::Logo,
+        APRIL_FOOLS_MASCOT,
+        BrandingFormat::Png,
+    ),
+    (
+        SeasonalTheme::AprilFools,
+        BrandingRole::Icon,
+        APRIL_FOOLS_MASCOT,
+        BrandingFormat::Png,
+    ),
+];
+
+/// Decodes `theme`'s entries in `table`. One that does not decode is a
+/// defect in the build, logged and left at the default.
+fn embedded_branding<Theme: PartialEq + std::fmt::Debug>(
+    table: &[EmbeddedBranding<Theme>],
+    theme: &Theme,
+) -> BrandingImages {
+    let mut images = BrandingImages::default();
+    for (_, role, bytes, format) in table.iter().filter(|entry| entry.0 == *theme) {
+        match theme_package::decode_branding_image(bytes, *format, *role) {
+            Ok(image) => match role {
+                BrandingRole::Logo => images.logo = Some(image),
+                BrandingRole::Icon => images.icon = Some(image),
+            },
+            Err(error) => tracing::error!(?theme, ?role, %error, "built-in branding unusable"),
+        }
+    }
+    images
+}
+
+/// Decodes the branding of the theme shown: a built-in or seasonal theme's
+/// compiled-in images, or a theme folder's own. Each image that cannot be
+/// used is reported in `themes.problems` and left at the default.
 #[must_use]
 pub fn read_selected_branding(
     folder: &Path,
     themes: &mut UserThemes,
-    chosen: &ApplicationTheme,
+    shown: &ShownTheme,
 ) -> BrandingImages {
-    let ApplicationTheme::User(id) = chosen else {
-        return BrandingImages::default();
+    let id = match shown {
+        ShownTheme::Seasonal(theme) => return embedded_branding(SEASONAL_BRANDING, theme),
+        ShownTheme::Recorded(ApplicationTheme::BuiltIn(scheme)) => {
+            return embedded_branding(BUILT_IN_BRANDING, scheme);
+        }
+        ShownTheme::Recorded(ApplicationTheme::User(id)) => id,
     };
     let Some(theme) = themes.themes.iter().find(|theme| theme.id == *id) else {
         return BrandingImages::default();
@@ -640,6 +728,13 @@ mod tests {
     }
 
     #[test]
+    fn a_seasonal_theme_is_not_a_parent() {
+        let (theme, problems) = parse_theme("t", "parent = \"halloween\"");
+        assert_eq!(theme, None);
+        assert_eq!(problems, [Problem::UnknownParent("halloween".to_owned())]);
+    }
+
+    #[test]
     fn an_empty_file_is_the_default_parent_under_its_file_name() {
         let (theme, problems) = parse_theme("plain", "");
         assert!(problems.is_empty());
@@ -765,7 +860,11 @@ mod tests {
         let (theme, problems) = parse_theme("modrinth", EXAMPLE);
         assert!(problems.is_empty(), "{problems:?}");
         let theme = theme.expect("usable");
-        crate::palette::apply_theme(&ui, &theme.preference(), std::slice::from_ref(&theme));
+        crate::palette::apply_theme(
+            &ui,
+            &ShownTheme::Recorded(theme.preference()),
+            std::slice::from_ref(&theme),
+        );
         let palette = ui.global::<crate::ui::Theme>().get_palette();
         let found = crate::palette::drawn_pairs::shortfalls(&palette);
         assert!(found.is_empty(), "{found:?}");
@@ -1084,7 +1183,7 @@ mod tests {
         let images = read_selected_branding(
             folder.path(),
             &mut found,
-            &ApplicationTheme::User("pumpkin".to_owned()),
+            &ShownTheme::Recorded(ApplicationTheme::User("pumpkin".to_owned())),
         );
         assert!(found.problems.is_empty(), "{:?}", found.problems);
         let logo = images.logo.expect("logo");
@@ -1122,7 +1221,7 @@ mod tests {
         let images = read_selected_branding(
             folder.path(),
             &mut found,
-            &ApplicationTheme::User("broken".to_owned()),
+            &ShownTheme::Recorded(ApplicationTheme::User("broken".to_owned())),
         );
         assert_eq!(images, BrandingImages::default());
         let reported = |file: &str, message: &str| {
@@ -1148,7 +1247,7 @@ mod tests {
         let images = read_selected_branding(
             folder.path(),
             &mut found,
-            &ApplicationTheme::User("broken".to_owned()),
+            &ShownTheme::Recorded(ApplicationTheme::User("broken".to_owned())),
         );
         assert_eq!(images, BrandingImages::default());
         assert_eq!(
@@ -1161,24 +1260,112 @@ mod tests {
     }
 
     #[test]
-    fn a_built_in_theme_shows_the_default_logo_and_icon() {
-        let folder = tempfile::tempdir().expect("temp dir");
-        let mut found = read_user_themes(folder.path());
+    fn a_built_in_theme_shows_its_compiled_in_branding_and_falls_back_per_image() {
+        let logo: &'static [u8] = include_bytes!("../../../assets/logo.png");
+        let table: [EmbeddedBranding<ApplicationColorScheme>; 2] = [
+            (
+                ApplicationColorScheme::Light,
+                BrandingRole::Logo,
+                logo,
+                BrandingFormat::Png,
+            ),
+            (
+                ApplicationColorScheme::Light,
+                BrandingRole::Icon,
+                b"not an image",
+                BrandingFormat::Png,
+            ),
+        ];
+        let light = embedded_branding(&table, &ApplicationColorScheme::Light);
+        let shown = light.logo.expect("the compiled-in logo");
+        assert_eq!((shown.width(), shown.height()), (620, 620));
+        assert_eq!(light.icon, None, "an unusable image is the default");
+        assert_eq!(
+            embedded_branding(&table, &ApplicationColorScheme::Dark),
+            BrandingImages::default()
+        );
         for scheme in [
             ApplicationColorScheme::Workbench,
             ApplicationColorScheme::Dark,
             ApplicationColorScheme::Light,
         ] {
             assert_eq!(
-                read_selected_branding(
-                    folder.path(),
-                    &mut found,
-                    &ApplicationTheme::BuiltIn(scheme)
-                ),
+                embedded_branding(BUILT_IN_BRANDING, &scheme),
                 BrandingImages::default()
             );
         }
-        assert!(found.problems.is_empty());
+    }
+
+    /// The mascot ships inside the application, so the season reads nothing
+    /// from the themes folder, even one with a folder of that name.
+    #[test]
+    fn halloween_shows_its_compiled_in_mascot_as_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let branding = package(
+            folder.path(),
+            "halloween",
+            "[branding]\nlogo = \"logo.png\"",
+        );
+        std::fs::write(branding.join("logo.png"), png([1, 2, 3, 255])).expect("write");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ShownTheme::Seasonal(SeasonalTheme::Halloween),
+        );
+        let logo = images.logo.expect("the mascot logo");
+        let icon = images.icon.expect("the mascot icon");
+        assert_eq!((logo.width(), logo.height()), (620, 620));
+        assert_eq!(logo, icon);
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn christmas_shows_its_compiled_in_mascot_as_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ShownTheme::Seasonal(SeasonalTheme::Christmas),
+        );
+        let logo = images.logo.expect("the mascot logo");
+        let icon = images.icon.expect("the mascot icon");
+        assert_eq!((logo.width(), logo.height()), (620, 620));
+        assert_eq!(logo, icon);
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn pride_shows_its_compiled_in_mascot_as_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ShownTheme::Seasonal(SeasonalTheme::Pride),
+        );
+        let logo = images.logo.expect("the mascot logo");
+        let icon = images.icon.expect("the mascot icon");
+        assert_eq!((logo.width(), logo.height()), (620, 620));
+        assert_eq!(logo, icon);
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
+    }
+
+    #[test]
+    fn april_fools_shows_its_compiled_in_mascot_as_logo_and_icon() {
+        let folder = tempfile::tempdir().expect("temp dir");
+        let mut found = read_user_themes(folder.path());
+        let images = read_selected_branding(
+            folder.path(),
+            &mut found,
+            &ShownTheme::Seasonal(SeasonalTheme::AprilFools),
+        );
+        let logo = images.logo.expect("the mascot logo");
+        let icon = images.icon.expect("the mascot icon");
+        assert_eq!((logo.width(), logo.height()), (620, 620));
+        assert_eq!(logo, icon);
+        assert!(found.problems.is_empty(), "{:?}", found.problems);
     }
 
     #[test]
@@ -1236,7 +1423,7 @@ mod tests {
             ApplicationTheme::User("absent".to_owned()),
         ] {
             assert_eq!(
-                read_selected_branding(folder.path(), &mut found, &selected),
+                read_selected_branding(folder.path(), &mut found, &ShownTheme::Recorded(selected)),
                 BrandingImages::default()
             );
         }

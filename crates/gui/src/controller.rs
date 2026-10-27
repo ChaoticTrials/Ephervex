@@ -77,6 +77,9 @@ pub struct Controller {
     /// A slower poll of its own, so watching what is running does not add work
     /// to every other screen. Runs only while that page is open.
     _running_timer: Timer,
+    /// Notices a new local date that starts or ends a season, so a season's
+    /// theme comes and goes while Ephervex stays open.
+    _season_timer: Timer,
     /// Rereads the statistics of the servers whose Overview is shown.
     _statistics_timer: Timer,
     /// Kept so a later hook, such as [`accept_file_drops`], can send the same
@@ -2753,13 +2756,79 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         },
     );
 
+    let season_weak = ui.as_weak();
+    let season_commands = backend.commands.clone();
+    let season_watch = RefCell::new(SeasonWatch {
+        forced: ephervex_core::seasonal_theme::forced_season(),
+        ..SeasonWatch::default()
+    });
+    let season_timer = Timer::default();
+    season_timer.start(TimerMode::Repeated, SEASON_CHECK, move || {
+        let Some(ui) = season_weak.upgrade() else {
+            return;
+        };
+        let due = season_watch.borrow_mut().due(
+            &ui.get_application_theme(),
+            ui.get_seasonal_themes(),
+            &ui.get_shown_theme(),
+            chrono::Local::now().date_naive(),
+        );
+        if due {
+            send(&season_commands, Command::Refresh);
+        }
+    });
+
     Controller {
         _poll_timer: poll_timer,
         _running_timer: running_timer,
+        _season_timer: season_timer,
         _statistics_timer: statistics_timer,
         commands: backend.commands,
         import_flow,
         workspace: workspace.state,
+    }
+}
+
+/// How often the local date is checked against the seasons. A season's theme
+/// arrives within this long of midnight.
+const SEASON_CHECK: Duration = Duration::from_secs(60);
+
+/// Decides when a new local date changes the theme that should be shown.
+#[derive(Debug, Default)]
+struct SeasonWatch {
+    /// The date a refresh was last asked for, so a refresh that does not
+    /// change the theme is not asked for again until the next date.
+    asked_on: Option<chrono::NaiveDate>,
+    /// The season shown on every day in place of the date's, if any.
+    forced: Option<ephervex_core::seasonal_theme::SeasonalTheme>,
+}
+
+impl SeasonWatch {
+    /// Whether the settings should be read again because `today` shows a
+    /// different theme than `shown`, by
+    /// [`ephervex_core::seasonal_theme::ShownTheme::name`]. `preferred` is
+    /// the recorded theme.
+    fn due(
+        &mut self,
+        preferred: &str,
+        seasonal_themes: bool,
+        shown: &str,
+        today: chrono::NaiveDate,
+    ) -> bool {
+        let Some(preferred) = ephervex_core::ApplicationTheme::from_stored(preferred) else {
+            return false;
+        };
+        let wanted = ephervex_core::seasonal_theme::shown_theme_with(
+            &preferred,
+            seasonal_themes,
+            self.forced,
+            today,
+        );
+        if wanted.name() == shown || self.asked_on == Some(today) {
+            return false;
+        }
+        self.asked_on = Some(today);
+        true
     }
 }
 
@@ -8349,6 +8418,11 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     ui.on_set_dependency_following(move |follow| {
         send(&sender, Command::SaveDependencyFollowing(follow));
     });
+
+    let sender = commands.clone();
+    ui.on_set_seasonal_themes(move |enabled| {
+        send(&sender, Command::SaveSeasonalThemes(enabled));
+    });
 }
 
 fn parse_java_memory(minimum: &str, maximum: &str) -> Result<(u32, u32), String> {
@@ -9891,11 +9965,31 @@ fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) 
     ui.set_artifact_cache_usage_known(true);
 }
 
+/// The text sizes and the theme, which together decide how the interface looks.
+fn apply_display_settings(ui: &AppWindow, settings: &SettingsData) {
+    ui.set_application_text_scale(i32::from(settings.text_scale_percent));
+    ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
+    ui.global::<Theme>()
+        .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
+    ui.set_seasonal_theme_in_season(settings.season_on_today);
+    apply_theme_settings(
+        ui,
+        &settings.theme,
+        settings.seasonal_themes,
+        &settings.shown_theme,
+        &settings.user_themes,
+        &settings.branding,
+        &settings.themes_folder,
+    );
+}
+
 /// The theme list and the chosen theme, and the palette and branding of the
-/// chosen theme.
+/// theme shown, which is a season's while one stands in for the chosen one.
 fn apply_theme_settings(
     ui: &AppWindow,
     theme: &ephervex_core::ApplicationTheme,
+    seasonal_themes: bool,
+    shown: &ephervex_core::seasonal_theme::ShownTheme,
     user_themes: &crate::theme_files::UserThemes,
     branding: &crate::theme_files::BrandingImages,
     themes_folder: &str,
@@ -9916,6 +10010,27 @@ fn apply_theme_settings(
     let chosen = crate::palette::choice_index(&choices, theme);
     ui.set_theme_index(i32::try_from(chosen).unwrap_or_default());
     ui.set_application_theme(theme.to_stored().into());
+    ui.set_seasonal_themes(seasonal_themes);
+    ui.set_shown_theme(shown.name().into());
+    let note = match shown {
+        ephervex_core::seasonal_theme::ShownTheme::Seasonal(season) => lookup_args(
+            "gui-seasonal-theme-shown",
+            [
+                ("season", Arg::from(crate::palette::seasonal_label(*season))),
+                (
+                    "value",
+                    Arg::from(
+                        choices
+                            .get(chosen)
+                            .map(|choice| choice.label.clone())
+                            .unwrap_or_default(),
+                    ),
+                ),
+            ],
+        ),
+        ephervex_core::seasonal_theme::ShownTheme::Recorded(_) => String::new(),
+    };
+    ui.set_seasonal_theme_note(note.into());
     ui.set_themes_folder(themes_folder.into());
     ui.set_theme_problems(model(
         user_themes
@@ -9924,7 +10039,7 @@ fn apply_theme_settings(
             .map(|problem| SharedString::from(problem.as_str()))
             .collect(),
     ));
-    crate::palette::apply_theme(ui, theme, &user_themes.themes);
+    crate::palette::apply_theme(ui, shown, &user_themes.themes);
     crate::branding::apply_branding(ui, branding);
 }
 
@@ -10196,6 +10311,7 @@ fn apply_snapshot(
     minecraft.borrow_mut().apply_snapshot(minecraft_preferences);
     render_minecraft(ui, minecraft);
     apply_settings_fields(ui, &settings, drafts);
+    apply_display_settings(ui, &settings);
     ui.set_storage_root(settings.storage_root.into());
     ui.set_default_persistent_root(settings.default_persistent_root.into());
     ui.set_persistent_root_is_custom(settings.persistent_root_origin.is_override());
@@ -10220,17 +10336,6 @@ fn apply_snapshot(
     ui.set_default_mod_catalog(settings.default_mod_catalog.clone().into());
     ui.set_configured_mod_catalog(settings.configured_mod_catalog.clone().into());
     ui.set_default_mod_catalog_is_custom(settings.mod_catalog_origin.is_override());
-    ui.set_application_text_scale(i32::from(settings.text_scale_percent));
-    ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
-    ui.global::<Theme>()
-        .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
-    apply_theme_settings(
-        ui,
-        &settings.theme,
-        &settings.user_themes,
-        &settings.branding,
-        &settings.themes_folder,
-    );
     ui.set_eula_accepted(eula.accepted);
     ui.set_eula_status(eula.status.into());
     ui.set_loading(false);
@@ -17065,6 +17170,181 @@ mod tests {
         }
     }
 
+    /// The chosen theme, shown as it is.
+    fn unseasoned(
+        theme: &ephervex_core::ApplicationTheme,
+    ) -> ephervex_core::seasonal_theme::ShownTheme {
+        ephervex_core::seasonal_theme::ShownTheme::Recorded(theme.clone())
+    }
+
+    fn day(month: u32, day: u32) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(2026, month, day).expect("date")
+    }
+
+    #[test]
+    fn a_season_paints_its_theme_while_the_page_keeps_the_chosen_one() {
+        let ui = test_window();
+        let themes = crate::theme_files::UserThemes::default();
+        let mascot = crate::theme_files::read_selected_branding(
+            std::path::Path::new("/nonexistent"),
+            &mut crate::theme_files::UserThemes::default(),
+            &ephervex_core::seasonal_theme::ShownTheme::Seasonal(
+                ephervex_core::seasonal_theme::SeasonalTheme::Halloween,
+            ),
+        );
+        let mut accents = Vec::new();
+        for (chosen, label) in [
+            (
+                ephervex_core::ApplicationTheme::BuiltIn(
+                    ephervex_core::ApplicationColorScheme::Dark,
+                ),
+                "gui-color-scheme-dark",
+            ),
+            (
+                ephervex_core::ApplicationTheme::BuiltIn(
+                    ephervex_core::ApplicationColorScheme::Workbench,
+                ),
+                "gui-color-scheme-light",
+            ),
+        ] {
+            let shown = ephervex_core::seasonal_theme::shown_theme(&chosen, true, day(10, 25));
+            apply_theme_settings(&ui, &chosen, true, &shown, &themes, &mascot, "");
+            assert_eq!(ui.get_application_theme(), chosen.to_stored().as_str());
+            let index = usize::try_from(ui.get_theme_index()).expect("an index");
+            assert_eq!(
+                ui.get_theme_ids().row_data(index).expect("a row"),
+                chosen.to_stored().as_str(),
+                "the list keeps the chosen theme"
+            );
+            assert_eq!(ui.get_shown_theme(), "season:halloween");
+            assert!(ui.get_seasonal_themes());
+            let note = ui.get_seasonal_theme_note();
+            assert!(
+                note.contains(&lookup(label))
+                    && note.contains(&lookup("gui-seasonal-theme-halloween")),
+                "{note}"
+            );
+            assert_eq!(ui.get_theme_logo().size().width, 620);
+            accents.push(ui.global::<Theme>().get_accent());
+
+            apply_theme_settings(
+                &ui,
+                &chosen,
+                true,
+                &unseasoned(&chosen),
+                &themes,
+                &crate::theme_files::BrandingImages::default(),
+                "",
+            );
+            assert_eq!(ui.get_shown_theme(), chosen.to_stored().as_str());
+            assert_eq!(ui.get_seasonal_theme_note(), "");
+            assert_eq!(ui.get_theme_logo().size().width, 0, "the default logo");
+            assert_ne!(ui.global::<Theme>().get_accent(), accents[0]);
+        }
+        assert_eq!(accents[0], accents[1], "one Halloween palette for both");
+        let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
+        assert_eq!(
+            labels,
+            [
+                lookup("gui-color-scheme-light"),
+                lookup("gui-color-scheme-dark")
+            ],
+            "the Halloween theme is never offered"
+        );
+    }
+
+    /// The first check after midnight on the first and the day after the last
+    /// day of a season asks for the settings again, once, and no other check
+    /// does.
+    #[test]
+    fn a_new_date_asks_for_the_settings_only_when_it_changes_the_shown_theme() {
+        let mut watch = SeasonWatch::default();
+        let mut shown = "light".to_owned();
+        let mut asked = Vec::new();
+        for (date, checks) in [
+            (day(10, 24), 3),
+            (day(10, 25), 3),
+            (day(10, 31), 2),
+            (day(11, 1), 3),
+            (day(11, 2), 1),
+        ] {
+            for check in 0..checks {
+                if watch.due("light", true, &shown, date) {
+                    asked.push((date, check));
+                    // The snapshot the refresh brings.
+                    shown = ephervex_core::seasonal_theme::shown_theme(
+                        &ephervex_core::ApplicationTheme::BuiltIn(
+                            ephervex_core::ApplicationColorScheme::Light,
+                        ),
+                        true,
+                        date,
+                    )
+                    .name();
+                }
+            }
+        }
+        assert_eq!(asked, [(day(10, 25), 0), (day(11, 1), 0)]);
+    }
+
+    /// A forced season holds on every date: the theme is asked for once when
+    /// it is not yet shown, and no date change asks for another.
+    #[test]
+    fn a_forced_season_is_not_dropped_or_asked_for_again_as_the_date_changes() {
+        let mut watch = SeasonWatch {
+            forced: Some(ephervex_core::seasonal_theme::SeasonalTheme::Halloween),
+            ..SeasonWatch::default()
+        };
+        assert!(watch.due("light", true, "light", day(3, 1)));
+        for date in [day(3, 1), day(3, 2), day(10, 24), day(11, 1), day(11, 2)] {
+            for _ in 0..3 {
+                assert!(
+                    !watch.due("light", true, "season:halloween", date),
+                    "{date}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refresh_that_changes_nothing_is_not_asked_for_again_that_day() {
+        let mut watch = SeasonWatch::default();
+        assert!(watch.due("dark", true, "dark", day(10, 26)));
+        assert!(!watch.due("dark", true, "dark", day(10, 26)));
+        assert!(watch.due("dark", true, "dark", day(10, 27)));
+    }
+
+    /// Turning the switch off in season brings back the chosen theme.
+    #[test]
+    fn turning_seasonal_themes_off_in_season_asks_for_the_chosen_theme() {
+        let mut watch = SeasonWatch::default();
+        assert!(watch.due("light", false, "season:halloween", day(10, 28)));
+    }
+
+    #[test]
+    fn a_user_theme_or_seasonal_themes_turned_off_never_asks_for_a_refresh() {
+        let mut watch = SeasonWatch::default();
+        for date in [day(10, 24), day(10, 25), day(10, 31), day(11, 1)] {
+            assert!(!watch.due("user:modrinth", true, "user:modrinth", date));
+            assert!(!watch.due("dark", false, "dark", date));
+            assert!(!watch.due("light", false, "light", date));
+        }
+    }
+
+    #[test]
+    fn the_seasonal_switch_saves_on_its_own() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_general_settings(&ui, &sender);
+
+        ui.invoke_set_seasonal_themes(false);
+
+        let sent: Vec<_> = commands.try_iter().collect();
+        assert!(
+            matches!(sent.as_slice(), [Command::SaveSeasonalThemes(false)]),
+            "{sent:?}"
+        );
+    }
+
     #[test]
     fn the_theme_list_shows_user_themes_with_the_chosen_one_selected_and_painted() {
         let ui = test_window();
@@ -17074,6 +17354,8 @@ mod tests {
         apply_theme_settings(
             &ui,
             &chosen,
+            true,
+            &unseasoned(&chosen),
             &modrinth_theme(accent),
             &crate::theme_files::BrandingImages::default(),
             "/config/themes",
@@ -17082,11 +17364,15 @@ mod tests {
         let labels: Vec<SharedString> = ui.get_theme_labels().iter().collect();
         assert_eq!(
             labels,
-            [lookup("gui-color-scheme-light"), "Modrinth".to_owned()]
+            [
+                lookup("gui-color-scheme-light"),
+                lookup("gui-color-scheme-dark"),
+                "Modrinth".to_owned()
+            ]
         );
         let ids: Vec<SharedString> = ui.get_theme_ids().iter().collect();
-        assert_eq!(ids, ["workbench", "user:modrinth"]);
-        assert_eq!(ui.get_theme_index(), 1);
+        assert_eq!(ids, ["workbench", "dark", "user:modrinth"]);
+        assert_eq!(ui.get_theme_index(), 2);
         assert_eq!(ui.get_application_theme(), "user:modrinth");
         assert_eq!(ui.get_themes_folder(), "/config/themes");
         let problems: Vec<SharedString> = ui.get_theme_problems().iter().collect();
@@ -17101,7 +17387,9 @@ mod tests {
         let images = crate::theme_files::read_selected_branding(
             folder,
             &mut themes,
-            &ephervex_core::ApplicationTheme::User(id.to_owned()),
+            &ephervex_core::seasonal_theme::ShownTheme::Recorded(
+                ephervex_core::ApplicationTheme::User(id.to_owned()),
+            ),
         );
         assert!(themes.problems.is_empty(), "{:?}", themes.problems);
         images
@@ -17143,7 +17431,15 @@ mod tests {
             ("orange", [255, 128, 0, 255]),
         ] {
             let chosen = ephervex_core::ApplicationTheme::User(id.to_owned());
-            apply_theme_settings(&ui, &chosen, &themes, &branding_of(folder.path(), id), "");
+            apply_theme_settings(
+                &ui,
+                &chosen,
+                true,
+                &unseasoned(&chosen),
+                &themes,
+                &branding_of(folder.path(), id),
+                "",
+            );
             assert_eq!(pixel(ui.get_theme_logo()), (6, 3, rgba), "{id} logo");
             // The square icon's top-left corner is padding.
             assert_eq!(
@@ -17156,6 +17452,8 @@ mod tests {
         apply_theme_settings(
             &ui,
             &ephervex_core::ApplicationTheme::default(),
+            true,
+            &unseasoned(&ephervex_core::ApplicationTheme::default()),
             &themes,
             &crate::theme_files::BrandingImages::default(),
             "",

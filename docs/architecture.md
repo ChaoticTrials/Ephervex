@@ -146,13 +146,13 @@ the colors (ADR 0041). Each token reads the field of the same name on
 the shipped widgets paint in. Components read tokens and never the palette, so
 none of them knows which palette is active.
 
-The one built-in palette, Workbench, lives in the `BuiltInPalettes` global
-(ADR 0057). The theme preference is a separate value:
-`crates/gui/src/palette.rs` resolves it to one complete palette and writes it to
-`Theme`, and is the only place that chooses one. The recorded names `dark` and
-`light` stay valid, resolve to Workbench there, and are not offered in the theme
-list. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme that
-resolves to it, and its label in the theme list.
+The built-in palettes, Workbench and Workbench Dark, and the seasonal ones live
+in the `BuiltInPalettes` global (ADR 0057). The theme preference is a separate
+value: `crates/gui/src/palette.rs` resolves it to one complete palette and
+writes it to `Theme`, and is the only place that chooses one. The recorded name
+`light` stays valid and resolves to Workbench, and `dark` to Workbench Dark.
+Adding a built-in palette is a `BuiltInPalettes` entry, a scheme that resolves to
+it, and its label in the theme list.
 
 User themes are TOML files or theme folders in the `themes` folder under the
 configuration directory (ADR 0042, ADR 0047, format in `docs/themes.md`).
@@ -167,6 +167,17 @@ embedded logo whenever one is empty. `palette.rs` resolves a user theme by start
 parent and replacing the colors the file sets, so a user theme is complete by
 construction. A chosen user theme whose file is gone or unusable paints in the
 default palette, and the recorded choice stays.
+
+A seasonal theme stands in for the chosen built-in theme during its season (ADR 0049).
+`ephervex_core::seasonal_theme` holds the seasons and resolves the recorded
+theme, the `seasonal_themes` setting and the local date to a `ShownTheme`:
+the recorded theme, or a `SeasonalTheme`, which is never recorded or offered
+in the theme list. The settings snapshot carries both: the page shows and
+saves the recorded theme, and the palette and branding are the shown theme's.
+The controller checks the local date once a minute and asks for a new snapshot
+only when the date changes the theme that should be shown, at most once per
+date. The snapshot also says whether a season is on today, and the settings page
+offers the `seasonal_themes` switch only then.
 
 Text sizes, the font families, and the shared measurements stay in
 `Theme` outside the palette. Several of them are layout invariants (fixed row

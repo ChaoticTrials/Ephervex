@@ -54,13 +54,12 @@ so the reasoning trail survives.
 | [0046](0046-a-hosts-java-runtime-is-changed-through-a-previewed-fix.md) | A host's Java runtime is changed through a previewed fix | Accepted |
 | [0047](0047-a-theme-folder-carries-branding-confined-to-its-own-branding-folder.md) | A theme folder carries branding confined to its own branding folder | Accepted (amends ADR 0042) |
 | [0048](0048-instance-organization-is-presentation-state-outside-host-metadata.md) | Instance organization is presentation state outside host metadata | Accepted |
-| [0049](0049-a-seasonal-theme-stands-in-for-a-built-in-theme-during-its-season.md) | A seasonal theme stands in for a built-in theme during its season | Superseded by ADR 0056 |
+| [0049](0049-a-seasonal-theme-stands-in-for-a-built-in-theme-during-its-season.md) | A seasonal theme stands in for a built-in theme during its season | Accepted (amended by ADR 0057) |
 | [0050](0050-server-properties-saved-while-running-wait-for-its-restart.md) | Server properties saved while running wait for its restart | Accepted |
 | [0051](0051-server-property-defaults-fill-a-new-servers-file.md) | Server property defaults fill a new server's file | Accepted |
 | [0052](0052-menus-are-drawn-by-the-application.md) | Menus are drawn by the application | Accepted |
 | [0053](0053-storage-cleanup-removes-only-unreferenced-regenerable-entries-after-a-confirmed-preview.md) | Storage cleanup removes only unreferenced, regenerable entries after a confirmed preview | Accepted |
 | [0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md) | A runner process hosts a client or server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |
 | [0055](0055-resource-shader-and-data-packs-are-recognized-by-location-and-kept-out-of-the-mod-list.md) | Resource packs, shader packs, and data packs are recognized by location and kept out of the mod list | Accepted |
-| [0056](0056-seasonal-themes-are-not-part-of-the-product.md) | Seasonal themes are not part of the product | Accepted (supersedes ADR 0049) |
-| [0057](0057-workbench-is-the-single-built-in-palette-and-dark-and-light-resolve-to-it.md) | Workbench is the single built-in palette, and dark and light resolve to it | Accepted (amends ADR 0041 and ADR 0042) |
+| [0057](0057-workbench-is-the-built-in-look-in-a-light-and-a-dark-palette.md) | Workbench is the built-in look, in a light and a dark palette | Accepted (amends ADR 0041, ADR 0042 and ADR 0049) |
 | [0058](0058-a-host-keeps-a-bounded-history-under-the-state-root.md) | A host keeps a bounded history under the state root | Accepted |

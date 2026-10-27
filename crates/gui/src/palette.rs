@@ -5,6 +5,7 @@
 //! hands that to `Theme`, which is the only reader. Components read `Theme`
 //! tokens and never learn which palette is active or where it came from.
 
+use ephervex_core::seasonal_theme::{SeasonalTheme, ShownTheme};
 use ephervex_core::{ApplicationColorScheme, ApplicationTheme};
 use ephervex_i18n::lookup;
 use slint::{Color, ComponentHandle};
@@ -14,7 +15,10 @@ use crate::ui::{AppWindow, BuiltInPalettes, Theme, ThemePalette};
 
 /// The built-in schemes in the order the theme list offers them. `Dark` and
 /// `Light` are accepted names that paint as Workbench, so they are not offered.
-const BUILT_IN: [ApplicationColorScheme; 1] = [ApplicationColorScheme::Workbench];
+const BUILT_IN: [ApplicationColorScheme; 2] = [
+    ApplicationColorScheme::Workbench,
+    ApplicationColorScheme::Dark,
+];
 
 /// Every color token a theme file may set, by its `Theme` name.
 pub(crate) const PALETTE_COLORS: &[&str] = &[
@@ -78,6 +82,7 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "state-server",
     "note-fill",
     "danger-soft",
+    "ok-soft",
     "grid-line",
     "terminal",
     "on-terminal",
@@ -160,6 +165,7 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
         "state-server" => &mut palette.state_server,
         "note-fill" => &mut palette.note_fill,
         "danger-soft" => &mut palette.danger_soft,
+        "ok-soft" => &mut palette.ok_soft,
         "grid-line" => &mut palette.grid_line,
         "terminal" => &mut palette.terminal,
         "on-terminal" => &mut palette.on_terminal,
@@ -176,17 +182,41 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
 fn built_in_palette(ui: &AppWindow, scheme: ApplicationColorScheme) -> ThemePalette {
     let palettes = ui.global::<BuiltInPalettes>();
     match scheme {
-        ApplicationColorScheme::Workbench
-        | ApplicationColorScheme::Dark
-        | ApplicationColorScheme::Light => palettes.get_workbench(),
+        ApplicationColorScheme::Workbench | ApplicationColorScheme::Light => {
+            palettes.get_workbench()
+        }
+        ApplicationColorScheme::Dark => palettes.get_workbench_dark(),
+    }
+}
+
+/// The built-in palette a seasonal theme paints in. Seasonal palettes are
+/// never offered in the theme list.
+fn seasonal_palette(ui: &AppWindow, theme: SeasonalTheme) -> ThemePalette {
+    let palettes = ui.global::<BuiltInPalettes>();
+    match theme {
+        SeasonalTheme::Halloween => palettes.get_halloween(),
+        SeasonalTheme::Christmas => palettes.get_christmas(),
+        SeasonalTheme::Pride => palettes.get_pride(),
+        SeasonalTheme::AprilFools => palettes.get_april_fools(),
     }
 }
 
 fn built_in_label(scheme: ApplicationColorScheme) -> String {
     lookup(match scheme {
-        ApplicationColorScheme::Workbench
-        | ApplicationColorScheme::Dark
-        | ApplicationColorScheme::Light => "gui-color-scheme-light",
+        ApplicationColorScheme::Workbench | ApplicationColorScheme::Light => {
+            "gui-color-scheme-light"
+        }
+        ApplicationColorScheme::Dark => "gui-color-scheme-dark",
+    })
+}
+
+/// What the settings page calls a seasonal theme while it is shown.
+pub(crate) fn seasonal_label(theme: SeasonalTheme) -> String {
+    lookup(match theme {
+        SeasonalTheme::Halloween => "gui-seasonal-theme-halloween",
+        SeasonalTheme::Christmas => "gui-seasonal-theme-christmas",
+        SeasonalTheme::Pride => "gui-seasonal-theme-pride",
+        SeasonalTheme::AprilFools => "gui-seasonal-theme-april-fools",
     })
 }
 
@@ -215,22 +245,25 @@ fn user_palette(ui: &AppWindow, theme: &UserTheme) -> ThemePalette {
     palette
 }
 
-/// The complete palette a theme paints in. A user theme whose file is gone
-/// paints in the default scheme, and the preference is left as it is.
-fn resolve(ui: &AppWindow, theme: &ApplicationTheme, user_themes: &[UserTheme]) -> ThemePalette {
-    match theme {
-        ApplicationTheme::BuiltIn(scheme) => built_in_palette(ui, *scheme),
-        ApplicationTheme::User(id) => user_themes.iter().find(|user| user.id == *id).map_or_else(
-            || built_in_palette(ui, ApplicationColorScheme::default()),
-            |user| user_palette(ui, user),
-        ),
+/// The complete palette a shown theme paints in. A user theme whose file is
+/// gone paints in the default scheme, and the preference is left as it is.
+fn resolve(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) -> ThemePalette {
+    match shown {
+        ShownTheme::Seasonal(theme) => seasonal_palette(ui, *theme),
+        ShownTheme::Recorded(ApplicationTheme::BuiltIn(scheme)) => built_in_palette(ui, *scheme),
+        ShownTheme::Recorded(ApplicationTheme::User(id)) => {
+            user_themes.iter().find(|user| user.id == *id).map_or_else(
+                || built_in_palette(ui, ApplicationColorScheme::default()),
+                |user| user_palette(ui, user),
+            )
+        }
     }
 }
 
-/// Repaints the interface in the palette the theme resolves to.
-pub(crate) fn apply_theme(ui: &AppWindow, theme: &ApplicationTheme, user_themes: &[UserTheme]) {
+/// Repaints the interface in the palette the shown theme resolves to.
+pub(crate) fn apply_theme(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) {
     ui.global::<Theme>()
-        .set_palette(resolve(ui, theme, user_themes));
+        .set_palette(resolve(ui, shown, user_themes));
 }
 
 /// One entry of the theme list.
@@ -428,7 +461,7 @@ mod tests {
     use super::*;
     use crate::test_support::{ui_declaration, ui_markup};
 
-    const SCHEMES: [ApplicationColorScheme; 1] = BUILT_IN;
+    const SCHEMES: [ApplicationColorScheme; 2] = BUILT_IN;
 
     /// Every name a theme can record or name as its parent.
     const NAMES: [ApplicationColorScheme; 3] = [
@@ -436,6 +469,10 @@ mod tests {
         ApplicationColorScheme::Dark,
         ApplicationColorScheme::Light,
     ];
+
+    fn recorded(theme: ApplicationTheme) -> ShownTheme {
+        ShownTheme::Recorded(theme)
+    }
 
     fn window() -> AppWindow {
         i_slint_backend_testing::init_no_event_loop();
@@ -482,23 +519,63 @@ mod tests {
         let ui = window();
         let theme = ui.global::<Theme>();
         for scheme in SCHEMES.into_iter().chain(SCHEMES.into_iter().rev()) {
-            apply_theme(&ui, &ApplicationTheme::BuiltIn(scheme), &[]);
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
             let palette = built_in_palette(&ui, scheme);
             assert_eq!(resolved(&theme), named(&palette), "{scheme:?}");
             assert_eq!(theme.get_widget_scheme(), palette.widget_scheme);
         }
     }
 
-    /// Dark and light are recorded names that stay valid, and each paints as
-    /// the one built-in palette.
+    /// Light is a recorded name that stays valid and paints as Workbench; dark
+    /// paints in Workbench Dark.
     #[test]
-    fn the_dark_and_light_names_paint_as_workbench() {
+    fn the_light_name_paints_as_workbench_and_dark_in_its_own_palette() {
         let ui = window();
-        let workbench = ui.global::<BuiltInPalettes>().get_workbench();
+        let palettes = ui.global::<BuiltInPalettes>();
+        let (workbench, dark) = (palettes.get_workbench(), palettes.get_workbench_dark());
+        assert_ne!(workbench, dark);
         for scheme in NAMES {
-            apply_theme(&ui, &ApplicationTheme::BuiltIn(scheme), &[]);
-            assert_eq!(ui.global::<Theme>().get_palette(), workbench, "{scheme:?}");
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
+            let expected = if scheme == ApplicationColorScheme::Dark {
+                &dark
+            } else {
+                &workbench
+            };
+            assert_eq!(&ui.global::<Theme>().get_palette(), expected, "{scheme:?}");
         }
+    }
+
+    /// One Halloween palette stands in for Dark and Light alike.
+    #[test]
+    fn the_halloween_season_paints_in_its_own_palette_over_either_scheme() {
+        let ui = window();
+        let halloween = seasonal_palette(&ui, SeasonalTheme::Halloween);
+        for scheme in SCHEMES {
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
+            apply_theme(&ui, &ShownTheme::Seasonal(SeasonalTheme::Halloween), &[]);
+            assert_eq!(ui.global::<Theme>().get_palette(), halloween, "{scheme:?}");
+            assert_ne!(halloween, built_in_palette(&ui, scheme));
+        }
+    }
+
+    /// The catalog and loader marks are how a service is recognized, so the
+    /// Halloween palette keeps Dark's.
+    #[test]
+    fn halloween_keeps_the_service_marks_of_dark() {
+        let ui = window();
+        let dark = built_in_palette(&ui, ApplicationColorScheme::Dark);
+        let pumpkin = seasonal_palette(&ui, SeasonalTheme::Halloween);
+        let marks = |palette: &ThemePalette| {
+            [
+                palette.modrinth,
+                palette.curseforge,
+                palette.vanilla,
+                palette.forge,
+                palette.neoforge,
+            ]
+        };
+        assert_eq!(marks(&pumpkin), marks(&dark));
+        assert_eq!(pumpkin.widget_scheme, dark.widget_scheme);
     }
 
     fn user(
@@ -525,7 +602,11 @@ mod tests {
             &[("border", marker)],
         )];
 
-        apply_theme(&ui, &ApplicationTheme::User("mine".to_owned()), &themes);
+        apply_theme(
+            &ui,
+            &recorded(ApplicationTheme::User("mine".to_owned())),
+            &themes,
+        );
 
         let mut expected = built_in_palette(&ui, ApplicationColorScheme::Light);
         expected.border = marker;
@@ -566,7 +647,11 @@ mod tests {
             ),
         ];
         let palette_of = |id: &str| {
-            apply_theme(&ui, &ApplicationTheme::User(id.to_owned()), &themes);
+            apply_theme(
+                &ui,
+                &recorded(ApplicationTheme::User(id.to_owned())),
+                &themes,
+            );
             ui.global::<Theme>().get_palette()
         };
 
@@ -594,16 +679,15 @@ mod tests {
     fn a_user_theme_inherits_the_tokens_it_leaves_unset_from_workbench() {
         let ui = window();
         let marker = Color::from_argb_u8(255, 1, 2, 3);
-        let workbench = ui.global::<BuiltInPalettes>().get_workbench();
         let themes = NAMES.map(|parent| user(parent.as_str(), parent, &[("border", marker)]));
         for parent in NAMES {
             apply_theme(
                 &ui,
-                &ApplicationTheme::User(parent.as_str().to_owned()),
+                &recorded(ApplicationTheme::User(parent.as_str().to_owned())),
                 &themes,
             );
             let palette = ui.global::<Theme>().get_palette();
-            let mut expected = workbench.clone();
+            let mut expected = built_in_palette(&ui, parent);
             expected.border = marker;
             assert_eq!(palette, expected, "parent {parent:?}");
             assert_ne!(palette.shadow_hard.alpha(), 0);
@@ -620,10 +704,14 @@ mod tests {
         let ui = window();
         apply_theme(
             &ui,
-            &ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
+            &recorded(ApplicationTheme::BuiltIn(ApplicationColorScheme::Light)),
             &[],
         );
-        apply_theme(&ui, &ApplicationTheme::User("gone".to_owned()), &[]);
+        apply_theme(
+            &ui,
+            &recorded(ApplicationTheme::User("gone".to_owned())),
+            &[],
+        );
         assert_eq!(
             ui.global::<Theme>().get_palette(),
             built_in_palette(&ui, ApplicationColorScheme::default())
@@ -631,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_list_offers_workbench_then_the_users_themes() {
+    fn the_theme_list_offers_workbench_and_dark_then_the_users_themes() {
         let themes = [user("mine", ApplicationColorScheme::Dark, &[])];
         let choices = theme_choices(&themes);
         let offered: Vec<ApplicationTheme> =
@@ -640,14 +728,16 @@ mod tests {
             offered,
             [
                 ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
                 ApplicationTheme::User("mine".to_owned()),
             ]
         );
         assert_eq!(choices[0].label, lookup("gui-color-scheme-light"));
-        assert_eq!(choices[1].label, "MINE");
+        assert_eq!(choices[1].label, lookup("gui-color-scheme-dark"));
+        assert_eq!(choices[2].label, "MINE");
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("mine".to_owned())),
-            1
+            2
         );
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("gone".to_owned())),
@@ -655,17 +745,21 @@ mod tests {
         );
     }
 
-    /// A recorded dark or light shows Workbench as the chosen entry, since that
-    /// is what it paints, and the list has no entry of its own for it.
+    /// A recorded light shows Workbench as the chosen entry, since that is
+    /// what it paints and the list has no entry of its own for it. A recorded
+    /// dark has its own.
     #[test]
-    fn a_recorded_dark_or_light_shows_workbench_selected() {
+    fn a_recorded_light_shows_workbench_selected_and_dark_its_own_entry() {
         let choices = theme_choices(&[]);
-        for scheme in [ApplicationColorScheme::Dark, ApplicationColorScheme::Light] {
+        for (scheme, shown) in [
+            (
+                ApplicationColorScheme::Light,
+                ApplicationColorScheme::Workbench,
+            ),
+            (ApplicationColorScheme::Dark, ApplicationColorScheme::Dark),
+        ] {
             let chosen = choice_index(&choices, &ApplicationTheme::BuiltIn(scheme));
-            assert_eq!(
-                choices[chosen].theme,
-                ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench)
-            );
+            assert_eq!(choices[chosen].theme, ApplicationTheme::BuiltIn(shown));
         }
     }
 
@@ -743,7 +837,10 @@ mod tests {
             assert_eq!(set, fields, "palette `{name}` does not set every token");
             seen += 1;
         }
-        assert_eq!(seen, SCHEMES.len());
+        assert_eq!(
+            seen,
+            SCHEMES.len() + ephervex_core::seasonal_theme::THEME_SEASONS.len()
+        );
     }
 
     /// `Theme` is the contract: each color token reads the palette field of the
@@ -806,12 +903,22 @@ mod tests {
 
     use super::drawn_pairs::{contrast, shortfalls};
 
-    /// Every palette Ephervex ships.
+    /// Every palette Ephervex ships, selectable or seasonal.
     fn built_ins() -> Vec<(String, ThemePalette)> {
         let ui = window();
         SCHEMES
             .into_iter()
             .map(|scheme| (format!("{scheme:?}"), built_in_palette(&ui, scheme)))
+            .chain(
+                ephervex_core::seasonal_theme::THEME_SEASONS
+                    .iter()
+                    .map(|season| {
+                        (
+                            season.theme.as_str().to_owned(),
+                            seasonal_palette(&ui, season.theme),
+                        )
+                    }),
+            )
             .collect()
     }
 
@@ -855,6 +962,40 @@ mod tests {
         }
     }
 
+    /// Every level of text is drawn on every page floor and card.
+    #[test]
+    fn seasonal_text_is_readable_on_every_surface() {
+        let ui = window();
+        for season in ephervex_core::seasonal_theme::THEME_SEASONS {
+            let palette = seasonal_palette(&ui, season.theme);
+            for (floor, name) in [
+                (palette.background, "background"),
+                (palette.surface, "surface"),
+                (palette.field, "field"),
+                (palette.elevated, "elevated"),
+                (palette.bar, "bar"),
+                (palette.selection, "selection"),
+                (palette.selection_card, "selection-card"),
+            ] {
+                for (text, level, minimum) in [
+                    (palette.text, "text", 7.0),
+                    (palette.text_secondary, "secondary", 4.5),
+                    (palette.text_muted, "muted", 3.0),
+                    (palette.accent, "accent", 4.5),
+                    (palette.warning, "warning", 4.5),
+                    (palette.danger, "danger", 4.5),
+                ] {
+                    let ratio = contrast(text, floor);
+                    assert!(
+                        ratio >= minimum,
+                        "{} {level} on {name} is {ratio:.2}:1, under {minimum}:1",
+                        season.theme.as_str()
+                    );
+                }
+            }
+        }
+    }
+
     /// Text typed into a field, and the text a dropdown shows, sits on `field`.
     #[test]
     fn text_is_readable_on_a_field() {
@@ -883,7 +1024,7 @@ mod tests {
     }
 
     /// Every opaque fill text is read on.
-    fn text_surfaces(palette: &ThemePalette) -> [(&'static str, Color); 12] {
+    fn text_surfaces(palette: &ThemePalette) -> [(&'static str, Color); 13] {
         [
             ("background", palette.background),
             ("surface", palette.surface),
@@ -897,6 +1038,7 @@ mod tests {
             ("selection-strong", palette.selection_strong),
             ("note-fill", palette.note_fill),
             ("danger-soft", palette.danger_soft),
+            ("ok-soft", palette.ok_soft),
         ]
     }
 

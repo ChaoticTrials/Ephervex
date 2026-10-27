@@ -77,6 +77,7 @@ pub mod pack_url;
 pub mod promotion;
 pub mod runner;
 pub mod running;
+pub mod seasonal_theme;
 pub mod server;
 mod server_capture;
 #[cfg(test)]
