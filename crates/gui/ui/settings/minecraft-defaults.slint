@@ -235,6 +235,8 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                 : root.inset + root.head-height + root.line-gap;
             width: root.split ? Theme.preference-control-column-width : root.inner-width;
             height: self.preferred-height;
+            // Editors sit against the Reset slot, so they line up down the page.
+            if root.split : Rectangle { horizontal-stretch: 1; min-width: 0px; }
             if root.item.editor == "toggle" : Toggle {
                 accessible-name: root.item.label;
                 checked: root.item.bool-value;
@@ -365,13 +367,23 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                 accepted => { root.commit-text(root.item.id, text-field.text); }
                 focus-lost => { root.commit-text(root.item.id, text-field.text); }
             }
-            Rectangle { horizontal-stretch: 1; min-width: 8px; }
+            if !root.split : Rectangle { horizontal-stretch: 1; min-width: 8px; }
             // Never elided: which of absent, chosen, and applied a row is in
             // is the sentence this screen exists to make legible, and the
             // spacer beside it can shrink. In a split row it is the text
             // column's first line instead.
             if !root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: root.item.overridden ? Theme.accent-secondary : Theme.text-muted; horizontal-stretch: 0; }
-            if root.item.can-reset : AppButton {
+            if root.split : Rectangle {
+                width: 100px;
+                if root.item.can-reset : AppButton {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    text: GuiI18n.text("gui-minecraft-forget");
+                    clicked => { root.forget(root.item.id); }
+                }
+            }
+            if !root.split && root.item.can-reset : AppButton {
                 text: GuiI18n.text("gui-minecraft-forget");
                 min-width: 116px;
                 clicked => { root.forget(root.item.id); }
