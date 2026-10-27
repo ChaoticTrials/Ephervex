@@ -146,6 +146,25 @@ fn a_very_wide_page_runs_its_rows_in_two_columns_side_by_side() {
 }
 
 #[test]
+fn a_split_row_with_nothing_to_reset_keeps_a_disabled_reset() {
+    let ui = window(1800, 1800);
+    let mut row = rows().remove(0);
+    row.can_reset = false;
+    row.overridden = false;
+    ui.set_minecraft_preference_rows(ModelRc::new(VecModel::from(vec![row])));
+    settle(&ui);
+
+    let resets: Vec<Option<bool>> =
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-minecraft-forget"))
+            .map(|element| element.accessible_enabled())
+            .collect();
+    assert!(
+        resets.contains(&Some(false)) && !resets.contains(&Some(true)),
+        "a row that is not overridden shows Reset disabled: {resets:?}"
+    );
+}
+
+#[test]
 fn a_narrow_page_stacks_each_row_as_before() {
     let ui = window(1000, 1800);
     for scale in TEXT_SCALES {

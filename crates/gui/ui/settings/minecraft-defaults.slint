@@ -375,11 +375,13 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
             if !root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: root.item.overridden ? Theme.accent-secondary : Theme.text-muted; horizontal-stretch: 0; }
             if root.split : Rectangle {
                 width: 100px;
-                if root.item.can-reset : AppButton {
+                AppButton {
                     x: 0px;
                     y: (parent.height - self.height) / 2;
                     width: parent.width;
                     text: GuiI18n.text("gui-minecraft-forget");
+                    enabled: root.item.can-reset;
+                    hint: GuiI18n.text("gui-minecraft-forget-nothing");
                     clicked => { root.forget(root.item.id); }
                 }
             }

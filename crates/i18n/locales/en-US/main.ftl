@@ -3042,6 +3042,7 @@ gui-display-settings-invalid = Select one of the available display sizes.
 gui-minecraft-defaults-title = Minecraft defaults
 gui-minecraft-defaults-detail = Applied to new client instances and imports. Existing instances are unchanged. Only overridden settings are written to options.txt.
 gui-minecraft-forget = Reset
+gui-minecraft-forget-nothing = This setting is not overridden, so there is nothing to reset.
 gui-minecraft-advanced = Advanced
 gui-minecraft-unsaved = Unsaved
 gui-minecraft-unsaved-count = { $count ->
