@@ -174,7 +174,7 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     property <length> line-gap: 6px;
     property <length> inner-width: root.width - 2 * root.inset;
     property <length> text-width: root.split ? root.inner-width - Theme.preference-control-column-width - root.gap : root.inner-width;
-    property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
+    property <length> heading-height: root.item.section-heading == "" ? 0px : Theme.preference-heading-height;
     property <length> head-height: root.split ? names.preferred-height + (badges.preferred-height > 0px ? root.line-gap + badges.preferred-height : 0px) : max(names.preferred-height, badges.preferred-height);
     property <length> detail-gap: details.preferred-height > 0px ? root.line-gap : 0px;
     property <length> text-height: root.split

@@ -1806,33 +1806,76 @@ export component AppWindow inherits Window {
                                     }
                             // The outline stays put and the rows scroll inside it, so
                             // the list is closed at both ends however far it is scrolled.
-                            if !root.minecraft-raw-open : Panel { vertical-stretch: 1; ScrollView { viewport-width: self.visible-width; VerticalLayout { alignment: start; spacing: 0px;
+                            if !root.minecraft-raw-open : Panel { vertical-stretch: 1; rows-view := ScrollView { viewport-width: self.visible-width; VerticalLayout { alignment: start; spacing: 0px;
                                     if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
-                                    for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard {
-                                        item: row;
-                                        compact: root.minecraft-narrow;
-                                        capturing: root.minecraft-capturing-id == row.id;
-                                        languages-available: root.minecraft-languages-available;
-                                        set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
-                                        set-number(id, value) => { root.minecraft-set-number(id, value); }
-                                        edit-number(id, value) => { root.minecraft-edit-number(id, value); }
-                                        commit-number(id, value) => { root.minecraft-commit-number(id, value); }
-                                        set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
-                                        set-language(id, index) => { root.minecraft-set-language(id, index); }
-                                        aspect-labels: root.minecraft-aspect-labels;
-                                        edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
-                                        commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
-                                        commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
-                                        set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
-                                        set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
-                                        open-window-preview(id) => { root.minecraft-open-window-preview(id); }
-                                        commit-text(id, value) => { root.minecraft-commit-text(id, value); }
-                                        forget(id) => { root.minecraft-forget-preference(id); }
-                                        begin-capture(id) => { root.minecraft-begin-capture(id); }
-                                        cancel-capture => { root.minecraft-cancel-capture(); }
-                                        captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
-                                        captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
-                                        retry-languages => { root.minecraft-retry-languages(); }
+                                    // Two columns of rows once each can split on its own: the first half of the
+                                    // rows on the left, the rest on the right. The scroll bar's room is kept
+                                    // back so a column never lands just under its own split width.
+                                    columns := Rectangle {
+                                        property <bool> two: rows-view.width >= 2 * Theme.preference-row-split-width + 2px + 24px;
+                                        property <int> per-column: Math.ceil(root.minecraft-preference-rows.length / 2);
+                                        height: max(columns-layout.preferred-height, rows-view.height);
+                                    columns-layout := HorizontalLayout { x: 0px; y: 0px; width: parent.width; height: parent.height; spacing: 0px;
+                                        VerticalLayout { alignment: start; spacing: 0px;
+                                            for row[index] in root.minecraft-preference-rows : VerticalLayout { if !columns.two || index < columns.per-column : MinecraftPreferenceRowCard {
+                                                item: row;
+                                                compact: root.minecraft-narrow;
+                                                capturing: root.minecraft-capturing-id == row.id;
+                                                languages-available: root.minecraft-languages-available;
+                                                set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
+                                                set-number(id, value) => { root.minecraft-set-number(id, value); }
+                                                edit-number(id, value) => { root.minecraft-edit-number(id, value); }
+                                                commit-number(id, value) => { root.minecraft-commit-number(id, value); }
+                                                set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
+                                                set-language(id, index) => { root.minecraft-set-language(id, index); }
+                                                aspect-labels: root.minecraft-aspect-labels;
+                                                edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
+                                                commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
+                                                commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
+                                                set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
+                                                set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
+                                                open-window-preview(id) => { root.minecraft-open-window-preview(id); }
+                                                commit-text(id, value) => { root.minecraft-commit-text(id, value); }
+                                                forget(id) => { root.minecraft-forget-preference(id); }
+                                                begin-capture(id) => { root.minecraft-begin-capture(id); }
+                                                cancel-capture => { root.minecraft-cancel-capture(); }
+                                                captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
+                                                captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
+                                                retry-languages => { root.minecraft-retry-languages(); }
+                                            } }
+                                        }
+                                        if columns.two : Rectangle { width: 2px; background: Theme.border-strong.with-alpha(0.35); }
+                                        if columns.two : VerticalLayout { alignment: start; spacing: 0px;
+                                            // Keeps the columns' first rows level when only the first column opens with a section heading.
+                                            if root.minecraft-preference-rows[0].section-heading != "" && root.minecraft-preference-rows[columns.per-column].section-heading == "" : VerticalLayout { spacing: 0px; Rectangle { height: Theme.preference-heading-height; background: Theme.background; } Rectangle { height: 1px; background: Theme.border; } }
+                                            for row[index] in root.minecraft-preference-rows : VerticalLayout { if index >= columns.per-column : MinecraftPreferenceRowCard {
+                                                item: row;
+                                                compact: root.minecraft-narrow;
+                                                capturing: root.minecraft-capturing-id == row.id;
+                                                languages-available: root.minecraft-languages-available;
+                                                set-boolean(id, on) => { root.minecraft-set-boolean(id, on); }
+                                                set-number(id, value) => { root.minecraft-set-number(id, value); }
+                                                edit-number(id, value) => { root.minecraft-edit-number(id, value); }
+                                                commit-number(id, value) => { root.minecraft-commit-number(id, value); }
+                                                set-enumeration(id, index) => { root.minecraft-set-enumeration(id, index); }
+                                                set-language(id, index) => { root.minecraft-set-language(id, index); }
+                                                aspect-labels: root.minecraft-aspect-labels;
+                                                edit-window(id, width, height) => { root.minecraft-edit-window(id, width, height); }
+                                                commit-window-width(id, width, height) => { root.minecraft-commit-window-width(id, width, height); }
+                                                commit-window-height(id, width, height) => { root.minecraft-commit-window-height(id, width, height); }
+                                                set-window-aspect(id, index) => { root.minecraft-set-window-aspect(id, index); }
+                                                set-window-lock(id, held) => { root.minecraft-set-window-lock(id, held); }
+                                                open-window-preview(id) => { root.minecraft-open-window-preview(id); }
+                                                commit-text(id, value) => { root.minecraft-commit-text(id, value); }
+                                                forget(id) => { root.minecraft-forget-preference(id); }
+                                                begin-capture(id) => { root.minecraft-begin-capture(id); }
+                                                cancel-capture => { root.minecraft-cancel-capture(); }
+                                                captured-key(id, reported) => { root.minecraft-captured-key(id, reported); }
+                                                captured-mouse(id, reported) => { root.minecraft-captured-mouse(id, reported); }
+                                                retry-languages => { root.minecraft-retry-languages(); }
+                                            } }
+                                        }
+                                    }
                                     }
                                     } } }
                                     DraftBar {

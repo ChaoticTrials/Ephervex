@@ -235,6 +235,10 @@ export global Theme {
     // The column a Minecraft default row keeps its editor and Reset action in
     // once the page is wide enough to split the row. Wide enough for the
     // window size editor's second line beside Reset.
+    // The band a Minecraft default row opens with when it starts a section.
+    // The second column of a wide page keeps a band of the same height so the
+    // columns' first rows stay level.
+    out property <length> preference-heading-height: 42px * text-scale;
     out property <length> preference-control-column-width: max(520px, 540px * text-scale);
     // The narrowest row that is split: the control column, the row's inset and
     // gap, and a text column wide enough for the row's tags. Narrower rows

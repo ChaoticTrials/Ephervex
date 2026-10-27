@@ -2,8 +2,9 @@
 //!
 //! Past a width the page can hold both columns, a row's text sits on the left
 //! and its editor with the Reset action in a fixed column on the right. Below
-//! it the rows stack. The window size is the widest editor, so it is the one
-//! that must still fit its column at every offered text size.
+//! it the rows stack. On a page wide enough for two such rows, the rows run in
+//! two columns side by side. The window size is the widest editor, so it is
+//! the one that must still fit its column at every offered text size.
 
 #![allow(clippy::expect_used)]
 
@@ -38,7 +39,7 @@ impl Rect {
 
 #[test]
 fn wide_rows_keep_their_editors_in_one_column_beside_their_text() {
-    let ui = window(2400, 1800);
+    let ui = window(1800, 1800);
     for scale in TEXT_SCALES {
         ui.global::<Theme>().set_text_scale(scale);
         settle(&ui);
@@ -92,6 +93,59 @@ fn wide_rows_keep_their_editors_in_one_column_beside_their_text() {
 }
 
 #[test]
+fn a_very_wide_page_runs_its_rows_in_two_columns_side_by_side() {
+    let ui = window(3400, 1800);
+    for scale in TEXT_SCALES {
+        ui.global::<Theme>().set_text_scale(scale);
+        settle(&ui);
+
+        let resets = rects(&ui, &lookup("gui-minecraft-forget"));
+        assert_eq!(resets.len(), 3, "scale {scale}: every row can be reset");
+        let (window_size, field_of_view, clouds) = (
+            one(&ui, "Window size"),
+            one(&ui, "Field of view"),
+            one(&ui, "Cloud status"),
+        );
+
+        assert!(
+            (resets[0].right() - resets[1].right()).abs() < 1.0,
+            "scale {scale}: the first column's Reset buttons end at {} and {}",
+            resets[0].right(),
+            resets[1].right()
+        );
+        assert!(
+            clouds.x >= resets[0].right(),
+            "scale {scale}: the second column starts at {} inside the first, which ends at {}",
+            clouds.x,
+            resets[0].right()
+        );
+        assert!(
+            (clouds.y - window_size.y).abs() < 1.0,
+            "scale {scale}: the columns start at {} and {}",
+            window_size.y,
+            clouds.y
+        );
+        assert!(
+            field_of_view.y > window_size.y,
+            "scale {scale}: the first column keeps its order"
+        );
+        // Each column is a split row of its own: the editor beside the text.
+        assert!(
+            resets[2].x >= clouds.right(),
+            "scale {scale}: Reset at {} is not beside Cloud status ending at {}",
+            resets[2].x,
+            clouds.right()
+        );
+        let width = one(&ui, &lookup("gui-minecraft-width"));
+        let open = one(&ui, &lookup("gui-minecraft-window-open"));
+        assert!(
+            width.x > window_size.x + 100.0 && open.right() <= resets[0].x,
+            "scale {scale}: the window size editor is not in its own column"
+        );
+    }
+}
+
+#[test]
 fn a_narrow_page_stacks_each_row_as_before() {
     let ui = window(1000, 1800);
     for scale in TEXT_SCALES {
@@ -124,7 +178,7 @@ fn rows_split_exactly_from_the_named_row_width() {
         ui.global::<Theme>().set_text_scale(scale);
         let threshold = ui.global::<Theme>().get_preference_row_split_width();
         let mut seen = (false, false);
-        for width in (1000..=2400).step_by(50) {
+        for width in (1000..=2200).step_by(50) {
             ui.window().set_size(PhysicalSize::new(width, 1800));
             settle(&ui);
 
@@ -158,7 +212,7 @@ fn rows_split_exactly_from_the_named_row_width() {
     clippy::cast_sign_loss
 )]
 fn badges_stay_in_the_text_column_at_the_narrowest_split() {
-    let ui = window(2400, 1800);
+    let ui = window(1800, 1800);
     for scale in TEXT_SCALES {
         ui.global::<Theme>().set_text_scale(scale);
         settle(&ui);
@@ -193,7 +247,7 @@ fn badges_stay_in_the_text_column_at_the_narrowest_split() {
             width.x >= column_left - 1.0,
             "scale {scale}: the page stacked"
         );
-        ui.window().set_size(PhysicalSize::new(2400, 1800));
+        ui.window().set_size(PhysicalSize::new(1800, 1800));
     }
 }
 

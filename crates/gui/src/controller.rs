@@ -21485,10 +21485,8 @@ mod tests {
         // One reusable row component drives every preference: nearly two
         // hundred hand-written rows would be a second copy of the catalog.
         assert!(source.contains("component MinecraftPreferenceRowCard inherits Rectangle"));
-        assert!(
-            source
-                .contains("for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard")
-        );
+        assert!(source.contains("for row[index] in root.minecraft-preference-rows"));
+        assert!(source.contains(": MinecraftPreferenceRowCard {"));
         assert!(source.contains("ScrollView { viewport-width: self.width;"));
     }
 
