@@ -1,6 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" color="#A6B0B6">
-  <rect x="4" y="4" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-  <rect x="14" y="4" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-  <rect x="4" y="14" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
-  <rect x="14" y="14" width="6" height="6" rx="1" stroke="currentColor" stroke-width="1.5"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" color="#A6B0B6" stroke-linecap="round" stroke-linejoin="round" stroke="currentColor" stroke-width="2.4">
+  <path d="M3.2 7.25C5.8 6.05 8.45 4.5 11.45 3.25Q11.95 2.96 12.5 3.28C15.35 4.65 18.15 6.1 20.65 7.45C18.3 8.8 15.35 10.35 12.1 11.8C9.1 10.25 6.1 8.8 3.2 7.25Z" fill="none" stroke="currentColor" stroke-width="2.35" />
+  <path d="M3.35 12.05C6.15 13.35 8.8 14.95 11.85 16.35C15.1 14.85 17.75 13.4 20.75 11.95" fill="none" stroke="currentColor" stroke-width="2.55" />
+  <path d="M3.12 16.6C5.9 17.9 8.95 19.5 12 20.75C15 19.4 18 17.8 20.6 16.35" fill="none" stroke="currentColor" stroke-width="2.5" />
 </svg>
