@@ -22,8 +22,9 @@ storage by default; choose persistent storage if you need to keep one.
 
 For a standalone server, select **New Server** in the host list. Choose a
 name, Minecraft release, loader, and exact loader build if applicable. For a
-linked server, open the client instance's **Overview** and select **Create
-Linked Server**. It inherits the client's Minecraft and loader versions.
+linked server, select **Create Linked Server** in the **Linked servers** card
+beside the client instance's page. It inherits the client's Minecraft and
+loader versions.
 
 Choose **Store persistently** if needed. **Automatic port** starts at 25565
 and picks the next locally available port when necessary; turn it off to enter
@@ -42,7 +43,8 @@ for the installation to finish.
 
 <ThemeScreenshot state="create-server-linked" alt="New Server dialog for a linked server, which has no version or loader choice because it inherits the client's" />
 
-You can also select **Also create a linked server** while [importing a
+You can also select **Also create a linked server** while [creating an
+instance](./instances.mdx#create-an-instance) or [importing a
 modpack](./import-modpacks.mdx). New servers start with the
 [server property defaults](./settings.mdx#server-property-defaults).
 
@@ -276,8 +278,8 @@ SERVER_ID` only when forced termination is needed.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-On a client's **Overview**, find its linked server and select **Launch Client
-& Connect**. Ephervex starts the server if needed, waits for it to accept
+On a client's page, find its linked server in the **Linked servers** card and
+select **Launch Client & Connect**. Ephervex starts the server if needed, waits for it to accept
 connections, then launches the client and connects it. The server remains
 running after the client exits; stop it separately when the test is done.
 
