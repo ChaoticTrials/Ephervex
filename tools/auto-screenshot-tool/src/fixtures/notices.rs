@@ -35,7 +35,7 @@ pub(crate) fn toasts_success_and_error(ui: &AppWindow) {
         toast(2, failure, true, 3),
     ]));
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
 }
 
 pub(crate) fn accounts_device_code(ui: &AppWindow) {
@@ -60,6 +60,6 @@ pub(crate) fn accounts_device_code(ui: &AppWindow) {
         ),
     ]));
     ui.set_workspace_open(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_settings_tab("Accounts".into());
 }

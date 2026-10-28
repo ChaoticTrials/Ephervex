@@ -1,8 +1,8 @@
 //! The CaveStone client workspace on its overview, settings, snapshot, and log surfaces.
 
 use ephervex_gui::ui::{
-    AppWindow, DiagnosticRow, HostView, InstanceRow, LogChunk, LogView, PendingEntityRow,
-    ServerRow, SnapshotRow, WorkspacePaneRow, WorkspaceSurfaceRow,
+    AppWindow, CaseEventRow, CaseStepRow, DiagnosticRow, HostView, InstanceRow, LogChunk, LogView,
+    PendingEntityRow, ServerRow, SnapshotRow, WorkspacePaneRow, WorkspaceSurfaceRow,
 };
 use ephervex_gui::workspace_layout::Surface;
 use ephervex_i18n::{Arg, lookup, lookup_args};
@@ -16,8 +16,10 @@ use super::{
 
 /// The states this module adds to the catalog.
 #[cfg(test)]
-const STATE_NAMES: [&str; 11] = [
+const STATE_NAMES: [&str; 13] = [
     "client-overview-linked-server",
+    "client-case",
+    "quick-view",
     "client-settings",
     "client-java-runtime",
     "client-java-problem",
@@ -47,6 +49,19 @@ fn open_instance_surface(
     surface: Surface,
     configure: impl FnOnce(&mut HostView),
     log: Option<LogView>,
+) {
+    open_instance_pane(ui, key, surface, configure, log, false);
+}
+
+/// Opens the instance with `key` on `surface`, as the one pane of a workspace
+/// or, with `overlay`, as a quick view over whatever page is showing.
+fn open_instance_pane(
+    ui: &AppWindow,
+    key: &str,
+    surface: Surface,
+    configure: impl FnOnce(&mut HostView),
+    log: Option<LogView>,
+    overlay: bool,
 ) {
     let client = ui
         .get_instances()
@@ -88,14 +103,28 @@ fn open_instance_surface(
         host: 0,
         log: log_index,
         surface: surface.id().into(),
-        label: format!("{name}, {}", lookup(surface.label())).into(),
+        label: if overlay {
+            lookup_args(
+                "gui-pane-label-quick-view",
+                [
+                    ("host", Arg::from(name.as_str())),
+                    ("surface", Arg::from(lookup(surface.label()))),
+                ],
+            )
+        } else {
+            format!("{name}, {}", lookup(surface.label()))
+        }
+        .into(),
         surface_choice: choice,
-        can_split_beside: true,
+        can_split_beside: !overlay,
+        can_close: overlay,
+        overlay,
         ..WorkspacePaneRow::default()
     }]));
     ui.set_workspace_back_label(lookup("gui-instances").into());
-    ui.set_page(0);
-    ui.set_workspace_open(true);
+    ui.set_settings_open(false);
+    ui.set_workspace_open(!overlay);
+    ui.set_quick_view_open(overlay);
 }
 
 fn target(minecraft: &str, loader: &str) -> SharedString {
@@ -298,6 +327,89 @@ fn show_snapshots(ui: &AppWindow) {
         },
         None,
     );
+}
+
+/// A history line as the Case tab words it.
+fn history_event(time: &str, text: String, tone: &str) -> CaseEventRow {
+    CaseEventRow {
+        time: time.into(),
+        text: text.into(),
+        tone: tone.into(),
+        ..CaseEventRow::default()
+    }
+}
+
+fn value_text(id: &str, value: &str) -> String {
+    lookup_args(id, [("value", Arg::from(value))])
+}
+
+const ISSUE: &str = "https://github.com/example/cavestone/issues/42";
+const NOTE: &str =
+    "The chest is empty after the restart, but only while the linked server is running.";
+
+/// An instance's Case tab: its issue link, steps with progress, the note, how
+/// often the bug was seen again, and what happened to the instance.
+pub(crate) fn client_case(ui: &AppWindow) {
+    let step = |id: i32, text: &str, done: bool| CaseStepRow {
+        id,
+        text: text.into(),
+        done,
+    };
+    // The text the report card copies, in the layout the summary uses.
+    let summary = format!(
+        "CaveStone\nIssue: {ISSUE}\n\nMinecraft: 1.20.1\nLoader: Forge 47.4.10\nMods: 64\nStorage: Persistent\n\nSteps:\n1. [x] Create a world with the default settings\n2. [x] Place a chest next to the spawn point and fill it\n3. [ ] Stop the world and start it again\n\nSeen again 2 times.\n\nNote:\n{NOTE}"
+    );
+    open_surface(
+        ui,
+        Surface::Case,
+        |view| {
+            view.client = InstanceRow {
+                issue_link: ISSUE.into(),
+                summary: summary.into(),
+                case_steps: rows(vec![
+                    step(1, "Create a world with the default settings", true),
+                    step(2, "Place a chest next to the spawn point and fill it", true),
+                    step(3, "Stop the world and start it again", false),
+                ]),
+                case_done: 2,
+                case_note: NOTE.into(),
+                case_reproduced: 2,
+                ..view.client.clone()
+            };
+            view.events = rows(vec![
+                history_event(
+                    "13:58",
+                    value_text("gui-event-created", &lookup("gui-event-storage-temporary")),
+                    "neutral",
+                ),
+                history_event("14:02", value_text("gui-event-launched", "MelanX"), "good"),
+                history_event("14:09", lookup("gui-event-exited-clean"), "neutral"),
+                history_event(
+                    "14:11",
+                    lookup_args("gui-event-reproduced", [("count", Arg::Count(1))]),
+                    "notice",
+                ),
+                history_event("14:14", value_text("gui-event-launched", "MelanX"), "good"),
+                history_event(
+                    "14:20",
+                    lookup_args("gui-event-reproduced", [("count", Arg::Count(2))]),
+                    "notice",
+                ),
+            ]);
+        },
+        None,
+    );
+}
+
+/// CaveStone's Overview, whose Run card offers the account picker.
+pub(crate) fn client_overview(ui: &AppWindow) {
+    open_surface(ui, Surface::Overview, |_| {}, None);
+}
+
+/// CaveStone's Overview in the quick view over Home.
+pub(crate) fn quick_view(ui: &AppWindow) {
+    super::home::home_page(ui);
+    open_instance_pane(ui, "cavestone", Surface::Overview, |_| {}, None, true);
 }
 
 /// The client's snapshots, one of them a full copy.

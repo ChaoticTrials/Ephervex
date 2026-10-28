@@ -76,7 +76,7 @@ fn cavestone_workspace(ui: &AppWindow, surface: Surface, edit: impl FnOnce(&mut 
         ..WorkspacePaneRow::default()
     }]));
     ui.set_workspace_back_label(lookup("gui-instances").into());
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_workspace_open(true);
 }
 

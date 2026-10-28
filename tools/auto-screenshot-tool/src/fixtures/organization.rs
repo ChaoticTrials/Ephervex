@@ -2,7 +2,7 @@
 //! favorites, how they are grouped, and which recorded mod logos serve as
 //! icons are choices made for the capture.
 
-use ephervex_gui::ui::{AppWindow, GroupRow, HostIcons, InstanceRow};
+use ephervex_gui::ui::{AppWindow, GroupRow, HostIcons, InstanceRow, MenuRow};
 use ephervex_i18n::lookup;
 use slint::{ComponentHandle, Image, SharedString};
 
@@ -101,32 +101,30 @@ fn organized_rows(ui: &AppWindow) -> Vec<InstanceRow> {
             })
             .collect(),
     ));
-    ui.set_instance_group_names(rows(
+    ui.set_instance_group_entries(rows(
         GROUPS
             .iter()
-            .map(|group| SharedString::from(group.name))
+            .map(|group| MenuRow {
+                id: group.id.into(),
+                label: group.name.into(),
+                ..MenuRow::default()
+            })
             .collect(),
     ));
     instances
 }
 
-fn show(ui: &AppWindow, instances: Vec<InstanceRow>, selected: &str) {
-    let index = instances
-        .iter()
-        .position(|row| row.id == selected)
-        .map_or(-1, |index| i32::try_from(index).unwrap_or(-1));
+fn show(ui: &AppWindow, instances: Vec<InstanceRow>) {
     ui.set_instances(rows(instances));
-    ui.set_selected_instance_id(selected.into());
-    ui.set_selected_instance_index(index);
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
 }
 
 /// Favorites first, group labels, and icons, with a grouped instance that has
 /// an icon selected.
 pub(crate) fn instance_organization(ui: &AppWindow) {
     let instances = organized_rows(ui);
-    show(ui, instances, "utility-mods");
+    show(ui, instances);
 }
 
 /// The filter panel narrowing the list to one loader.
@@ -169,7 +167,7 @@ pub(crate) fn instances_filters(ui: &AppWindow) {
     ui.set_instance_loader_index(3);
     ui.set_instance_filters_active(1);
     ui.set_instance_filters_open(true);
-    show(ui, instances, "utility-mods");
+    show(ui, instances);
 }
 
 /// The groups dialog, opened from the Instances toolbar.

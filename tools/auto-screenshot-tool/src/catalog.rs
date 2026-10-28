@@ -27,6 +27,14 @@ pub(crate) enum RegionBounds {
         width: f32,
         height: f32,
     },
+    /// The element with the region's accessible label, with a different margin
+    /// on each side, for a crop that needs more room on one side than another.
+    AroundLabel {
+        left: f32,
+        right: f32,
+        top: f32,
+        bottom: f32,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -139,8 +147,14 @@ const ISOLATION_ROUND_REGIONS: &[Region] = &[
     Region {
         name: "answer-controls",
         accessible_label: Some("Still failing"),
-        padding: (140.0, 22.0),
-        bounds: None,
+        padding: (0.0, 0.0),
+        // Issue gone sits to the left of Still failing; nothing is wanted on its right.
+        bounds: Some(RegionBounds::AroundLabel {
+            left: 112.0,
+            right: 14.0,
+            top: 14.0,
+            bottom: 14.0,
+        }),
     },
 ];
 
@@ -202,13 +216,14 @@ const SERVER_PROPERTIES_REGIONS: &[Region] = &[
     },
     Region {
         name: "online-mode",
-        accessible_label: None,
+        accessible_label: Some("Online mode"),
         padding: (0.0, 0.0),
-        bounds: Some(RegionBounds::Centered {
-            left: -453.0,
-            top: 344.0,
-            width: 660.0,
-            height: 56.0,
+        // The caption with the switch and the warning to its right.
+        bounds: Some(RegionBounds::AroundLabel {
+            left: 14.0,
+            right: 512.0,
+            top: 14.0,
+            bottom: 14.0,
         }),
     },
     Region {
@@ -279,12 +294,13 @@ const ACCOUNT_LAUNCH_REGIONS: &[Region] = &[
         name: "account-menu",
         accessible_label: None,
         padding: (0.0, 0.0),
-        // The native account menu stays against the right edge at both sizes.
+        // The native account menu opens under Launch as in the Run card, a fixed
+        // distance from the right edge at both sizes.
         bounds: Some(RegionBounds::RightAligned {
-            right: 0.0,
-            top: 538.0,
-            width: 300.0,
-            height: 272.0,
+            right: 108.0,
+            top: 196.0,
+            width: 204.0,
+            height: 212.0,
         }),
     },
 ];
@@ -315,6 +331,34 @@ pub(crate) const STATES: &[State] = &[
         name: "client-mods",
         show: fixtures::client_mods,
         regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "client-mods-catalog",
+        show: fixtures::client_mods_catalog,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "home-page",
+        show: fixtures::home::home_page,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "quick-view",
+        show: fixtures::client_hosts::quick_view,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "client-case",
+        show: fixtures::client_hosts::client_case,
+        regions: CLIENT_HOSTS_REGIONS,
         same_layout_at_both_sizes: false,
         interaction: None,
     },
@@ -855,7 +899,7 @@ pub(crate) const STATES: &[State] = &[
         show: fixtures::settings::theme_selector_open,
         regions: SETTINGS_REGIONS,
         same_layout_at_both_sizes: false,
-        interaction: Some(Interaction::Click("Interface theme")),
+        interaction: None,
     },
     State {
         name: "theme-load-error",

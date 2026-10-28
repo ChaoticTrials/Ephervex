@@ -7,7 +7,7 @@ use super::rows;
 
 pub(crate) fn instances_page(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_modal_error(SharedString::default());
 }
 
@@ -79,7 +79,7 @@ pub(crate) fn import_link_trust_prompt(ui: &AppWindow) {
     ui.set_modal("open-pack-link".into());
 }
 
-/// The instance list with the selected client's account choice for one launch.
+/// A client's Run card with the account choice for one launch.
 pub(crate) fn account_launch_picker(ui: &AppWindow) {
-    instances_page(ui);
+    super::client_hosts::client_overview(ui);
 }

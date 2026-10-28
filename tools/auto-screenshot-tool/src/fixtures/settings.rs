@@ -3,9 +3,11 @@
 
 use ephervex_gui::minecraft_defaults::{CATEGORIES, WINDOW_ASPECTS, category_label};
 use ephervex_gui::presentation::{cache_limit_choices, cache_limit_units};
-use ephervex_gui::ui::{AppWindow, DiskUsageRow, MinecraftPreferenceRow};
+use ephervex_gui::ui::{
+    AppWindow, BuiltInPalettes, DiskUsageRow, MinecraftPreferenceRow, ThemeSwatch,
+};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use slint::{ModelRc, SharedString, VecModel};
+use slint::{Color, ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::rows;
 
@@ -18,9 +20,45 @@ fn strings(values: &[&str]) -> ModelRc<SharedString> {
     ))
 }
 
+/// A theme of the user's own as its card shows it: the page color and the outline.
+fn custom_swatch(page: (u8, u8, u8), outline: (u8, u8, u8)) -> ThemeSwatch {
+    ThemeSwatch {
+        fill: Color::from_rgb_u8(page.0, page.1, page.2),
+        outline: Color::from_rgb_u8(outline.0, outline.1, outline.2),
+    }
+}
+
+/// The theme cards: Light and Dark, then the user's themes with their own colors.
+fn set_theme_cards(ui: &AppWindow, custom: &[(&str, &str, ThemeSwatch)]) {
+    let palettes = ui.global::<BuiltInPalettes>();
+    let mut labels = vec![
+        lookup("gui-color-scheme-light"),
+        lookup("gui-color-scheme-dark"),
+    ];
+    let mut ids = vec!["workbench".to_owned(), "dark".to_owned()];
+    let mut swatches = vec![
+        ThemeSwatch {
+            fill: palettes.get_workbench().background,
+            outline: palettes.get_workbench().border_strong,
+        },
+        ThemeSwatch {
+            fill: palettes.get_workbench_dark().background,
+            outline: palettes.get_workbench_dark().border_strong,
+        },
+    ];
+    for (label, id, swatch) in custom {
+        labels.push((*label).to_owned());
+        ids.push(format!("user:{id}"));
+        swatches.push(swatch.clone());
+    }
+    ui.set_theme_labels(rows(labels.iter().map(SharedString::from).collect()));
+    ui.set_theme_ids(rows(ids.iter().map(SharedString::from).collect()));
+    ui.set_theme_swatches(rows(swatches));
+}
+
 fn open_settings(ui: &AppWindow, tab: &str) {
     ui.set_workspace_open(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_settings_tab(tab.into());
 }
 
@@ -31,12 +69,14 @@ pub(crate) fn general(ui: &AppWindow) {
     ui.set_operator_permission_level(4);
     ui.set_application_text_scale(100);
     ui.set_technical_text_size(12);
-    ui.set_theme_labels(strings(&[
-        &lookup("gui-color-scheme-dark"),
-        &lookup("gui-color-scheme-light"),
-        "Midnight Blueprint",
-    ]));
-    ui.set_theme_ids(strings(&["dark", "light", "user:midnight-blueprint"]));
+    set_theme_cards(
+        ui,
+        &[(
+            "Midnight Blueprint",
+            "midnight-blueprint",
+            custom_swatch((11, 29, 58), (143, 184, 255)),
+        )],
+    );
     ui.set_themes_folder("/demo/config/ephervex/themes".into());
     ui.set_theme_problems(strings(&[]));
     ui.set_follow_mod_dependencies(true);
@@ -57,20 +97,26 @@ pub(crate) fn theme_selector_open(ui: &AppWindow) {
 /// the branding they name.
 pub(crate) fn theme_load_error(ui: &AppWindow) {
     general(ui);
-    ui.set_theme_labels(strings(&[
-        &lookup("gui-color-scheme-dark"),
-        &lookup("gui-color-scheme-light"),
-        "Forest",
-        "Midnight Blueprint",
-        "Sunset",
-    ]));
-    ui.set_theme_ids(strings(&[
-        "dark",
-        "light",
-        "user:forest",
-        "user:midnight-blueprint",
-        "user:sunset",
-    ]));
+    set_theme_cards(
+        ui,
+        &[
+            (
+                "Forest",
+                "forest",
+                custom_swatch((20, 48, 33), (160, 214, 170)),
+            ),
+            (
+                "Midnight Blueprint",
+                "midnight-blueprint",
+                custom_swatch((11, 29, 58), (143, 184, 255)),
+            ),
+            (
+                "Sunset",
+                "sunset",
+                custom_swatch((255, 226, 196), (122, 52, 36)),
+            ),
+        ],
+    );
     let problem = |file: &str, reason: String| {
         SharedString::from(lookup_args(
             "gui-theme-problem",
@@ -456,7 +502,7 @@ fn usage_total() -> u64 {
 }
 
 pub(crate) fn disk_usage(ui: &AppWindow) {
-    open_settings(ui, "Disk Usage");
+    open_settings(ui, "Storage");
     let total = usage_total();
     ui.set_disk_usage_state("measured".into());
     ui.set_disk_usage_total(size(total).into());

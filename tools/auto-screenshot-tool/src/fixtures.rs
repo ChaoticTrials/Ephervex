@@ -1,11 +1,12 @@
 //! Synthetic presentation rows. No launcher storage or service is opened.
 
+use ephervex_gui::presentation::{client_state_line, server_state_line};
 use ephervex_gui::ui::{
-    AccountRow, AppWindow, HostView, InstanceRow, ModRow, ModSearchRow, ServerRow,
+    AccountRow, AppWindow, HostView, InstanceRow, MenuRow, ModRow, ModSearchRow, ServerRow,
     WorkspacePaneRow, WorkspaceSurfaceRow,
 };
 use ephervex_gui::workspace_layout::Surface;
-use ephervex_i18n::lookup;
+use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model, ModelRc, SharedString, VecModel};
 
 use crate::artwork;
@@ -14,6 +15,7 @@ pub(crate) mod branding;
 pub(crate) mod client_hosts;
 pub(crate) mod diagnostics_servers;
 pub(crate) mod getting_started;
+pub(crate) mod home;
 pub(crate) mod in_progress;
 pub(crate) mod instance_dialogs;
 pub(crate) mod java;
@@ -100,6 +102,36 @@ pub(crate) const FORGE_1_12: Build = Build {
     display: "Forge 14.23.5.2860",
 };
 
+/// How long ago a sample host last ran, worded as the list card words it. It
+/// varies with the id so the cards do not all say the same thing.
+fn last_run_text(id: &str) -> String {
+    let hours = i64::from(id.bytes().fold(0_u8, u8::wrapping_add) % 5) + 1;
+    lookup_args("gui-last-run-hours", [("count", Arg::Count(hours))])
+}
+
+/// Sets the one state line a client card shows from the row's own state.
+fn with_client_line(row: InstanceRow) -> InstanceRow {
+    let line = client_state_line(
+        &row.state_kind,
+        &row.restart_stage,
+        row.needs_attention,
+        &row.last_run,
+    );
+    InstanceRow {
+        state_line: line.into(),
+        ..row
+    }
+}
+
+/// Sets the state line a server card shows: its state and its address.
+fn with_server_line(row: ServerRow) -> ServerRow {
+    let line = server_state_line(&row.state, &row.address);
+    ServerRow {
+        state_line: line.into(),
+        ..row
+    }
+}
+
 pub(crate) fn instance(
     id: &str,
     name: &str,
@@ -108,7 +140,7 @@ pub(crate) fn instance(
     storage: &str,
     source: &str,
 ) -> InstanceRow {
-    InstanceRow {
+    with_client_line(InstanceRow {
         id: id.into(),
         name: name.into(),
         minecraft: minecraft.into(),
@@ -127,33 +159,34 @@ pub(crate) fn instance(
         state: lookup("gui-state-ready").into(),
         state_kind: "ready".into(),
         can_launch: true,
+        last_run: last_run_text(id).into(),
         group_index: -1,
         icon_slot: -1,
         ..InstanceRow::default()
-    }
+    })
 }
 
 /// An instance whose game is running under this launcher.
 pub(crate) fn running_instance(row: InstanceRow) -> InstanceRow {
-    InstanceRow {
+    with_client_line(InstanceRow {
         state: lookup("gui-state-running").into(),
         state_kind: "running".into(),
         can_launch: false,
         can_kill: true,
         can_restart: true,
         ..row
-    }
+    })
 }
 
 /// An instance whose game is still starting.
 pub(crate) fn starting_instance(row: InstanceRow) -> InstanceRow {
-    InstanceRow {
+    with_client_line(InstanceRow {
         state: lookup("gui-state-starting").into(),
         state_kind: "starting".into(),
         can_launch: false,
         can_kill: true,
         ..row
-    }
+    })
 }
 
 pub(crate) fn server(
@@ -163,7 +196,7 @@ pub(crate) fn server(
     loader: (&str, &str),
     port: u16,
 ) -> ServerRow {
-    ServerRow {
+    with_server_line(ServerRow {
         id: id.into(),
         name: name.into(),
         minecraft: minecraft.into(),
@@ -179,14 +212,15 @@ pub(crate) fn server(
         path: format!("/demo/servers/{id}").into(),
         installed: true,
         can_start: true,
+        last_run: last_run_text(id).into(),
         icon_slot: -1,
         ..ServerRow::default()
-    }
+    })
 }
 
 /// A server that a supervisor is running and can control.
 pub(crate) fn running_server(row: ServerRow) -> ServerRow {
-    ServerRow {
+    with_server_line(ServerRow {
         state: lookup("gui-state-running").into(),
         state_kind: "running".into(),
         state_detail: lookup("gui-state-controlled").into(),
@@ -196,24 +230,30 @@ pub(crate) fn running_server(row: ServerRow) -> ServerRow {
         can_kill: true,
         can_send_command: true,
         ..row
-    }
+    })
 }
 
 /// A server whose process is still starting.
 pub(crate) fn starting_server(row: ServerRow) -> ServerRow {
-    ServerRow {
+    with_server_line(ServerRow {
         state: lookup("gui-state-starting").into(),
         state_kind: "starting".into(),
         state_detail: lookup("gui-state-starting-detail").into(),
         can_start: false,
         ..row
-    }
+    })
 }
 
 pub(crate) fn account(name: &str, is_default: bool) -> AccountRow {
     AccountRow {
         id: name.to_ascii_lowercase().into(),
         name: name.into(),
+        initial: name
+            .chars()
+            .next()
+            .map(|first| first.to_uppercase().to_string())
+            .unwrap_or_default()
+            .into(),
         kind: "Offline".into(),
         is_default,
         credential_state: lookup("gui-no-credential").into(),
@@ -320,11 +360,11 @@ pub(crate) fn instance_rows() -> Vec<InstanceRow> {
             match record.key.as_str() {
                 "photon" => running_instance(row),
                 "cobblemon" => starting_instance(row),
-                "fog" => InstanceRow {
+                "fog" => with_client_line(InstanceRow {
                     needs_attention: true,
                     can_launch: false,
                     ..row
-                },
+                }),
                 "skyblock-tools" => InstanceRow {
                     creating_server_detail: lookup("operation-stage-downloading-files").into(),
                     creating_server_progress: 0.4,
@@ -364,12 +404,12 @@ pub(crate) fn server_rows() -> Vec<ServerRow> {
             match record.key.as_str() {
                 "photon-server" => running_server(row),
                 "cobblemon-server" => starting_server(row),
-                _ if record.failed => ServerRow {
+                _ if record.failed => with_server_line(ServerRow {
                     state: lookup("gui-state-failed").into(),
                     state_kind: "failed".into(),
                     state_detail: lookup("gui-server-failed-detail").into(),
                     ..row
-                },
+                }),
                 _ => row,
             }
         })
@@ -389,33 +429,53 @@ pub(crate) fn account_rows() -> Vec<AccountRow> {
 pub(crate) fn install_base(ui: &AppWindow) {
     ui.set_loading(false);
     ui.set_app_version(env!("CARGO_PKG_VERSION").into());
-    ui.set_status_message(lookup("gui-ready").into());
     ui.set_storage_root("/demo/ephervex".into());
     ui.set_application_text_scale(100);
-    ui.set_accounts(rows(account_rows()));
+    let accounts = account_rows();
+    if let Some(default) = accounts.iter().find(|account| account.is_default) {
+        ui.set_default_account_name(default.name.clone());
+        ui.set_default_account_initial(default.initial.clone());
+        ui.set_default_account_kind(default.kind.clone());
+    }
+    ui.set_account_launch_entries(rows(
+        accounts
+            .iter()
+            .map(|account| MenuRow {
+                id: account.id.clone(),
+                label: if account.is_default {
+                    format!("{} ({})", account.name, lookup("gui-default"))
+                } else {
+                    account.name.to_string()
+                }
+                .into(),
+                ..MenuRow::default()
+            })
+            .collect(),
+    ));
+    ui.set_accounts(rows(accounts));
     let instances = instance_rows();
+    let servers = server_rows();
+    home::install_home_base(ui, &instances, &servers);
     ui.set_instance_total(i32::try_from(instances.len()).unwrap_or(i32::MAX));
     ui.set_instances(rows(instances));
-    ui.set_global_servers(rows(server_rows()));
-    ui.set_selected_instance_id("cavestone".into());
-    ui.set_selected_instance_index(0);
-    ui.set_selected_global_server_id("cavestone-server".into());
-    ui.set_selected_global_server_index(0);
+    ui.set_listed_servers(rows(servers));
 }
 
 pub(crate) fn instances_overview(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
 }
 
 pub(crate) fn servers_overview(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(1);
+    ui.set_settings_open(false);
+    ui.set_reveal_host_id("cavestone-server".into());
+    ui.set_reveal_token(1);
 }
 
 pub(crate) fn accounts_settings(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_settings_tab("Accounts".into());
 }
 
@@ -503,6 +563,13 @@ pub(crate) fn server_mod_results(search: &recorded::Search) -> Vec<ModSearchRow>
         .collect()
 }
 
+/// The Add Mods dialog over the instance's mod table, with a catalog search.
+pub(crate) fn client_mods_catalog(ui: &AppWindow) {
+    client_mods(ui);
+    ui.set_add_mods_host(0);
+    ui.set_modal("add-mods".into());
+}
+
 pub(crate) fn client_mods(ui: &AppWindow) {
     let client = ui.get_instances().row_data(0).unwrap_or_default();
     let surfaces = Surface::client()
@@ -539,7 +606,7 @@ pub(crate) fn client_mods(ui: &AppWindow) {
         ..WorkspacePaneRow::default()
     }]));
     ui.set_workspace_back_label(lookup("gui-instances").into());
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_workspace_open(true);
 }
 

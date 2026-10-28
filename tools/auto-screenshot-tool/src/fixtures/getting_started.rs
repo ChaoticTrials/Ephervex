@@ -119,17 +119,20 @@ fn blocked_file(project: &str, file: &str, id: u32) -> BlockedFileRow {
 
 pub(crate) fn instances_empty(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_instances(rows(Vec::new()));
     ui.set_instance_total(0);
     ui.set_pending_instances(rows(Vec::new()));
-    ui.set_selected_instance_id(SharedString::default());
-    ui.set_selected_instance_index(-1);
+    ui.set_listed_servers(rows(Vec::new()));
+    ui.set_home_resume(rows(Vec::new()));
+    ui.set_home_temporary_count(0);
+    ui.set_home_persistent_count(0);
+    ui.set_home_server_count(0);
 }
 
 pub(crate) fn create_instance_dialog(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_minecraft_releases(rows(strings(&[
         "26.2", "1.21.1", "1.20.1", "1.19.4", "1.18.2", "1.16.5", "1.12.2",
     ])));
@@ -199,7 +202,7 @@ pub(crate) fn import_modpack_resolving(ui: &AppWindow) {
 
 pub(crate) fn file_drop_overlay(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_file_drop_kind("import".into());
     ui.set_file_drop_active(true);
 }

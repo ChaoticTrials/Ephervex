@@ -194,13 +194,20 @@ fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
     let seasonal = theme == ThemeName::Halloween && !user_theme;
     let palettes = ui.global::<BuiltInPalettes>();
     let (palette, chosen) = match theme {
-        ThemeName::Light => (palettes.get_light(), ThemeName::Light),
+        ThemeName::Light => (palettes.get_workbench(), ThemeName::Light),
         _ if seasonal => (palettes.get_halloween(), ThemeName::Dark),
-        ThemeName::Dark | ThemeName::Halloween => (palettes.get_dark(), ThemeName::Dark),
+        ThemeName::Dark | ThemeName::Halloween => (palettes.get_workbench_dark(), ThemeName::Dark),
     };
     ui.global::<Theme>().set_palette(palette);
-    ui.set_application_theme(chosen.name().into());
-    ui.set_theme_index(i32::from(chosen == ThemeName::Light));
+    ui.set_application_theme(
+        if chosen == ThemeName::Light {
+            "workbench"
+        } else {
+            "dark"
+        }
+        .into(),
+    );
+    ui.set_theme_index(i32::from(chosen == ThemeName::Dark));
     ui.set_shown_theme(
         if seasonal {
             "season:halloween"
@@ -209,6 +216,7 @@ fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
         }
         .into(),
     );
+    ui.set_seasonal_theme_in_season(seasonal);
     ui.set_seasonal_theme_note(
         if seasonal {
             lookup_args(
@@ -235,9 +243,6 @@ fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
 
 fn new_window(state: &State) -> Result<AppWindow> {
     let ui = AppWindow::new().context("create the Ephervex window")?;
-    if let Some(family) = ephervex_gui::monospace::resolve_monospace_family() {
-        ui.global::<Theme>().set_mono_family(family.into());
-    }
     install_i18n(&ui);
     fixtures_for_state(&ui, state);
     Ok(ui)
@@ -412,6 +417,29 @@ fn scroll_to(ui: &AppWindow, label: &str) -> Result<()> {
     bail!("{label:?} did not appear within {MAX_SCROLL_STEPS} scroll steps")
 }
 
+/// Crops the element with the region's accessible label, with its own margin on
+/// each side: `(left, right, top, bottom)`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn crop_around_label(
+    ui: &AppWindow,
+    image: &RgbaImage,
+    region: &Region,
+    (left, right, top, bottom): (f32, f32, f32, f32),
+) -> Result<RgbaImage> {
+    let label = region
+        .accessible_label
+        .context("an AroundLabel region needs an accessible label")?;
+    let element = find_visible(ui, label)?;
+    let position = element.absolute_position();
+    let size = element.size();
+    let x = (position.x - left).max(0.0).floor() as u32;
+    let y = (position.y - top).max(0.0).floor() as u32;
+    let end_x = ((position.x + size.width + right).ceil() as u32).min(image.width());
+    let end_y = ((position.y + size.height + bottom).ceil() as u32).min(image.height());
+    ensure!(end_x > x && end_y > y, "UI region {label:?} has no area");
+    Ok(image::imageops::crop_imm(image, x, y, end_x - x, end_y - y).to_image())
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
@@ -432,6 +460,12 @@ fn crop_region(ui: &AppWindow, image: &RgbaImage, region: &Region) -> Result<Rgb
                 width,
                 height,
             } => (image.width() as f32 - right - width, top, width, height),
+            RegionBounds::AroundLabel {
+                left,
+                right,
+                top,
+                bottom,
+            } => return crop_around_label(ui, image, region, (left, right, top, bottom)),
         };
         ensure!(
             x.is_finite()

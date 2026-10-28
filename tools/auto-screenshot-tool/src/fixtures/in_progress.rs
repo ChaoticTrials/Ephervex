@@ -37,7 +37,7 @@ fn bring_to_front<T>(mut items: Vec<T>, is_target: impl Fn(&T) -> bool) -> Vec<T
 
 pub(crate) fn import_modpack_running(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_pending_instances(rows(vec![PendingEntityRow {
         id: "creation-1".into(),
         name: "CaveStone-1.1.0-modrinth.mrpack".into(),
@@ -55,8 +55,6 @@ pub(crate) fn import_modpack_running(ui: &AppWindow) {
         progress: import_progress(),
         ..PendingEntityRow::default()
     }]));
-    ui.set_active_operations(1);
-    ui.set_status_message(lookup("operation-importing-pack").into());
 }
 
 pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
@@ -143,36 +141,31 @@ pub(crate) fn activity_import_in_progress(ui: &AppWindow) {
             "14:17:52",
         ),
     ]));
-    ui.set_active_operations(2);
-    ui.set_status_message(lookup("operation-importing-pack").into());
     ui.set_workspace_open(false);
-    ui.set_page(3);
+    ui.set_settings_open(false);
 }
 
 pub(crate) fn instance_launching(ui: &AppWindow) {
     let launching = bring_to_front(instance_rows(), |row| row.state_kind == "starting");
-    ui.set_selected_instance_id(launching[0].id.clone());
-    ui.set_selected_instance_index(0);
     ui.set_instances(rows(launching));
-    ui.set_active_operations(1);
-    ui.set_status_message(lookup("operation-launching-minecraft").into());
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
 }
 
 fn servers_page_with(ui: &AppWindow, state_kind: &str) {
     let servers = bring_to_front(server_rows(), |row| row.state_kind == state_kind);
-    ui.set_selected_global_server_id(servers[0].id.clone());
-    ui.set_selected_global_server_index(0);
-    ui.set_global_servers(rows(servers));
+    let shown = servers.first().map(|row| row.id.clone());
+    ui.set_listed_servers(rows(servers));
+    if let Some(id) = shown {
+        ui.set_reveal_host_id(id);
+        ui.set_reveal_token(1);
+    }
     ui.set_workspace_open(false);
-    ui.set_page(1);
+    ui.set_settings_open(false);
 }
 
 pub(crate) fn server_starting(ui: &AppWindow) {
     servers_page_with(ui, "starting");
-    ui.set_active_operations(1);
-    ui.set_status_message(lookup("operation-starting-server").into());
 }
 
 pub(crate) fn server_running(ui: &AppWindow) {
@@ -225,5 +218,5 @@ pub(crate) fn running_page(ui: &AppWindow) {
         },
     ]));
     ui.set_workspace_open(false);
-    ui.set_page(2);
+    ui.set_settings_open(false);
 }

@@ -88,7 +88,7 @@ fn cavestone(ui: &AppWindow) -> InstanceRow {
 }
 
 fn named_server(ui: &AppWindow, id: &str) -> ServerRow {
-    ui.get_global_servers()
+    ui.get_listed_servers()
         .iter()
         .find(|row| row.id == id)
         .unwrap_or_default()
@@ -99,7 +99,7 @@ fn open_client(ui: &AppWindow, view: HostView, surface: &str) {
     ui.set_host_views(rows(vec![view]));
     ui.set_workspace_panes(rows(vec![pane(1, 0, surface, &label, false)]));
     ui.set_workspace_back_label(lookup("gui-instances").into());
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_workspace_open(true);
 }
 
@@ -113,7 +113,7 @@ fn open_server(ui: &AppWindow, view: HostView, surface: &str, log: Option<LogVie
     ui.set_host_views(rows(vec![view]));
     ui.set_workspace_panes(rows(vec![pane]));
     ui.set_workspace_back_label(lookup("gui-servers").into());
-    ui.set_page(1);
+    ui.set_settings_open(false);
     ui.set_workspace_open(true);
 }
 
@@ -479,7 +479,7 @@ pub(crate) fn server_properties(ui: &AppWindow) {
 
 fn servers_page(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(1);
+    ui.set_settings_open(false);
     ui.set_modal_error(SharedString::default());
 }
 
@@ -514,7 +514,7 @@ pub(crate) fn create_server_standalone(ui: &AppWindow) {
 /// The New Linked Server dialog, which takes its version and loader from the client.
 pub(crate) fn create_server_linked(ui: &AppWindow) {
     ui.set_workspace_open(false);
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_modal_error(SharedString::default());
     release_versions(ui);
     ui.set_create_server_client_id("cavestone".into());
@@ -666,6 +666,13 @@ pub(crate) fn server_mods(ui: &AppWindow) {
     let search = &recorded::server_mods().modrinth_search;
     let view = cavestone_server_mods(server, "modrinth", search, false);
     open_server(ui, view, "Mods", None);
+    show_add_mods(ui);
+}
+
+/// Opens the Add Mods dialog over the shown host.
+fn show_add_mods(ui: &AppWindow) {
+    ui.set_add_mods_host(0);
+    ui.set_modal("add-mods".into());
 }
 
 /// A server's CurseForge search that also lists the mods a server cannot take.
@@ -674,6 +681,7 @@ pub(crate) fn server_mods_curseforge(ui: &AppWindow) {
     let search = &recorded::server_mods().curseforge_search;
     let view = cavestone_server_mods(server, "curseforge", search, true);
     open_server(ui, view, "Mods", None);
+    show_add_mods(ui);
 }
 
 /// The confirmation a running server's install opens for a mod that does not
@@ -879,6 +887,8 @@ fn bundle_part(name: &str, kind: &str, size: &str, selected: bool) -> BundlePart
         name: name.into(),
         kind: lookup(kind).into(),
         size: size.into(),
+        path: format!("/demo/ephervex/instances/cavestone/{name}").into(),
+        modified: "2026-10-12 14:02".into(),
         selected,
     }
 }
@@ -1039,7 +1049,7 @@ pub(crate) fn split_workspace(ui: &AppWindow) {
         },
     ]));
     ui.set_workspace_back_label(lookup("gui-instances").into());
-    ui.set_page(0);
+    ui.set_settings_open(false);
     ui.set_workspace_open(true);
 }
 
