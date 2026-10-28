@@ -35,15 +35,21 @@ installed and is not downloaded again.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Open the instance workspace and select **Mods**. Choose **Modrinth** or
-**CurseForge** in **Add Mods**, search for a project, and select **Install**.
-The mod and its required dependencies install directly. When the instance has
+Open the instance workspace and select **Mods**. The tab lists every mod in one
+table; type in **Filter mods...** to narrow it. Select **Add Mods** to open the
+catalog dialog, choose **Modrinth** or **CurseForge** under **Catalog**, search
+for a project, and select **Install**. Each result shows the project's download
+count. **Results** sets how many results a page holds, and **Add JARs...** adds
+files you downloaded yourself. The mod and its required dependencies install
+directly. When the instance has
 linked servers, the install plan opens first so you can choose which ones
 receive the mod. If an author requires a browser download, Ephervex opens a
 manual acquisition dialog and watches your configured download folders for the
 verified file.
 
-<ThemeScreenshot state="client-mods" alt="Instance Mods surface with installed mods and a compatible catalog search" />
+<ThemeScreenshot state="client-mods" alt="Instance Mods surface with one table of installed mods and the Add Mods button" />
+
+<ThemeScreenshot state="client-mods-catalog" alt="The Add Mods dialog with a compatible catalog search and download counts" />
 
 <ThemeScreenshot state="mod-install-plan" alt="Install plan showing the selected mod and its dependencies" />
 
@@ -103,9 +109,9 @@ hold fewer results than the page size.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Open the server workspace, select **Mods**, and search in **Add Mods**. A
-**?** above **Install** marks a result that does not state server support.
-**Add Mods** is hidden for a Vanilla server and for a server whose
+Open the server workspace, select **Mods**, select **Add Mods**, and search in
+the dialog. A **?** above **Install** marks a result that does not state server
+support. **Add Mods** is hidden for a Vanilla server and for a server whose
 installation has not finished.
 
 <ThemeScreenshot state="server-mods" alt="Server Mods surface with a Modrinth search where Golem Magicka is marked with a question mark" />
