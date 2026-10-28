@@ -120,13 +120,10 @@ fn a_restart_under_way_shows_its_stage_as_progress_and_holds_the_host_actions() 
 fn a_server_restart_shows_on_its_card_as_well_as_in_its_workspace() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace_open(false);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![restarting_server(
-        "stopping",
-    )])));
-    ui.set_selected_global_server_index(0);
-    ui.set_selected_global_server_id("server".into());
+    let mut row = restarting_server("stopping");
+    // What the controller stamps on every row that shows the host.
+    row.state_line = lookup("gui-state-restarting").into();
+    ui.set_listed_servers(ModelRc::new(VecModel::from(vec![row])));
     settle(&ui);
     assert!(visible(&ui, &lookup("gui-state-restarting")));
 }
@@ -337,16 +334,15 @@ fn a_disabled_force_kill_says_why() {
 #[test]
 fn a_disabled_connect_shows_the_reason_its_server_row_carries() {
     let ui = window();
+    // Wide enough for the column that lists the linked servers.
+    ui.window().set_size(PhysicalSize::new(1700, 900));
     let mut row = server(true);
-    row.linked_client_id = "client".into();
+    row.linked_client_id = "host".into();
     row.can_connect = false;
     row.connect_reason = "The client is already running.".into();
-    ui.set_loading(false);
-    ui.set_page(1);
-    ui.set_workspace_open(false);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![row])));
-    ui.set_selected_global_server_index(0);
-    ui.set_selected_global_server_id("server".into());
+    let mut view = support::client_view(instance());
+    view.linked_servers = ModelRc::new(VecModel::from(vec![row]));
+    support::show(&ui, vec![view], vec![support::pane(1, 0, "Overview")]);
     settle(&ui);
 
     assert!(!enabled(&ui, "gui-launch-client-connect"));
@@ -407,6 +403,11 @@ fn instance() -> InstanceRow {
         group_index: 0,
         group_tone: 0,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
+        ..InstanceRow::default()
     }
 }
 
@@ -452,6 +453,10 @@ fn server(running: bool) -> ServerRow {
         pair_starting: false,
         favorite: false,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
 }
 

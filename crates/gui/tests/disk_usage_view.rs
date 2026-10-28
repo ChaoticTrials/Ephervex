@@ -52,7 +52,7 @@ fn row(id: &str, label: &str, size: &str, fraction: f32, locations: &[&str]) -> 
 
 fn settings(ui: &AppWindow, tab: &str) {
     ui.set_loading(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_workspace_open(false);
     ui.set_settings_tab(tab.into());
     settle(ui);
@@ -92,19 +92,19 @@ fn measured(ui: &AppWindow) {
 }
 
 #[test]
-fn disk_usage_is_a_settings_page_that_measures_when_asked() {
+fn disk_usage_is_a_storage_section_that_measures_when_asked() {
     let ui = window();
     let asked = Rc::new(RefCell::new(0));
     let sink = Rc::clone(&asked);
     ui.on_measure_disk_usage(move || *sink.borrow_mut() += 1);
     settings(&ui, "General");
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-settings-disk-usage"))
+            .all(|element| element.size().width == 0.0),
+        "disk usage has no entry of its own in the settings list"
+    );
 
-    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-settings-disk-usage"))
-        .next()
-        .expect("a settings entry")
-        .mock_single_click(PointerEventButton::Left);
-    settle(&ui);
-    assert_eq!(ui.get_settings_tab(), "Disk Usage");
+    settings(&ui, "Storage");
     assert_eq!(
         *asked.borrow(),
         0,
@@ -122,7 +122,7 @@ fn a_measurement_in_progress_says_so_and_can_be_stopped() {
     let stopped = Rc::new(RefCell::new(false));
     let sink = Rc::clone(&stopped);
     ui.on_stop_disk_usage(move || *sink.borrow_mut() = true);
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     ui.set_disk_usage_state("measuring".into());
     ui.set_disk_usage_progress(
         lookup_args("gui-disk-usage-progress", [("count", Arg::from(1500))]).into(),
@@ -145,7 +145,7 @@ fn a_measurement_in_progress_says_so_and_can_be_stopped() {
 #[test]
 fn a_measurement_shows_its_total_every_category_in_words_and_what_it_missed() {
     let ui = window();
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     measured(&ui);
 
     assert!(visible(
@@ -180,7 +180,7 @@ fn a_category_folder_opens_by_category_and_position() {
     let refreshed = Rc::new(RefCell::new(0));
     let refresh_sink = Rc::clone(&refreshed);
     ui.on_measure_disk_usage(move || *refresh_sink.borrow_mut() += 1);
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     measured(&ui);
 
     labeled_button(
@@ -243,7 +243,7 @@ fn window() -> AppWindow {
     // Tall enough that the whole surface is on screen: the testing backend
     // finds only what is within the window, and the bundle choice sits below
     // the verification results.
-    ui.window().set_size(PhysicalSize::new(1480, 1400));
+    ui.window().set_size(PhysicalSize::new(1480, 2600));
     ui.show().expect("show");
     ui
 }

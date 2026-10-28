@@ -178,6 +178,127 @@ class ClarifiedTexts(unittest.TestCase):
             inventory.build_inventory(raw, self.config(checksum="0" * 64))
 
 
+class BundledFonts(unittest.TestCase):
+    """Fonts are listed beside the crates, each with its own license text."""
+
+    def setUp(self):
+        self.workspace = tempfile.TemporaryDirectory()
+        self.directory = Path(self.workspace.name)
+        (self.directory / "licenses").mkdir()
+        self.addCleanup(self.workspace.cleanup)
+        self.text = "Copyright 2020 The Example Authors\r\n\r\nOFL terms.\r\n"
+        (self.directory / "licenses" / "OFL-Example.txt").write_bytes(self.text.encode())
+        (self.directory / "Example-Regular.ttf").write_bytes(b"font")
+
+    def manifest(self, files: str = '["Example-Regular.ttf"]') -> None:
+        (self.directory / "fonts.toml").write_text(
+            '[[font]]\n'
+            'family = "Example"\n'
+            'version = "1.000"\n'
+            'license = "OFL-1.1"\n'
+            'license-name = "SIL Open Font License 1.1"\n'
+            'license-file = "licenses/OFL-Example.txt"\n'
+            f"files = {files}\n",
+            encoding="utf-8",
+        )
+
+    def test_a_font_is_listed_with_its_own_text_unaltered(self):
+        self.manifest()
+        fonts = inventory.bundled_fonts(self.directory)
+        built = inventory.build_inventory(
+            cargo_about_output(
+                [license_entry("MIT", "MIT License", "m", [("alpha", "1.0.0")])],
+                [crate_entry("alpha", "1.0.0", "MIT")],
+            ),
+            {},
+            fonts,
+        )
+        font = next(c for c in built["crates"] if c["name"] == "Example (font)")
+        self.assertEqual((font["version"], font["license"]), ("1.000", "OFL-1.1"))
+        text = built["licenses"][font["texts"][0]]
+        self.assertEqual(text["id"], "OFL-1.1")
+        self.assertEqual(text["name"], "SIL Open Font License 1.1")
+        # CRLF and the copyright line survive, since that is the attribution.
+        self.assertEqual(text["text"], self.text)
+
+    def test_two_fonts_under_one_license_keep_their_own_copyright_lines(self):
+        self.manifest()
+        other = "Copyright 2021 Someone Else\r\n\r\nOFL terms.\r\n"
+        (self.directory / "licenses" / "OFL-Other.txt").write_bytes(other.encode())
+        (self.directory / "Other-Regular.ttf").write_bytes(b"font")
+        manifest = self.directory / "fonts.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            + '\n[[font]]\nfamily = "Other"\nversion = "2.000"\nlicense = "OFL-1.1"\n'
+            'license-name = "SIL Open Font License 1.1"\n'
+            'license-file = "licenses/OFL-Other.txt"\nfiles = ["Other-Regular.ttf"]\n',
+            encoding="utf-8",
+        )
+        built = inventory.build_inventory(
+            cargo_about_output([], []), {}, inventory.bundled_fonts(self.directory)
+        )
+        self.assertEqual(len(built["licenses"]), 2)
+        self.assertEqual([c["name"] for c in built["crates"]], ["Example (font)", "Other (font)"])
+
+    def test_a_font_file_the_manifest_does_not_list_is_refused(self):
+        self.manifest()
+        (self.directory / "Stray-Regular.ttf").write_bytes(b"font")
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_an_unlisted_open_type_font_is_refused(self):
+        self.manifest()
+        (self.directory / "Stray.otf").write_bytes(b"font")
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_an_unlisted_font_in_a_subdirectory_is_refused_whatever_its_case(self):
+        self.manifest()
+        nested = self.directory / "markup" / "extra"
+        nested.mkdir(parents=True)
+        (nested / "Stray.TTF").write_bytes(b"font")
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_a_font_outside_the_manifest_directory_is_found_from_the_search_root(self):
+        self.manifest()
+        fonts_directory = self.directory / "fonts"
+        fonts_directory.mkdir()
+        for name in ("fonts.toml", "Example-Regular.ttf"):
+            (self.directory / name).rename(fonts_directory / name)
+        (self.directory / "licenses").rename(fonts_directory / "licenses")
+        (self.directory / "Stray.ttc").write_bytes(b"font")
+        self.assertEqual(len(inventory.bundled_fonts(fonts_directory)), 1)
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(fonts_directory, self.directory)
+
+    def test_a_license_file_that_is_not_utf8_is_refused(self):
+        self.manifest()
+        (self.directory / "licenses" / "OFL-Example.txt").write_bytes(b"Copyright \xa9 2020\r\n")
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_a_listed_font_file_that_is_missing_is_refused(self):
+        self.manifest('["Example-Regular.ttf", "Missing.ttf"]')
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_a_font_without_license_text_is_refused(self):
+        self.manifest()
+        (self.directory / "licenses" / "OFL-Example.txt").write_bytes(b"")
+        with self.assertRaises(SystemExit):
+            inventory.bundled_fonts(self.directory)
+
+    def test_the_committed_fonts_are_all_accounted_for(self):
+        fonts = inventory.bundled_fonts(inventory.FONT_DIRECTORY)
+        self.assertEqual(
+            sorted(font["name"] for font in fonts),
+            ["IBM Plex Mono (font)", "Pixelify Sans (font)", "Space Grotesk (font)"],
+        )
+        plex = next(font for font in fonts if font["name"].startswith("IBM Plex"))
+        self.assertIn('Reserved Font Name "Plex"', plex["text"])
+
+
 class RenderDocument(unittest.TestCase):
     def test_every_crate_and_every_text_appears(self):
         raw = cargo_about_output(

@@ -1,53 +1,23 @@
-//! The Instances page's organization controls, in a real window: the filter
-//! bar, the header count, and the favorite stars on cards.
+//! The host list's organization controls, in a real window: the filter panel,
+//! the empty states, and the favorite stars on cards.
 
 #![allow(clippy::expect_used)]
+
+mod support;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerRow};
+use ephervex_gui::ui::{AppWindow, InstanceRow, ServerRow};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
+use i_slint_backend_testing::ElementHandle;
 use slint::platform::PointerEventButton;
-use slint::{ComponentHandle, ModelRc, PhysicalSize, VecModel};
+use slint::{ComponentHandle, ModelRc, VecModel};
 
 fn window() -> AppWindow {
-    slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
-        mock_time: true,
-        threading: false,
-    })))
-    .expect("testing backend");
-    let ui = AppWindow::new().expect("window");
-    install_i18n(&ui);
-    ui.window().set_size(PhysicalSize::new(1480, 900));
-    ui.show().expect("show");
+    let ui = support::test_window();
     ui.set_loading(false);
-    ui.set_page(0);
-    ui.set_workspace_open(false);
     ui
-}
-
-fn install_i18n(ui: &AppWindow) {
-    let global = ui.global::<GuiI18n>();
-    global.on_text(|id| lookup(id.as_str()).into());
-    global.on_count(|id, count| {
-        lookup_args(id.as_str(), [("count", Arg::Count(i64::from(count)))]).into()
-    });
-    global.on_value(|id, value| {
-        lookup_args(id.as_str(), [("value", Arg::from(value.to_string()))]).into()
-    });
-    global.on_values(|id, first, second| {
-        lookup_args(
-            id.as_str(),
-            [
-                ("first", Arg::from(first.to_string())),
-                ("second", Arg::from(second.to_string())),
-            ],
-        )
-        .into()
-    });
 }
 
 fn settle(ui: &AppWindow) {
@@ -104,8 +74,9 @@ fn clearing_the_filters_resets_every_filter_and_the_query() {
     ui.on_instance_view_changed(move || count.set(count.get() + 1));
 
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance(false)])));
+    ui.set_instance_filters_open(true);
     ui.set_instance_filter("temporary".into());
-    ui.set_instance_query("repro".into());
+    ui.set_list_query("repro".into());
     ui.set_instance_favorites_only(true);
     ui.set_instance_minecraft_index(2);
     ui.set_instance_loader_index(1);
@@ -121,7 +92,7 @@ fn clearing_the_filters_resets_every_filter_and_the_query() {
     clear.mock_single_click(PointerEventButton::Left);
 
     assert_eq!(ui.get_instance_filter(), "all");
-    assert_eq!(ui.get_instance_query(), "");
+    assert_eq!(ui.get_list_query(), "");
     assert!(!ui.get_instance_favorites_only());
     assert_eq!(ui.get_instance_minecraft_index(), 0);
     assert_eq!(ui.get_instance_loader_index(), 0);
@@ -134,6 +105,7 @@ fn clearing_the_filters_resets_every_filter_and_the_query() {
 #[test]
 fn nothing_offers_to_clear_filters_while_none_is_active() {
     let ui = window();
+    ui.set_instance_filters_open(true);
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance(false)])));
     settle(&ui);
     assert!(
@@ -144,36 +116,34 @@ fn nothing_offers_to_clear_filters_while_none_is_active() {
 }
 
 #[test]
-fn the_header_reads_shown_of_total_only_while_something_narrows_the_list() {
+fn the_filters_button_counts_the_choices_that_are_set() {
     let ui = window();
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance(false)])));
-    ui.set_instance_total(12);
     settle(&ui);
-    let plain = lookup_args("gui-client-instances-count", [("count", Arg::Count(1))]);
+    let plain = lookup("gui-more-filters");
     assert!(
         ElementHandle::find_by_accessible_label(&ui, &plain)
             .next()
             .is_some(),
-        "unfiltered, the header counts what exists"
+        "with nothing set the button says only what it opens"
     );
 
-    ui.set_instance_filters_active(2);
+    ui.set_instance_favorites_only(true);
+    ui.set_instance_loader_index(1);
     settle(&ui);
-    let narrowed = lookup_args(
-        "gui-instances-shown-of-total",
-        [("first", Arg::from("1")), ("second", Arg::from("12"))],
-    );
+    let counted = lookup_args("gui-more-filters-active", [("value", Arg::from("2"))]);
     assert!(
-        ElementHandle::find_by_accessible_label(&ui, &narrowed)
+        ElementHandle::find_by_accessible_label(&ui, &counted)
             .next()
             .is_some(),
-        "filtered, it says how many of the total are shown"
+        "with two set it says how many"
     );
 }
 
 #[test]
 fn clearing_filters_is_offered_only_while_something_narrows_the_list() {
     let ui = window();
+    ui.set_instance_filters_open(true);
     ui.set_instances(ModelRc::new(VecModel::from(vec![instance(false)])));
     let clear = lookup("gui-clear-filters");
     for (active, offered) in [(0, false), (1, true), (3, true)] {
@@ -261,8 +231,7 @@ fn a_server_card_star_toggles_the_server() {
             .borrow_mut()
             .push((kind.to_string(), id.to_string(), favorite));
     });
-    ui.set_page(1);
-    ui.set_global_servers(ModelRc::new(VecModel::from(vec![server(false)])));
+    ui.set_listed_servers(ModelRc::new(VecModel::from(vec![server(false)])));
     settle(&ui);
 
     let star = ElementHandle::find_by_accessible_label(

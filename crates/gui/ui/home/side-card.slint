@@ -1,0 +1,20 @@
+// The face of a card in the right column: the hard shadow and a column of lines.
+
+import { Plate } from "../components/surface.slint";
+import { Theme } from "../theme.slint";
+
+export component SideCard inherits Rectangle {
+    // The height of the lines; a card with wrapped text gives its own.
+    in property <length> content-height: body.preferred-height;
+    height: root.content-height;
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: Theme.shadow-offset-card;
+        body := VerticalLayout {
+            padding: 16px + Theme.strong-border-width;
+            spacing: 12px;
+            @children
+        }
+    }
+}

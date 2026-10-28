@@ -140,6 +140,11 @@ pub struct ClientRecord {
     /// decided where it is created, from its own source.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_pack_mod_version_changes: bool,
+    /// The issue or bug report this instance reproduces, as an http(s) address
+    /// exactly as the user gave it. Kept in the instance's metadata alone: the
+    /// index has no column for it before 1.0.0 (ADR 0033).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_link: Option<String>,
     /// Why this instance is not straightforwardly runnable, if it is not. The
     /// launcher never presents an approximation as faithful.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -268,6 +273,9 @@ pub struct NewClient {
     pub loader: LoaderSelection,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
+    /// The issue address to record on the new instance, already validated by
+    /// the caller.
+    pub issue_link: Option<String>,
 }
 
 impl NewClient {
@@ -284,6 +292,7 @@ impl NewClient {
             loader,
             source: ImportSource::manual(),
             attention: Vec::new(),
+            issue_link: None,
         }
     }
 
@@ -302,6 +311,12 @@ impl NewClient {
     #[must_use]
     pub fn with_attention(mut self, attention: Vec<AttentionReason>) -> Self {
         self.attention = attention;
+        self
+    }
+
+    #[must_use]
+    pub fn with_issue_link(mut self, issue_link: impl Into<String>) -> Self {
+        self.issue_link = Some(issue_link.into());
         self
     }
 }
@@ -326,6 +341,9 @@ pub struct NewServer {
     pub creation: ServerCreationSource,
     pub network: ServerNetworkSettings,
     pub port_selection: ServerPortSelection,
+    /// Whether players are checked against Mojang's accounts, when the caller
+    /// chose; otherwise the configured default applies.
+    pub online_mode: Option<bool>,
     pub source: ImportSource,
     pub attention: Vec<AttentionReason>,
 }
@@ -335,7 +353,11 @@ pub struct NewServer {
 pub enum ServerPortSelection {
     #[default]
     Automatic,
+    /// The caller's whole network settings, port included.
     Explicit(u16),
+    /// Only the port is the caller's; access and bind address come from the
+    /// configured server defaults.
+    PortOnly(u16),
 }
 
 impl NewServer {
@@ -354,6 +376,7 @@ impl NewServer {
             },
             network: ServerNetworkSettings::default(),
             port_selection: ServerPortSelection::Automatic,
+            online_mode: None,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
@@ -382,9 +405,26 @@ impl NewServer {
             creation: ServerCreationSource::LinkedClient { client_id },
             network: ServerNetworkSettings::default(),
             port_selection: ServerPortSelection::Automatic,
+            online_mode: None,
             source: ImportSource::manual(),
             attention: Vec::new(),
         }
+    }
+
+    /// Chooses whether players are checked against Mojang's accounts, in place
+    /// of the configured default.
+    #[must_use]
+    pub const fn with_online_mode(mut self, online: bool) -> Self {
+        self.online_mode = Some(online);
+        self
+    }
+
+    /// Fixes the port and leaves the rest of the network settings to the
+    /// configured defaults.
+    #[must_use]
+    pub const fn with_port(mut self, port: u16) -> Self {
+        self.port_selection = ServerPortSelection::PortOnly(port);
+        self
     }
 
     #[must_use]
@@ -605,6 +645,7 @@ mod tests {
                 ..JvmSettings::default()
             }),
             allow_pack_mod_version_changes: false,
+            issue_link: Some("https://example.invalid/issues/42".to_owned()),
             attention: Vec::new(),
             created_at: now,
             updated_at: now,

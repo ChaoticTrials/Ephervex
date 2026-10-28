@@ -709,6 +709,24 @@ mod tests {
         );
     }
 
+    /// Dark and light stay valid parents, so a theme written for either keeps
+    /// loading.
+    #[test]
+    fn every_built_in_name_is_a_valid_parent() {
+        for (name, parent) in [
+            ("workbench", ApplicationColorScheme::Workbench),
+            ("dark", ApplicationColorScheme::Dark),
+            ("light", ApplicationColorScheme::Light),
+        ] {
+            let (theme, problems) = parse_theme("mine", &format!("parent = \"{name}\"\n"));
+            assert!(problems.is_empty(), "{name}: {problems:?}");
+            assert_eq!(theme.expect("usable").parent, parent, "{name}");
+        }
+        let (theme, problems) = parse_theme("mine", "parent = \"solarized\"\n");
+        assert!(theme.is_none());
+        assert_eq!(problems, [Problem::UnknownParent("solarized".to_owned())]);
+    }
+
     #[test]
     fn a_seasonal_theme_is_not_a_parent() {
         let (theme, problems) = parse_theme("t", "parent = \"halloween\"");
@@ -722,7 +740,7 @@ mod tests {
         assert!(problems.is_empty());
         let theme = theme.expect("usable");
         assert_eq!(theme.name, "plain");
-        assert_eq!(theme.parent, ApplicationColorScheme::default());
+        assert_eq!(theme.parent, ApplicationColorScheme::Workbench);
         assert!(theme.colors.is_empty());
     }
 
@@ -829,6 +847,27 @@ mod tests {
         let branding = theme.expect("usable").branding;
         assert_eq!(branding.logo.expect("logo").as_str(), "logo.png");
         assert_eq!(branding.icon.expect("icon").as_str(), "icon.png");
+    }
+
+    /// The example is a dark theme with colors of its own, so it is held to the
+    /// same readable pairs the built-in palette is.
+    #[test]
+    fn the_documented_example_keeps_every_drawn_pair_readable() {
+        use slint::ComponentHandle as _;
+
+        i_slint_backend_testing::init_no_event_loop();
+        let ui = crate::ui::AppWindow::new().expect("window");
+        let (theme, problems) = parse_theme("modrinth", EXAMPLE);
+        assert!(problems.is_empty(), "{problems:?}");
+        let theme = theme.expect("usable");
+        crate::palette::apply_theme(
+            &ui,
+            &ShownTheme::Recorded(theme.preference()),
+            std::slice::from_ref(&theme),
+        );
+        let palette = ui.global::<crate::ui::Theme>().get_palette();
+        let found = crate::palette::drawn_pairs::shortfalls(&palette);
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]
@@ -1245,7 +1284,11 @@ mod tests {
             embedded_branding(&table, &ApplicationColorScheme::Dark),
             BrandingImages::default()
         );
-        for scheme in [ApplicationColorScheme::Dark, ApplicationColorScheme::Light] {
+        for scheme in [
+            ApplicationColorScheme::Workbench,
+            ApplicationColorScheme::Dark,
+            ApplicationColorScheme::Light,
+        ] {
             assert_eq!(
                 embedded_branding(BUILT_IN_BRANDING, &scheme),
                 BrandingImages::default()

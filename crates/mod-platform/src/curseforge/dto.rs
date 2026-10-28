@@ -122,6 +122,12 @@ pub struct CurseForgeProject {
     /// its `gameVersions`.
     #[serde(default)]
     pub latest_files: Vec<CurseForgeProjectFile>,
+    /// How many times the project has been downloaded.
+    ///
+    /// Read leniently: a figure that is missing or is not a plain count leaves
+    /// it unknown rather than refusing the whole project over a statistic.
+    #[serde(default, deserialize_with = "crate::model::lenient_count")]
+    pub download_count: Option<u64>,
 }
 
 /// One credited author of a project.
@@ -324,6 +330,31 @@ pub(super) const HASH_ALGO_SHA1: u32 = 1;
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    fn downloads_of(count: &str) -> Option<u64> {
+        let document =
+            format!(r#"{{"id":1,"gameId":432,"name":"A","slug":"a","downloadCount":{count}}}"#);
+        serde_json::from_str::<CurseForgeProject>(&document)
+            .expect("the project parses whatever its count says")
+            .download_count
+    }
+
+    #[test]
+    fn a_download_count_is_read_as_a_number_and_anything_else_is_unknown() {
+        assert_eq!(downloads_of("1234567"), Some(1_234_567));
+        assert_eq!(downloads_of("2.5e6"), Some(2_500_000));
+        assert_eq!(downloads_of("12.6"), Some(13));
+        for odd in ["null", "-3", "\"many\"", "true"] {
+            assert_eq!(downloads_of(odd), None, "{odd}");
+        }
+    }
+
+    #[test]
+    fn a_project_without_a_download_count_has_none() {
+        let project: CurseForgeProject =
+            serde_json::from_str(r#"{"id":1,"gameId":432,"name":"A","slug":"a"}"#).unwrap();
+        assert_eq!(project.download_count, None);
+    }
 
     #[test]
     fn a_game_document_is_read_out_of_the_data_envelope() {

@@ -46,24 +46,29 @@ use crate::ui::{
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, MenuRow, ModRow,
     ModSearchRow, ModVersionRow, NameRules, PackContentRow, PendingEntityRow, PromoteServerRow,
     PropertyRules, RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup,
-    ServerPropertyRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
+    ServerPropertyRow, ServerRow, SnapshotRow, Theme, ThemeSwatch, WindowSizePreview,
+    WorkflowActionRow, WorkspaceSurfaceRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod diagnosis_flow;
+mod home;
 mod instance_list;
 mod java_runtime;
 mod log_views;
 mod mod_views;
+mod server_list;
 mod server_tools;
 mod storage_maintenance;
 mod workspace;
 
 use diagnosis_flow::DiagnosisFlowState;
+use home::{HomeHost, HomeState};
 use instance_list::{InstanceListState, Listed, attach_icon_pool, host_icon_slot};
 use log_views::LogViews;
 use mod_views::ModViews;
+use server_list::ServerListState;
 use server_tools::{LinkedClaim, LinkedRefusal, ServerAction, ServerTools};
 use workspace::{PaneChange, WorkspaceState};
 
@@ -92,6 +97,11 @@ enum CreationKey {
         loader: String,
         loader_version: String,
         persistent: bool,
+        issue_link: String,
+        linked_server: String,
+        server_pack: Option<PathBuf>,
+        server_port: Option<u16>,
+        server_online: bool,
     },
     Server {
         name: String,
@@ -101,6 +111,7 @@ enum CreationKey {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        online: bool,
         /// The archive this server's content comes from, empty when it has
         /// none. Part of the key so that picking a different archive is a
         /// different creation rather than a second click on the same one.
@@ -1839,12 +1850,20 @@ impl HostLifecycle {
         let stage = self.stage_of(host);
         let can_restart = self.restartable.contains(&instance.to_string());
         let pair_starting = self.pair_starting(host);
+        let state_line = presentation::client_state_line(
+            &row.state_kind,
+            stage,
+            row.needs_attention,
+            &row.last_run,
+        );
         let changed = row.restart_stage != stage
             || row.can_restart != can_restart
-            || row.pair_starting != pair_starting;
+            || row.pair_starting != pair_starting
+            || row.state_line != state_line;
         row.restart_stage = stage.into();
         row.can_restart = can_restart;
         row.pair_starting = pair_starting;
+        row.state_line = state_line.into();
         changed
     }
 
@@ -1965,7 +1984,7 @@ fn stamp_host_lifecycle(ui: &AppWindow, lifecycle: &HostLifecycle) {
     stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
         lifecycle.stamp_client(row)
     });
-    stamp_rows(&ui.get_global_servers(), |row: &mut ServerRow| {
+    stamp_rows(&ui.get_listed_servers(), |row: &mut ServerRow| {
         lifecycle.stamp_server(row)
     });
     let views = ui.get_host_views();
@@ -2008,6 +2027,41 @@ fn apply_pair_start_settled(
     {
         stamp_host_lifecycle(ui, &lifecycle.borrow());
     }
+}
+
+/// Marks each list row whose host a pane currently shows, in every list that
+/// has one, and clears the mark on the rest.
+fn stamp_open_hosts(ui: &AppWindow) {
+    let views = ui.get_host_views();
+    let open: Vec<(SharedString, SharedString)> = (0..views.row_count())
+        .filter_map(|index| views.row_data(index))
+        .map(|view| (view.kind, view.id))
+        .collect();
+    let shown = |kind: &str, id: &SharedString| {
+        open.iter()
+            .any(|(open_kind, open_id)| open_kind == kind && open_id == id)
+    };
+    stamp_rows(&ui.get_instances(), |row: &mut InstanceRow| {
+        let now = shown("client", &row.id);
+        std::mem::replace(&mut row.open, now) != now
+    });
+    let stamp_server = |row: &mut ServerRow| {
+        let now = shown("server", &row.id);
+        std::mem::replace(&mut row.open, now) != now
+    };
+    stamp_rows(&ui.get_listed_servers(), stamp_server);
+}
+
+/// How many creations are in progress, from what the window lists.
+fn building_count(ui: &AppWindow) -> usize {
+    let standalone_servers = ui
+        .get_pending_servers()
+        .iter()
+        .filter(|row| row.linked_client_id.is_empty())
+        .count();
+    ui.get_pending_instances().row_count()
+        + standalone_servers
+        + ui.get_linked_pending_servers().row_count()
 }
 
 fn stamp_rows<T: Clone + 'static>(list: &ModelRc<T>, mut stamp: impl FnMut(&mut T) -> bool) {
@@ -2390,6 +2444,10 @@ enum DropIntent {
 fn drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> DropIntent {
     match ui.get_modal().as_str() {
         "create-server" => DropIntent::ServerPack(ServerPackTarget::NewServer),
+        // Once a server is wanted a drop there names its files.
+        "create-instance" if ui.get_create_linked_server() => {
+            DropIntent::ServerPack(ServerPackTarget::NewInstance)
+        }
         // The import dialog asks for two archives once a server is wanted, and
         // the pack itself is already chosen by the time that toggle can be
         // reached. So a drop there names the server files.
@@ -2419,18 +2477,27 @@ enum ModsListsOnScreen {
     Several,
 }
 
-fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
-    if !ui.get_workspace_open() || !matches!(ui.get_page(), INSTANCES_PAGE | SERVERS_PAGE) {
-        return ModsListsOnScreen::None;
-    }
-    let Some(layout) = workspace.layout() else {
-        return ModsListsOnScreen::None;
-    };
-    let mut hosts = layout
-        .panes()
-        .into_iter()
+/// Whether the host panes are what the page shows, not Home or the settings.
+fn host_panes_on_screen(ui: &AppWindow) -> bool {
+    ui.get_workspace_open() && !ui.get_settings_open()
+}
+
+/// The hosts whose Mods list is visible: the page's panes unless a fullscreen
+/// quick view covers them, and the quick view.
+fn mods_hosts_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> Vec<InstalledHost> {
+    let page = (host_panes_on_screen(ui) && !ui.get_quick_view_fullscreen())
+        .then(|| workspace.layout())
+        .flatten();
+    page.into_iter()
+        .chain(workspace.quick())
+        .flat_map(WorkspaceLayout::panes)
         .filter(|placed| placed.pane.surface() == Surface::Mods)
-        .map(|placed| placed.pane.host());
+        .map(|placed| placed.pane.host())
+        .collect()
+}
+
+fn mods_lists_on_screen(ui: &AppWindow, workspace: &WorkspaceState) -> ModsListsOnScreen {
+    let mut hosts = mods_hosts_on_screen(ui, workspace).into_iter();
     let Some(host) = hosts.next() else {
         return ModsListsOnScreen::None;
     };
@@ -2563,6 +2630,8 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         plan_requests: Rc::default(),
         properties: Rc::default(),
         commands: backend.commands.clone(),
+        server_list: Rc::default(),
+        home: Rc::default(),
     };
     register_i18n(ui);
     register_toasts(ui);
@@ -2580,6 +2649,8 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         &workspace,
         keys,
     );
+    // Home is the first page, and nothing else announces that it appeared.
+    ui.invoke_home_appeared();
 
     let weak = ui.as_weak();
     let poll_receiver = Rc::clone(&receiver);
@@ -2599,16 +2670,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        let window = ui.window();
-        let logical_width = f64::from(window.size().width) / f64::from(window.scale_factor());
-        let show_inspector = logical_width >= 1180.0;
-        let compact_layout = !show_inspector;
-        if ui.get_show_inspector() != show_inspector {
-            ui.set_show_inspector(show_inspector);
-        }
-        if ui.get_compact_layout() != compact_layout {
-            ui.set_compact_layout(compact_layout);
-        }
         let mut log_changes = HashMap::new();
         let mut worker_gone = take_worker_stopped();
         loop {
@@ -2648,10 +2709,11 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
             report_worker_stopped(&ui);
         }
         poll_workspace.logs.borrow_mut().settle(log_changes);
+        poll_workspace.publish_home_when_due(&ui);
     });
 
     // A second is enough for uptime and for CPU to read smoothly, and it costs
-    // nothing while the page is closed, which is nearly always.
+    // nothing while Home is not on screen.
     let running_weak = ui.as_weak();
     let running_commands = backend.commands.clone();
     let running_timer = Timer::default();
@@ -2659,7 +2721,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         let Some(ui) = running_weak.upgrade() else {
             return;
         };
-        if ui.get_page() == RUNNING_PAGE && !ui.get_workspace_open() {
+        if ui.get_shows_home() {
             send(&running_commands, Command::LoadRunning);
         }
     });
@@ -2726,22 +2788,6 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         workspace: workspace.state,
     }
 }
-
-/// The navigation entry that lists client instances.
-///
-/// Both workspaces hang off a page, so navigating to one means setting the page
-/// as well. Named for the same reason as the others: a bare number in that
-/// assignment would say nothing about where the user is being sent.
-const INSTANCES_PAGE: i32 = 0;
-
-/// The navigation entry that lists servers, and hosts the server workspace.
-const SERVERS_PAGE: i32 = 1;
-
-/// The navigation entry that lists what is running.
-///
-/// Named because the poll that feeds it has to know when it is on screen, and a
-/// bare number in that check would say nothing about which screen it is.
-const RUNNING_PAGE: i32 = 2;
 
 /// How often the local date is checked against the seasons. A season's theme
 /// arrives within this long of midnight.
@@ -2873,6 +2919,18 @@ fn register_create_server(
     commands: &Sender<Command>,
     creations: Rc<RefCell<CreationTracker>>,
 ) {
+    let weak = ui.as_weak();
+    ui.on_server_link_index(move |id| {
+        weak.upgrade().map_or(0, |ui| {
+            let position = ui
+                .get_server_link_ids()
+                .iter()
+                .position(|known| known == id);
+            position
+                .and_then(|index| i32::try_from(index).ok())
+                .unwrap_or(0)
+        })
+    });
     let sender = commands.clone();
     let weak = ui.as_weak();
     ui.on_submit_create_server(
@@ -2884,7 +2942,8 @@ fn register_create_server(
               persistent,
               automatic_port,
               port,
-              server_pack| {
+              server_pack,
+              online| {
             let linked = !client.is_empty();
             let port = if automatic_port {
                 None
@@ -2918,6 +2977,7 @@ fn register_create_server(
                 },
                 persistent,
                 port,
+                online,
                 server_pack: server_pack.as_str().to_owned(),
             };
             let pending = pending_creation(&key, false);
@@ -2948,6 +3008,7 @@ fn register_create_server(
                     loader_version: loader_version.into(),
                     persistent,
                     port,
+                    online,
                     server_pack: (!server_pack.is_empty())
                         .then(|| PathBuf::from(server_pack.as_str())),
                 },
@@ -2970,6 +3031,23 @@ fn register_server_pack_choice(ui: &AppWindow, commands: &Sender<Command>) {
                 target: ServerPackTarget::NewServer,
             },
         );
+    });
+
+    let sender = commands.clone();
+    ui.on_choose_instance_server_pack(move || {
+        send(
+            &sender,
+            Command::PickServerPack {
+                target: ServerPackTarget::NewInstance,
+            },
+        );
+    });
+
+    let weak = ui.as_weak();
+    ui.on_clear_instance_server_pack(move || {
+        if let Some(ui) = weak.upgrade() {
+            set_server_pack(&ui, ServerPackTarget::NewInstance, None);
+        }
     });
 
     let sender = commands.clone();
@@ -3137,6 +3215,10 @@ fn set_server_pack(ui: &AppWindow, target: ServerPackTarget, path: Option<&Path>
             ui.set_import_server_pack(full);
             ui.set_import_server_pack_name(name);
         }
+        ServerPackTarget::NewInstance => {
+            ui.set_create_instance_server_pack(full);
+            ui.set_create_instance_server_pack_name(name);
+        }
     }
 }
 
@@ -3155,7 +3237,13 @@ fn register_callbacks(
     workspace: &Workspace,
     keys: &BindingCapture,
 ) {
-    register_instance_list(ui, commands, instance_list, lifecycle);
+    register_instance_list(
+        ui,
+        commands,
+        instance_list,
+        &workspace.server_list,
+        lifecycle,
+    );
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, creations);
     register_mod_actions(ui, commands, workspace);
@@ -3163,9 +3251,6 @@ fn register_callbacks(
     register_import_flow(ui, commands, import_flow, creations);
     register_server_pack_choice(ui, commands);
     register_create_server(ui, commands, Rc::clone(creations));
-
-    let sender = commands.clone();
-    ui.on_select_server(move |_| send(&sender, Command::Refresh));
 
     register_server_actions(ui, commands, workspace);
     register_workspace(ui, workspace);
@@ -3681,6 +3766,16 @@ fn register_create_instance_naming(ui: &AppWindow, commands: &Sender<Command>) {
         // The field starts empty, so the suggestion beside it is what an
         // untouched dialog means.
         ui.set_create_name(SharedString::default());
+        ui.set_create_issue_link(SharedString::default());
+        ui.set_create_linked_server(false);
+        ui.set_create_linked_server_name(SharedString::default());
+        ui.set_create_linked_port(if ui.get_stored_server_port_custom() {
+            ui.get_stored_server_port()
+        } else {
+            SharedString::default()
+        });
+        ui.set_create_linked_online(ui.get_default_server_online());
+        set_server_pack(&ui, ServerPackTarget::NewInstance, None);
         ui.set_modal_error(SharedString::default());
         send(&sender, Command::LoadMinecraftReleases);
         if !ui.get_create_minecraft().is_empty() {
@@ -3808,21 +3903,23 @@ fn next_launch_handle() -> String {
     )
 }
 
-/// The Instances page's list controls, and the favorite, group and icon
-/// actions on hosts.
+/// The host list's controls, and the favorite, group and icon actions on hosts.
 fn register_instance_list(
     ui: &AppWindow,
     commands: &Sender<Command>,
     list: &Rc<RefCell<InstanceListState>>,
+    servers: &Rc<RefCell<ServerListState>>,
     lifecycle: &Rc<RefCell<HostLifecycle>>,
 ) {
     attach_icon_pool(ui);
     let weak = ui.as_weak();
     let shown = Rc::clone(list);
+    let shown_servers = Rc::clone(servers);
     let stamped = Rc::clone(lifecycle);
     ui.on_instance_view_changed(move || {
         if let Some(ui) = weak.upgrade() {
             shown.borrow().render(&ui);
+            shown_servers.borrow().render(&ui);
             stamp_host_lifecycle(&ui, &stamped.borrow());
         }
     });
@@ -3844,6 +3941,9 @@ fn register_instance_list(
         }
         send(&sender, Command::SetInstanceSort(sort));
     });
+
+    register_case_changes(ui, commands);
+    register_issue_link(ui, commands);
 
     let sender = commands.clone();
     ui.on_set_favorite(move |kind, id, favorite| {
@@ -3889,6 +3989,104 @@ fn register_instance_list(
     });
 }
 
+/// Submitting the New Instance dialog.
+fn register_create_instance(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    creations: &Rc<RefCell<CreationTracker>>,
+) {
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let submit_creations = Rc::clone(creations);
+    ui.on_submit_create_instance(
+        move |name,
+              minecraft,
+              loader,
+              loader_version,
+              persistent,
+              issue_link,
+              with_server,
+              server_name,
+              server_pack,
+              server_port,
+              server_online| {
+            // Refused here, with the dialog still open, so a mistyped address is
+            // fixed where it was typed rather than reported after the dialog is gone.
+            if let Err(error) = ephervex_core::validated_issue_link(&issue_link) {
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_modal_error(backend::localized_error(&error).into());
+                }
+                return;
+            }
+            // An empty name takes the suggestion the dialog shows.
+            let linked_server = if !with_server {
+                String::new()
+            } else if server_name.trim().is_empty() {
+                backend::suggested_server_name(name.trim())
+            } else {
+                server_name.trim().to_owned()
+            };
+            // Files only mean something to a server that is wanted.
+            let server_pack = (with_server && !server_pack.is_empty())
+                .then(|| PathBuf::from(server_pack.as_str()));
+            // An empty port leaves the server's to be chosen; one that is
+            // typed is checked here, with the dialog still open.
+            let server_port = if with_server && !server_port.trim().is_empty() {
+                let validation = validate_port(server_port.trim());
+                if !validation.valid {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_modal_error(validation.message.into());
+                    }
+                    return;
+                }
+                server_port.trim().parse::<u16>().ok()
+            } else {
+                None
+            };
+            let key = CreationKey::Client {
+                name: name.trim().to_owned(),
+                minecraft: minecraft.as_str().to_owned(),
+                loader: loader.as_str().to_owned(),
+                loader_version: loader_version.as_str().to_owned(),
+                persistent,
+                issue_link: issue_link.trim().to_owned(),
+                linked_server: linked_server.clone(),
+                server_pack: server_pack.clone(),
+                server_port,
+                server_online,
+            };
+            let pending = pending_creation(&key, false);
+            let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
+                }
+                return;
+            };
+            if let Some(ui) = weak.upgrade() {
+                ui.set_modal(SharedString::default());
+                ui.set_modal_error(SharedString::default());
+                apply_pending_creations(&ui, &submit_creations.borrow());
+            }
+            send(
+                &sender,
+                Command::CreateClient {
+                    request_id,
+                    name: name.into(),
+                    minecraft: minecraft.into(),
+                    loader: loader.into(),
+                    loader_version: loader_version.into(),
+                    persistent,
+                    issue_link: issue_link.trim().into(),
+                    linked_server,
+                    server_pack,
+                    server_port,
+                    server_online,
+                },
+            );
+        },
+    );
+}
+
 fn register_client_actions(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -3896,43 +4094,7 @@ fn register_client_actions(
 ) {
     register_promotion_actions(ui, commands);
     register_pack_link_actions(ui, commands);
-    let sender = commands.clone();
-    let weak = ui.as_weak();
-    let submit_creations = Rc::clone(creations);
-    ui.on_submit_create_instance(move |name, minecraft, loader, loader_version, persistent| {
-        let key = CreationKey::Client {
-            name: name.trim().to_owned(),
-            minecraft: minecraft.as_str().to_owned(),
-            loader: loader.as_str().to_owned(),
-            loader_version: loader_version.as_str().to_owned(),
-            persistent,
-        };
-        let pending = pending_creation(&key, false);
-        let Some(request_id) = submit_creations.borrow_mut().accept(key, pending) else {
-            if let Some(ui) = weak.upgrade() {
-                ui.invoke_present_toast(lookup("gui-creation-already-running").into(), true);
-            }
-            return;
-        };
-        if let Some(ui) = weak.upgrade() {
-            ui.set_modal(SharedString::default());
-            ui.set_modal_error(SharedString::default());
-            apply_pending_creations(&ui, &submit_creations.borrow());
-        }
-        send(
-            &sender,
-            Command::CreateClient {
-                request_id,
-                name: name.into(),
-                minecraft: minecraft.into(),
-                loader: loader.into(),
-                loader_version: loader_version.into(),
-                persistent,
-            },
-        );
-    });
-
-    register_instance_selection(ui, commands);
+    register_create_instance(ui, commands, creations);
 
     let sender = commands.clone();
     ui.on_kill_instance(move |id, launch| {
@@ -4221,6 +4383,78 @@ fn apply_loader_options(ui: &AppWindow, form: &str, minecraft: &str) {
             ui.set_create_loader_versions(model(Vec::new()));
         }
     }
+}
+
+/// The steps, note, and reproduced count of an instance's case.
+fn register_case_changes(ui: &AppWindow, commands: &Sender<Command>) {
+    fn change(commands: &Sender<Command>, client: &str, change: backend::CaseChange) {
+        if let Ok(client) = client.parse() {
+            send(commands, Command::ChangeCase { client, change });
+        }
+    }
+    let sender = commands.clone();
+    ui.on_case_add_step(move |client, text| {
+        change(
+            &sender,
+            &client,
+            backend::CaseChange::AddStep(text.to_string()),
+        );
+    });
+    let sender = commands.clone();
+    ui.on_case_set_step_done(move |client, step, done| {
+        if let Ok(step) = u32::try_from(step) {
+            change(
+                &sender,
+                &client,
+                backend::CaseChange::SetStepDone { step, done },
+            );
+        }
+    });
+    let sender = commands.clone();
+    ui.on_case_remove_step(move |client, step| {
+        if let Ok(step) = u32::try_from(step) {
+            change(&sender, &client, backend::CaseChange::RemoveStep(step));
+        }
+    });
+    let sender = commands.clone();
+    ui.on_case_save_note(move |client, note| {
+        change(
+            &sender,
+            &client,
+            backend::CaseChange::SetNote(note.to_string()),
+        );
+    });
+    let sender = commands.clone();
+    ui.on_case_count_reproduced(move |client| {
+        change(&sender, &client, backend::CaseChange::CountReproduced);
+    });
+    let sender = commands.clone();
+    ui.on_case_reset_reproduced(move |client| {
+        change(&sender, &client, backend::CaseChange::ResetReproduced);
+    });
+}
+
+/// Setting an instance's issue link, and opening it in the browser.
+fn register_issue_link(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_set_issue_link(move |client, link| {
+        if let Ok(client) = client.parse() {
+            send(
+                &sender,
+                Command::SetIssueLink {
+                    client,
+                    link: link.to_string(),
+                },
+            );
+        }
+    });
+    let weak = ui.as_weak();
+    ui.on_open_issue_link(move |link| {
+        let opened = matches!(ephervex_core::open_issue_link(&link), Ok(true));
+        if !opened && let Some(ui) = weak.upgrade() {
+            ui.invoke_present_toast(lookup("gui-issue-link-open-failed").into(), true);
+        }
+    });
 }
 
 /// Pinning and unpinning a Minecraft release.
@@ -4688,26 +4922,6 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
                     version: version.to_string(),
                 },
             );
-        }
-    });
-}
-
-fn register_instance_selection(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
-    // What this handler last acted on. The markup assigns `selected-instance-id`
-    // before calling in, so the property cannot tell a new selection from a
-    // repeat of the current one.
-    let selected = Rc::new(RefCell::new(String::new()));
-    ui.on_select_instance(move |id| {
-        let repeat = *selected.borrow() == id.as_str();
-        if !repeat {
-            id.as_str().clone_into(&mut selected.borrow_mut());
-        }
-        // Clicking the already-selected card changes nothing that a snapshot
-        // would answer, and asking for one anyway is what used to rebuild the
-        // list between the two halves of a double click.
-        if !repeat {
-            send(&sender, Command::Refresh);
         }
     });
 }
@@ -5242,22 +5456,25 @@ struct Workspace {
     properties: Rc<RefCell<server_property_form::ServerPropertyForms>>,
     /// What a surface asks the worker for when a pane opens it.
     commands: Sender<Command>,
+    /// The servers the host list shows.
+    server_list: Rc<RefCell<ServerListState>>,
+    /// The Home page's data, including failed runs of hosts no pane shows.
+    home: Rc<RefCell<HomeState>>,
 }
 
 impl Workspace {
     /// Renders the workspace and gives a pane what its new host and surface need.
     fn present(&self, ui: &AppWindow, change: Option<PaneChange>) {
-        let panes = self
-            .state
-            .borrow()
-            .layout()
-            .map_or_else(Vec::new, |layout| {
-                layout
-                    .panes()
-                    .iter()
-                    .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
-                    .collect()
-            });
+        let panes = {
+            let state = self.state.borrow();
+            state
+                .layout()
+                .into_iter()
+                .chain(state.quick())
+                .flat_map(WorkspaceLayout::panes)
+                .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                .collect::<Vec<_>>()
+        };
         let mut logs = self.logs.borrow_mut();
         logs.sync(&panes);
         let entered = self
@@ -5266,19 +5483,27 @@ impl Workspace {
             .render(ui, &self.lifecycle.borrow(), &logs);
         drop(logs);
         self.follow_hosts(ui, &entered);
-        let state = self.state.borrow();
-        // A single pane is the workspace of its host's page; a split belongs to
-        // the page it was opened from.
-        if let Some((host, _)) = state.single_content() {
-            ui.set_page(match host {
-                InstalledHost::Instance(_) => INSTANCES_PAGE,
-                InstalledHost::Server(_) => SERVERS_PAGE,
-            });
-        }
-        drop(state);
         if let Some(change) = change {
             apply_pane_change(ui, self, change);
         }
+    }
+
+    /// Writes the Home page from what the controller currently knows.
+    fn publish_home(&self, ui: &AppWindow) {
+        let mut home = self.home.borrow_mut();
+        home.set_building(building_count(ui));
+        home.publish(
+            ui,
+            chrono::Utc::now(),
+            chrono::Timelike::hour(&chrono::Local::now()),
+        );
+    }
+
+    /// Writes the Home page when something changed or a minute has passed.
+    fn publish_home_when_due(&self, ui: &AppWindow) {
+        let mut home = self.home.borrow_mut();
+        home.set_building(building_count(ui));
+        home.publish_when_due(ui);
     }
 
     /// Redraws every host view from the newest rows, as a snapshot requires.
@@ -5308,6 +5533,15 @@ impl Workspace {
             load_host(ui, host);
             java_runtime::load(&self.commands, host, false);
         }
+        // What happened to the hosts shown changes whenever one of them runs
+        // or stops, which is also when the lists refresh.
+        // Only a client shows its history, on the Case tab.
+        for &host in shown
+            .iter()
+            .filter(|host| matches!(host, InstalledHost::Instance(_)))
+        {
+            send(&self.commands, Command::LoadHostEvents(host));
+        }
     }
 
     /// Changes what a feature reported about a host, in every pane showing it.
@@ -5335,6 +5569,8 @@ impl Workspace {
     }
 
     fn open(&self, ui: &AppWindow, host: InstalledHost, surface: Surface) {
+        // The panes are not drawn under the settings.
+        ui.set_settings_open(false);
         let change = self.state.borrow_mut().open(host, surface);
         self.present(ui, Some(change));
     }
@@ -5342,6 +5578,20 @@ impl Workspace {
     fn close(&self, ui: &AppWindow) {
         self.state.borrow_mut().close();
         self.present(ui, None);
+    }
+
+    /// Shows `host` over the window on its overview, leaving the workspace as it is.
+    fn open_quick_view(&self, ui: &AppWindow, host: InstalledHost) {
+        let change = self.state.borrow_mut().open_quick(host, Surface::DEFAULT);
+        ui.set_quick_view_fullscreen(false);
+        self.present(ui, Some(change));
+    }
+
+    fn close_quick_view(&self, ui: &AppWindow) {
+        if self.state.borrow_mut().close_quick() {
+            ui.set_quick_view_fullscreen(false);
+            self.present(ui, None);
+        }
     }
 
     fn change_pane(
@@ -5362,6 +5612,7 @@ impl Workspace {
     /// Back returns to the client that started it. A split is the user's own
     /// arrangement and is left as it is.
     fn show_console(&self, ui: &AppWindow, server: InstalledHost) {
+        ui.set_settings_open(false);
         let content = self.state.borrow().single_content();
         let layout_open = self.state.borrow().layout().is_some();
         match content {
@@ -5479,6 +5730,7 @@ impl Workspace {
     /// from it is added beside the other where the layout has room, the
     /// server on its console.
     fn show_pair(&self, ui: &AppWindow, client: InstalledHost, server: InstalledHost) {
+        ui.set_settings_open(false);
         if self.state.borrow().layout().is_none() {
             self.open(ui, client, Surface::DEFAULT);
         }
@@ -5526,6 +5778,29 @@ fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) 
         }
         _ => {}
     }
+}
+
+/// Writes what happened to a host into every pane showing it.
+fn apply_host_events(
+    workspace: &Workspace,
+    host: InstalledHost,
+    rows: &[crate::history_view::HistoryRow],
+) {
+    workspace.update(host, |view| {
+        // Written into the list already on screen, so a read that found
+        // nothing new rebuilds nothing.
+        view.events = workspace::reuse(
+            &view.events,
+            rows.iter()
+                .map(|row| crate::ui::CaseEventRow {
+                    time: row.time.as_str().into(),
+                    text: row.text.as_str().into(),
+                    detail: row.detail.as_str().into(),
+                    tone: row.tone.into(),
+                })
+                .collect(),
+        );
+    });
 }
 
 /// Asks for everything a host's workspace shows, once, as it enters the workspace.
@@ -5616,8 +5891,50 @@ fn register_workspace(ui: &AppWindow, workspace: &Workspace) {
         });
     });
 
+    register_quick_view(ui, workspace);
     register_pane_layout(ui, workspace);
     register_linked_pair(ui, workspace);
+}
+
+/// Showing a host over the window, and leaving it.
+fn register_quick_view(ui: &AppWindow, workspace: &Workspace) {
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_open_quick_view(move |kind, id| {
+        let (Some(ui), Some(host)) = (weak.upgrade(), workspace::parse_host(&kind, &id)) else {
+            return;
+        };
+        quick.open_quick_view(&ui, host);
+    });
+
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_close_quick_view(move || {
+        if let Some(ui) = weak.upgrade() {
+            quick.close_quick_view(&ui);
+        }
+    });
+
+    // The host the quick view shows becomes the page, on the surface it was on.
+    let weak = ui.as_weak();
+    let quick = workspace.clone();
+    ui.on_open_quick_view_as_page(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let content = quick.state.borrow().quick_content();
+        let Some((host, surface)) = content else {
+            return;
+        };
+        // One render, so the host never leaves the workspace's hosts in
+        // between and its feature state is kept.
+        ui.set_quick_view_fullscreen(false);
+        ui.set_settings_open(false);
+        let change = {
+            let mut state = quick.state.borrow_mut();
+            state.close_quick();
+            state.open(host, surface)
+        };
+        quick.present(&ui, Some(change));
+    });
 }
 
 /// Pairing a client with a linked server, showing a pane's paired host, and
@@ -5657,7 +5974,16 @@ fn register_linked_pair(ui: &AppWindow, workspace: &Workspace) {
         ) else {
             return;
         };
-        reveal.reveal_pair(&ui, Some(pane), host, Surface::DEFAULT, true);
+        // A pair is shown side by side in the workspace, so a request from
+        // the quick view makes its host the page first.
+        let from = if pane.is_quick_view() {
+            let content = reveal.state.borrow().quick_content();
+            ui.invoke_open_quick_view_as_page();
+            content.and_then(|(shown, _)| reveal.state.borrow().first_pane_showing(shown))
+        } else {
+            Some(pane)
+        };
+        reveal.reveal_pair(&ui, from, host, Surface::DEFAULT, true);
     });
 
     let weak = ui.as_weak();
@@ -6440,6 +6766,29 @@ fn server_property_row(row: server_property_form::PropertyRow) -> ServerProperty
     }
 }
 
+/// The Java page's own actions: reading and rereading the runtimes, and
+/// probing the executable named as the preferred Java.
+fn register_java_actions(ui: &AppWindow, commands: &Sender<Command>) {
+    let sender = commands.clone();
+    ui.on_load_java_runtimes(move || send(&sender, Command::LoadJavaRuntimes));
+
+    let sender = commands.clone();
+    ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
+
+    let sender = commands.clone();
+    let checking = ui.as_weak();
+    ui.on_check_java_path(move |path| {
+        if let Some(ui) = checking.upgrade() {
+            ui.set_java_path_checking(true);
+            ui.set_java_path_verdict(SharedString::default());
+        }
+        send(
+            &sender,
+            Command::CheckJavaPath(PathBuf::from(path.as_str())),
+        );
+    });
+}
+
 fn register_settings(
     ui: &AppWindow,
     commands: &Sender<Command>,
@@ -6501,11 +6850,7 @@ fn register_settings(
     });
     register_watched_folders(ui, commands);
 
-    let sender = commands.clone();
-    ui.on_load_java_runtimes(move || send(&sender, Command::LoadJavaRuntimes));
-
-    let sender = commands.clone();
-    ui.on_refresh_java(move || send(&sender, Command::RefreshJava));
+    register_java_actions(ui, commands);
 
     let sender = commands.clone();
     ui.on_remove_java_runtime(move |path| {
@@ -6595,6 +6940,20 @@ fn register_minecraft_defaults(
         minecraft_defaults::CATEGORIES
             .iter()
             .map(|category| SharedString::from(minecraft_defaults::category_label(*category)))
+            .collect(),
+    ));
+    ui.set_minecraft_category_tabs(model(
+        minecraft_defaults::CATEGORIES
+            .iter()
+            .enumerate()
+            .map(|(index, category)| WorkspaceSurfaceRow {
+                id: index.to_string().into(),
+                label: minecraft_defaults::category_label(*category).into(),
+            })
+            .chain(std::iter::once(WorkspaceSurfaceRow {
+                id: "raw".into(),
+                label: lookup("gui-minecraft-raw-tab").into(),
+            }))
             .collect(),
     ));
     ui.set_minecraft_aspect_labels(model(
@@ -7701,6 +8060,7 @@ fn string_model(values: Vec<String>) -> ModelRc<SharedString> {
 /// here, because a refreshed baseline can change both what the draft is and
 /// what a release would do with it.
 /// Applies a snapshot, handing back every host's row for the workspace.
+#[allow(clippy::too_many_arguments)]
 fn apply_snapshot_event(
     ui: &AppWindow,
     snapshot: Snapshot,
@@ -7708,6 +8068,7 @@ fn apply_snapshot_event(
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     settings_drafts: &Rc<RefCell<SettingsDrafts>>,
     instance_list: &Rc<RefCell<InstanceListState>>,
+    workspace: &Workspace,
     commands: &Sender<Command>,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let rows = apply_snapshot(
@@ -7716,6 +8077,8 @@ fn apply_snapshot_event(
         minecraft,
         &mut settings_drafts.borrow_mut(),
         &mut instance_list.borrow_mut(),
+        &mut workspace.server_list.borrow_mut(),
+        &mut workspace.home.borrow_mut(),
     );
     apply_pending_creations(ui, &creations.borrow());
     request_minecraft_preview(ui, minecraft, commands);
@@ -8011,6 +8374,42 @@ fn register_general_settings(ui: &AppWindow, commands: &Sender<Command>) {
     );
 
     let sender = commands.clone();
+    let weak = ui.as_weak();
+    ui.on_save_server_port_default(move |custom_port, port| {
+        // An automatic port does not depend on what the field holds.
+        if !custom_port {
+            send(
+                &sender,
+                Command::SaveServerPortDefault {
+                    custom_port,
+                    port: None,
+                },
+            );
+            return;
+        }
+        let checked = crate::presentation::validate_port(&port);
+        match port.parse::<u16>().ok().filter(|_| checked.valid) {
+            Some(port) => send(
+                &sender,
+                Command::SaveServerPortDefault {
+                    custom_port,
+                    port: Some(port),
+                },
+            ),
+            None => {
+                // The page goes back to what is stored, so it never shows a
+                // choice that was not saved.
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_default_server_port_custom(ui.get_stored_server_port_custom());
+                    ui.set_default_server_port(ui.get_stored_server_port());
+                    ui.set_default_server_port_editing(false);
+                    ui.invoke_present_toast(checked.message.into(), true);
+                }
+            }
+        }
+    });
+
+    let sender = commands.clone();
     ui.on_set_dependency_warning(move |warn| {
         send(&sender, Command::SaveDependencyWarning(warn));
     });
@@ -8056,7 +8455,7 @@ fn apply_local_mod_plan(
     };
     // A list still on screen, not merely the one they dropped onto: a plan
     // that arrives after they have navigated away has nowhere to land.
-    if !ui.get_workspace_open() || !workspace.shows(host, Surface::Mods) {
+    if !mods_hosts_on_screen(ui, workspace).contains(&host) {
         return;
     }
 
@@ -8187,6 +8586,17 @@ fn apply_run_failure(
         _ => true,
     };
     if current {
+        // Kept for every host, shown or not: Home lists the failure with a
+        // way to open the host.
+        workspace.home.borrow_mut().note_run_failure(
+            host,
+            diagnosis_flow::run_failure_title(
+                host,
+                view.as_ref()
+                    .is_some_and(|view| view.crash_report.is_some()),
+            ),
+            failure.clone(),
+        );
         diagnosis_flow::apply_run_failed(
             workspace,
             &mut workspace.diagnosis.borrow_mut(),
@@ -8266,11 +8676,13 @@ fn apply_event(
                 minecraft,
                 settings_drafts,
                 instance_list,
+                workspace,
                 commands,
             );
             lifecycle.borrow_mut().servers.observe(&servers);
             workspace.state.borrow_mut().set_rows(clients, servers);
             workspace.refresh(ui);
+            workspace.publish_home(ui);
             // A snapshot rebuilds the rows from records that know nothing of
             // restarts, so their stages are stamped again.
             stamp_host_lifecycle(ui, &lifecycle.borrow());
@@ -8294,6 +8706,7 @@ fn apply_event(
             apply_minecraft_event(ui, event, minecraft, commands);
         }
         Event::ArtifactCacheStatus(status) => apply_artifact_cache_status(ui, status),
+        Event::ArtifactCacheUnreadable => apply_artifact_cache_unreadable(ui),
         Event::HostRuntime(runtime) => {
             // Kept with the host it belongs to, so a late answer lands in its
             // own view and never in the fields of another host.
@@ -8319,7 +8732,7 @@ fn apply_event(
                 .progressed(&request_id, detail, progress, indeterminate);
             apply_pending_creations(ui, &creations.borrow());
         }
-        Event::ImportLinkedServerStarted {
+        Event::LinkedServerStarted {
             request_id,
             instance,
             server_name,
@@ -8378,29 +8791,7 @@ fn apply_event(
                 });
             }
         }
-        Event::Running(running) => {
-            ui.set_running(ModelRc::new(VecModel::from(
-                running
-                    .into_iter()
-                    .map(|process| RunningRow {
-                        icon_slot: workspace
-                            .state
-                            .borrow()
-                            .icon_slot(&process.kind, &process.id),
-                        kind: process.kind.into(),
-                        id: process.id.into(),
-                        launch: process.launch.into(),
-                        name: process.name.into(),
-                        pid: process.pid.into(),
-                        uptime: process.uptime.into(),
-                        usage: process.usage.into(),
-                        last_line: process.last_line.into(),
-                        controllable: process.controllable,
-                        can_stop: process.can_stop,
-                    })
-                    .collect::<Vec<_>>(),
-            )));
-        }
+        Event::Running(running) => apply_running(ui, workspace, running),
         Event::ModVersions(data) => apply_mod_versions(ui, data),
         Event::ModAcquisitionRequired(data) => apply_mod_acquisition(ui, data, workspace),
         Event::ModAcquisitionEnded { id } => end_mod_acquisition(ui, id, workspace),
@@ -8476,7 +8867,7 @@ fn apply_event(
                 .logs
                 .borrow_mut()
                 .apply_report_unavailable(pane, scope, &name, &message);
-            ui.set_status_message(lookup("gui-diagnostic-disappeared").into());
+            ui.invoke_present_toast(lookup("gui-diagnostic-disappeared").into(), true);
         }
         Event::HostPackContent(data) => {
             if let Some(host) = backend::parse_mod_host(&data.host_kind, &data.host) {
@@ -8539,6 +8930,14 @@ fn apply_event(
             // A runtime that came or went can change what a host resolves to
             // or whether its pin still runs, so each shown host reads it again.
             java_runtime::reload_shown(workspace);
+        }
+        Event::JavaPathChecked { path, result } => {
+            ui.set_java_path_checking(false);
+            // A verdict on a path since edited away says nothing about the field.
+            if ui.get_java_preferred_path() == path.as_str() {
+                ui.set_java_path_verdict_ok(result.is_ok());
+                ui.set_java_path_verdict(result.unwrap_or_else(|reason| reason).into());
+            }
         }
         Event::Activity(activity) => {
             apply_isolation_stage(ui, &workspace.isolation.borrow(), &activity);
@@ -8650,6 +9049,7 @@ fn apply_event(
             java_runtime::load(&workspace.commands, host, true);
         }
         Event::HostJava(data) => java_runtime::apply_host_java(workspace, &data),
+        Event::HostEvents { host, rows } => apply_host_events(workspace, host, &rows),
         Event::HostJavaPathChecked { host, result } => {
             java_runtime::apply_path_checked(workspace, host, &result);
         }
@@ -8671,7 +9071,10 @@ fn apply_event(
             remedy,
             view,
             revision,
-        } => apply_run_failure(workspace, lifecycle, host, failure, remedy, view, revision),
+        } => {
+            apply_run_failure(workspace, lifecycle, host, failure, remedy, view, revision);
+            workspace.publish_home(ui);
+        }
         Event::BundlePlanned { host, parts } => {
             diagnosis_flow::apply_bundle_plan(
                 workspace,
@@ -8743,9 +9146,7 @@ fn apply_event(
         } => apply_host_error(workspace, host, surface, message),
         Event::BackendUnavailable(message) => apply_backend_unavailable(ui, message),
         Event::CloseModal(scope) => close_modal_for(ui, scope),
-        // A new instance is what the user was just looking at the dialog for,
-        // so it is what they are looking at now. The snapshot that follows this
-        // keeps the selection, because it keeps whatever was selected.
+        // A new instance is what the user was just looking at the dialog for, so its card is scrolled into view.
         Event::ClientCreated { instance } => {
             reveal_instance(ui, &instance);
         }
@@ -8813,7 +9214,9 @@ fn apply_event(
             java_runtime::reload_shown(workspace);
         }
         Event::StorageRootPicked(path) => {
-            ui.set_persistent_root(path.display().to_string().into());
+            let picked = SharedString::from(path.display().to_string());
+            ui.set_persistent_root(picked.clone());
+            ui.invoke_save_storage_settings(picked);
         }
         Event::HostIconPicked { host, path } => {
             send(commands, Command::SetHostIcon { host, path });
@@ -8904,22 +9307,19 @@ fn import_submission_action(
     }
 }
 
-/// Selects one instance and puts its card in front of the user.
+/// Puts one instance's card in front of the user.
 ///
 /// The list can be filtered or searched down to something the new instance is
-/// not in, and a selection nothing shows is no selection at all, so a filter
-/// that would hide it is cleared rather than left to hide it.
+/// not in, so a filter that would hide it is cleared rather than left to hide it.
 fn reveal_instance(ui: &AppWindow, instance: &str) {
-    ui.set_selected_instance_id(instance.into());
     ui.set_instance_filter("all".into());
-    ui.set_instance_query(SharedString::default());
+    ui.set_list_query(SharedString::default());
     ui.set_instance_favorites_only(false);
     ui.set_instance_minecraft_index(0);
     ui.set_instance_loader_index(0);
     ui.set_instance_run_index(0);
     ui.set_instance_linking_index(0);
     ui.set_instance_group_index(0);
-    ui.invoke_select_instance(instance.into());
     // Where the card sits is not known until the list holding it has arrived,
     // so the scroll waits for the snapshot rather than happening here.
     ui.set_pending_reveal_instance(instance.into());
@@ -9447,6 +9847,12 @@ fn register_curseforge_credential(ui: &AppWindow, commands: &Sender<Command>) {
 
     let sender = commands.clone();
     ui.on_open_curseforge_key_help(move || send(&sender, Command::OpenCurseForgeKeyHelp));
+    let sender = commands.clone();
+    ui.on_open_source_page(move || send(&sender, Command::OpenSourcePage));
+    let sender = commands.clone();
+    ui.on_open_slint_page(move || send(&sender, Command::OpenSlintPage));
+    let sender = commands.clone();
+    ui.on_open_file(move |path| send(&sender, Command::OpenFile(path.as_str().into())));
 }
 
 /// The three artifact-cache actions the storage settings offer.
@@ -9542,12 +9948,39 @@ fn index_for_view(index: usize) -> i32 {
     i32::try_from(index).unwrap_or(-1)
 }
 
+/// A measurement failed. The last good figures stay for the settings, which
+/// say how old they are by being measured again; Home shows only the failure.
+fn apply_artifact_cache_unreadable(ui: &AppWindow) {
+    ui.set_artifact_cache_unreadable(true);
+}
+
 fn apply_artifact_cache_status(ui: &AppWindow, status: ArtifactCacheStatusData) {
     ui.set_artifact_cache_used(status.used.into());
     ui.set_artifact_cache_total(status.total.into());
     ui.set_artifact_cache_usage_exact(status.exact);
     ui.set_artifact_cache_over_budget(status.over_budget);
+    ui.set_artifact_cache_fill(f32::from(status.fill_permille) / 1000.0);
+    ui.set_artifact_cache_unlimited(status.unlimited);
+    ui.set_artifact_cache_unreadable(false);
     ui.set_artifact_cache_usage_known(true);
+}
+
+/// The text sizes and the theme, which together decide how the interface looks.
+fn apply_display_settings(ui: &AppWindow, settings: &SettingsData) {
+    ui.set_application_text_scale(i32::from(settings.text_scale_percent));
+    ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
+    ui.global::<Theme>()
+        .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
+    ui.set_seasonal_theme_in_season(settings.season_on_today);
+    apply_theme_settings(
+        ui,
+        &settings.theme,
+        settings.seasonal_themes,
+        &settings.shown_theme,
+        &settings.user_themes,
+        &settings.branding,
+        &settings.themes_folder,
+    );
 }
 
 /// The theme list and the chosen theme, and the palette and branding of the
@@ -9572,6 +10005,19 @@ fn apply_theme_settings(
         choices
             .iter()
             .map(|choice| SharedString::from(choice.theme.to_stored()))
+            .collect(),
+    ));
+    ui.set_theme_swatches(model(
+        choices
+            .iter()
+            .map(|choice| {
+                let palette =
+                    crate::palette::choice_palette(ui, &choice.theme, &user_themes.themes);
+                ThemeSwatch {
+                    fill: palette.background,
+                    outline: palette.border_strong,
+                }
+            })
             .collect(),
     ));
     let chosen = crate::palette::choice_index(&choices, theme);
@@ -9774,12 +10220,44 @@ fn apply_settings_fields(ui: &AppWindow, settings: &SettingsData, drafts: &mut S
     );
 }
 
+/// The instances a new server can be linked to, Standalone first, and the id
+/// each choice stands for.
+fn apply_server_link_choices(ui: &AppWindow, clients: &[InstanceRow]) {
+    ui.set_server_link_labels(model(
+        std::iter::once(lookup("gui-standalone"))
+            .chain(clients.iter().map(|row| row.name.to_string()))
+            .map(SharedString::from)
+            .collect(),
+    ));
+    ui.set_server_link_ids(model(
+        std::iter::once(String::new())
+            .chain(clients.iter().map(|row| row.id.to_string()))
+            .map(SharedString::from)
+            .collect(),
+    ));
+    // The dropdown follows the instance the dialog will link to, wherever the
+    // refreshed list now puts it; one that is gone makes the server standalone.
+    let chosen = ui.get_create_server_client_id();
+    let position = ui
+        .get_server_link_ids()
+        .iter()
+        .position(|known| known == chosen);
+    if let Some(index) = position.and_then(|index| i32::try_from(index).ok()) {
+        ui.set_create_server_link_index(index);
+    } else {
+        ui.set_create_server_client_id(SharedString::default());
+        ui.set_create_server_link_index(0);
+    }
+}
+
 fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
     minecraft: &Rc<RefCell<MinecraftDefaultsModel>>,
     drafts: &mut SettingsDrafts,
     list: &mut InstanceListState,
+    server_list: &mut ServerListState,
+    home: &mut HomeState,
 ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
     let Snapshot {
         instances,
@@ -9799,6 +10277,14 @@ fn apply_snapshot(
     apply_favorite_versions(ui, settings.favorite_minecraft_versions.clone());
     ui.set_make_default_account_operator(settings.make_default_account_operator);
     ui.set_operator_permission_level(i32::from(settings.operator_permission_level));
+    ui.set_stored_server_port_custom(settings.default_server_port_custom);
+    ui.set_stored_server_port(settings.default_server_port.to_string().into());
+    // What the user is typing is not replaced from under them.
+    if !ui.get_default_server_port_editing() {
+        ui.set_default_server_port_custom(settings.default_server_port_custom);
+        ui.set_default_server_port(settings.default_server_port.to_string().into());
+    }
+    ui.set_default_server_online(settings.default_server_online_mode);
     if let Some(notice) = organization_set_aside {
         ui.invoke_present_toast(
             lookup_args(
@@ -9813,9 +10299,24 @@ fn apply_snapshot(
             true,
         );
     }
-    let clients =
-        apply_instance_snapshot(ui, instances, groups, instance_sort, version_order, list);
-    let servers = apply_server_snapshot(ui, servers);
+    let clients = apply_instance_snapshot(
+        ui,
+        instances,
+        groups,
+        instance_sort,
+        version_order,
+        list,
+        home,
+    );
+    apply_server_link_choices(ui, &clients);
+    let servers = apply_server_snapshot(ui, servers, server_list, home);
+    home.set_default_account(
+        accounts
+            .iter()
+            .find(|account| account.is_default)
+            .map(|account| account.name.clone()),
+    );
+    show_default_account(ui, &accounts);
     ui.set_account_launch_entries(model(account_launch_entries(&accounts)));
     ui.set_accounts(model(account_rows(accounts)));
     // A refresh happens for reasons unrelated to this screen, so the model
@@ -9823,6 +10324,7 @@ fn apply_snapshot(
     minecraft.borrow_mut().apply_snapshot(minecraft_preferences);
     render_minecraft(ui, minecraft);
     apply_settings_fields(ui, &settings, drafts);
+    apply_display_settings(ui, &settings);
     ui.set_storage_root(settings.storage_root.into());
     ui.set_default_persistent_root(settings.default_persistent_root.into());
     ui.set_persistent_root_is_custom(settings.persistent_root_origin.is_override());
@@ -9847,24 +10349,126 @@ fn apply_snapshot(
     ui.set_default_mod_catalog(settings.default_mod_catalog.clone().into());
     ui.set_configured_mod_catalog(settings.configured_mod_catalog.clone().into());
     ui.set_default_mod_catalog_is_custom(settings.mod_catalog_origin.is_override());
-    ui.set_application_text_scale(i32::from(settings.text_scale_percent));
-    ui.set_technical_text_size(i32::from(settings.technical_text_size_pixels));
-    ui.global::<Theme>()
-        .set_text_scale(f32::from(settings.text_scale_percent) / 100.0);
-    apply_theme_settings(
-        ui,
-        &settings.theme,
-        settings.seasonal_themes,
-        &settings.shown_theme,
-        &settings.user_themes,
-        &settings.branding,
-        &settings.themes_folder,
-    );
     ui.set_eula_accepted(eula.accepted);
     ui.set_eula_status(eula.status.into());
     ui.set_loading(false);
-    ui.set_status_message(lookup("gui-ready").into());
     (clients, servers)
+}
+
+/// One instance as the list holds it.
+/// What the instance contributes to a bug report.
+fn instance_summary(item: &crate::presentation::InstancePresentation) -> String {
+    ephervex_core::issue_summary(&ephervex_core::IssueSummaryFacts {
+        name: &item.name,
+        issue_link: &item.issue_link,
+        minecraft: &item.minecraft,
+        loader: &item.loader,
+        mods: item.managed_mods,
+        storage: &item.storage,
+        linked_servers: item.linked_servers,
+        paired_server: item.pair.as_ref().map_or("", |pair| pair.name.as_str()),
+        case: &item.case,
+    })
+}
+
+fn listed_instance(
+    item: crate::presentation::InstancePresentation,
+    groups: &[ephervex_core::InstanceGroup],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Listed {
+    let group = item.facts.group.as_ref();
+    let group_index = group
+        .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
+        .map_or(-1, to_i32);
+    let last_run = backend::format_last_run(item.last_launched_at, now);
+    let summary = instance_summary(&item);
+    let connect = item.launch_and_connect.first();
+    let row = InstanceRow {
+        snapshot_deletion_note: item.snapshot_deletion_note.into(),
+        id: item.id.into(),
+        name: item.name.into(),
+        minecraft: item.minecraft.into(),
+        loader: item.loader.into(),
+        loader_kind: item.loader_kind.into(),
+        storage: item.storage.into(),
+        storage_kind: item.storage_kind.into(),
+        source: item.source.into(),
+        path: item.path.into(),
+        updated: lookup("gui-available").into(),
+        linked_servers: to_i32(item.linked_servers),
+        stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
+        unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
+        mods: to_i32(item.managed_mods),
+        needs_attention: item.needs_attention,
+        state: item.state.into(),
+        state_kind: item.state_kind.into(),
+        can_launch: item.can_launch,
+        can_kill: item.can_kill,
+        connect_server_id: connect.map_or_else(SharedString::default, |connect| {
+            connect.server_id.clone().into()
+        }),
+        connect_server_name: connect.map_or_else(SharedString::default, |connect| {
+            connect.server_name.clone().into()
+        }),
+        can_connect: connect.is_some_and(|connect| connect.enabled),
+        connect_reason: connect.map_or_else(SharedString::default, |connect| {
+            connect.reason.clone().into()
+        }),
+        // Filled in from the creation tracker, which a snapshot knows
+        // nothing about.
+        creating_server_detail: SharedString::default(),
+        creating_server_progress: 0.0,
+        creating_server_indeterminate: false,
+        restart_stage: SharedString::default(),
+        can_restart: false,
+        paired_server_id: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
+        paired_server_name: item
+            .pair
+            .as_ref()
+            .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
+        pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
+        // Stamped from the lifecycle, which a snapshot knows nothing about.
+        pair_starting: false,
+        favorite: item.facts.favorite,
+        case_steps: model(
+            item.case
+                .steps
+                .iter()
+                .map(|step| crate::ui::CaseStepRow {
+                    id: i32::try_from(step.id).unwrap_or(i32::MAX),
+                    text: step.text.as_str().into(),
+                    done: step.done,
+                })
+                .collect(),
+        ),
+        case_done: to_i32(item.case.steps.iter().filter(|step| step.done).count()),
+        case_note: item.case.note.as_str().into(),
+        issue_link: item.issue_link.as_str().into(),
+        summary: summary.into(),
+        case_reproduced: i32::try_from(item.case.reproduced).unwrap_or(i32::MAX),
+        group_id: group.map_or_else(SharedString::default, |group| group.id.to_string().into()),
+        group_name: group.map_or_else(SharedString::default, |group| group.name.as_str().into()),
+        group_index,
+        group_tone: group.map_or(0, |group| i32::from(group.tone)),
+        icon_slot: host_icon_slot(item.icon.as_deref()),
+        problems: to_i32(item.attention.len()),
+        state_line: presentation::client_state_line(
+            item.state_kind,
+            "",
+            item.needs_attention,
+            &last_run,
+        )
+        .into(),
+        last_run: last_run.into(),
+        open: false,
+    };
+    Listed {
+        row,
+        facts: item.facts,
+    }
 }
 
 /// Fills the instance list, and returns every instance's row, filtered or not.
@@ -9875,89 +10479,18 @@ fn apply_instance_snapshot(
     sort: ephervex_core::InstanceSort,
     order: ephervex_core::VersionOrder,
     list: &mut InstanceListState,
+    home: &mut HomeState,
 ) -> Vec<InstanceRow> {
+    let now = chrono::Utc::now();
+    home.set_clients(
+        instances
+            .iter()
+            .filter_map(HomeHost::from_instance)
+            .collect(),
+    );
     let listed = instances
         .into_iter()
-        .map(|item| {
-            let group = item.facts.group.as_ref();
-            let group_index = group
-                .and_then(|group| groups.iter().position(|candidate| candidate.id == group.id))
-                .map_or(-1, to_i32);
-            let row = InstanceRow {
-                snapshot_deletion_note: item.snapshot_deletion_note.into(),
-                id: item.id.into(),
-                name: item.name.into(),
-                minecraft: item.minecraft.into(),
-                loader: item.loader.into(),
-                loader_kind: item.loader_kind.into(),
-                storage: item.storage.into(),
-                storage_kind: item.storage_kind.into(),
-                source: item.source.into(),
-                path: item.path.into(),
-                updated: lookup("gui-available").into(),
-                linked_servers: to_i32(item.linked_servers),
-                stoppable_linked_servers: to_i32(item.stoppable_linked_servers),
-                unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
-                mods: to_i32(item.managed_mods),
-                needs_attention: item.needs_attention,
-                state: item.state.into(),
-                state_kind: item.state_kind.into(),
-                can_launch: item.can_launch,
-                can_kill: item.can_kill,
-                connect_server_id: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.server_id.clone().into()
-                    }),
-                connect_server_name: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.server_name.clone().into()
-                    }),
-                can_connect: item
-                    .launch_and_connect
-                    .first()
-                    .is_some_and(|connect| connect.enabled),
-                connect_reason: item
-                    .launch_and_connect
-                    .first()
-                    .map_or_else(SharedString::default, |connect| {
-                        connect.reason.clone().into()
-                    }),
-                // Filled in from the creation tracker, which a snapshot knows
-                // nothing about.
-                creating_server_detail: SharedString::default(),
-                creating_server_progress: 0.0,
-                creating_server_indeterminate: false,
-                restart_stage: SharedString::default(),
-                can_restart: false,
-                paired_server_id: item
-                    .pair
-                    .as_ref()
-                    .map_or_else(SharedString::default, |pair| pair.id.clone().into()),
-                paired_server_name: item
-                    .pair
-                    .as_ref()
-                    .map_or_else(SharedString::default, |pair| pair.name.clone().into()),
-                pair_start_together: item.pair.as_ref().is_some_and(|pair| pair.start_together),
-                // Stamped from the lifecycle, which a snapshot knows nothing about.
-                pair_starting: false,
-                favorite: item.facts.favorite,
-                group_id: group
-                    .map_or_else(SharedString::default, |group| group.id.to_string().into()),
-                group_name: group
-                    .map_or_else(SharedString::default, |group| group.name.as_str().into()),
-                group_index,
-                group_tone: group.map_or(0, |group| i32::from(group.tone)),
-                icon_slot: host_icon_slot(item.icon.as_deref()),
-            };
-            Listed {
-                row,
-                facts: item.facts,
-            }
-        })
+        .map(|item| listed_instance(item, &groups, now))
         .collect::<Vec<_>>();
     let all_rows = list.replace(ui, listed, groups, sort, order);
     // The list a pending reveal was waiting for. Cleared whether or not the
@@ -9965,49 +10498,29 @@ fn apply_instance_snapshot(
     let pending = ui.get_pending_reveal_instance();
     if !pending.is_empty() {
         ui.set_pending_reveal_instance(SharedString::default());
-        if ui.get_selected_instance_index() >= 0 && ui.get_selected_instance_id() == pending {
-            ui.set_reveal_selected_instance(ui.get_reveal_selected_instance().saturating_add(1));
+        if ui.get_instances().iter().any(|row| row.id == pending) {
+            ui.set_reveal_host_id(pending);
+            ui.set_reveal_token(ui.get_reveal_token().saturating_add(1));
         }
     }
     all_rows
 }
 
-/// Fills the server lists, and returns every server's row.
+/// Fills the server list, and returns every server's row.
 fn apply_server_snapshot(
     ui: &AppWindow,
     servers: Vec<crate::presentation::ServerPresentation>,
+    list: &mut ServerListState,
+    home: &mut HomeState,
 ) -> Vec<ServerRow> {
-    let previous_global_server = ui.get_selected_global_server_id();
-    let server_rows = servers.into_iter().map(server_row).collect::<Vec<_>>();
-    let mut global_rows = server_rows
-        .iter()
-        .filter(|row| server_is_globally_visible(row, ui.get_show_linked_servers()))
-        .cloned()
+    let now = chrono::Utc::now();
+    home.set_servers(servers.iter().filter_map(HomeHost::from_server).collect());
+    let server_rows = servers
+        .into_iter()
+        .map(|item| server_row(item, now))
         .collect::<Vec<_>>();
-    let query = ui.get_server_query().to_ascii_lowercase();
-    global_rows.retain(|row| {
-        row_matches(
-            &query,
-            [
-                &row.name,
-                &row.minecraft,
-                &row.loader,
-                &row.relationship,
-                &row.address,
-            ],
-        )
-    });
-    // Favorites first, and otherwise the list's own order.
-    global_rows.sort_by_key(|row| !row.favorite);
-    let global_index = global_selection_index(&global_rows, &previous_global_server);
-    if let Some(index) = global_index {
-        ui.set_selected_global_server_id(global_rows[index].id.clone());
-        ui.set_selected_global_server_index(to_i32(index));
-    } else {
-        ui.set_selected_global_server_id(SharedString::default());
-        ui.set_selected_global_server_index(-1);
-    }
-    ui.set_global_servers(reconciled(&ui.get_global_servers(), global_rows));
+    list.replace(ui, server_rows.clone());
+    stamp_open_hosts(ui);
     server_rows
 }
 
@@ -10015,15 +10528,11 @@ fn server_is_globally_visible(row: &ServerRow, show_linked_servers: bool) -> boo
     show_linked_servers || row.linked_client_id.is_empty()
 }
 
-fn global_selection_index(rows: &[ServerRow], previous: &str) -> Option<usize> {
-    if previous.is_empty() {
-        (!rows.is_empty()).then_some(0)
-    } else {
-        rows.iter().position(|row| row.id == previous)
-    }
-}
-
-fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
+fn server_row(
+    item: crate::presentation::ServerPresentation,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ServerRow {
+    let state_line = presentation::server_state_line(&item.state, &item.address);
     ServerRow {
         snapshot_deletion_note: item.snapshot_deletion_note.into(),
         id: item.id.into(),
@@ -10071,6 +10580,10 @@ fn server_row(item: crate::presentation::ServerPresentation) -> ServerRow {
         pair_starting: false,
         favorite: item.favorite,
         icon_slot: host_icon_slot(item.icon.as_deref()),
+        problems: to_i32(item.attention.len()),
+        state_line: state_line.into(),
+        last_run: backend::format_last_run(item.last_started_at, now).into(),
+        open: false,
     }
 }
 
@@ -10133,7 +10646,10 @@ fn apply_diagnostic_content(ui: &AppWindow, logs: &mut LogViews, content: &Diagn
         (false, true, None) => lookup("gui-diagnostic-file-lossy"),
         (false, false, None) => lookup("gui-diagnostic-loaded"),
     };
-    ui.set_status_message(status.into());
+    // The plain "loaded" outcome needs no word: the report is on screen.
+    if content.truncated || content.lossy || content.matches.is_some() {
+        ui.invoke_present_toast(status.into(), false);
+    }
 }
 
 fn upsert_activity(activities: &mut Vec<ActivityData>, activity: ActivityData) {
@@ -10150,6 +10666,40 @@ fn upsert_activity(activities: &mut Vec<ActivityData>, activity: ActivityData) {
         activities.insert(0, activity);
         activities.truncate(100);
     }
+}
+
+/// Shows what is running, once a second while Home is open. Written into the
+/// existing model so a card, and a menu open on it, survives the next poll.
+fn apply_running(ui: &AppWindow, workspace: &Workspace, running: Vec<backend::RunningData>) {
+    let rows = running
+        .into_iter()
+        .map(|process| {
+            let (minecraft, loader, loader_kind) = workspace
+                .state
+                .borrow()
+                .host_target(&process.kind, &process.id);
+            RunningRow {
+                minecraft,
+                loader,
+                loader_kind,
+                icon_slot: workspace
+                    .state
+                    .borrow()
+                    .icon_slot(&process.kind, &process.id),
+                kind: process.kind.into(),
+                id: process.id.into(),
+                launch: process.launch.into(),
+                name: process.name.into(),
+                pid: process.pid.into(),
+                uptime: process.uptime.into(),
+                usage: process.usage.into(),
+                last_line: process.last_line.into(),
+                controllable: process.controllable,
+                can_stop: process.can_stop,
+            }
+        })
+        .collect::<Vec<_>>();
+    ui.set_running(reconciled(&ui.get_running(), rows));
 }
 
 fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
@@ -10169,8 +10719,31 @@ fn apply_activities(ui: &AppWindow, activities: &[ActivityData]) {
             cancellable: activity.item.cancellable,
         })
         .collect::<Vec<_>>();
-    ui.set_active_operations(to_i32(rows.iter().filter(|row| row.active).count()));
-    ui.set_activities(model(rows));
+    ui.set_activities(reconciled(&ui.get_activities(), rows));
+}
+
+/// Writes the default account's name, initial, and kind for the account chip.
+fn show_default_account(ui: &AppWindow, accounts: &[AccountData]) {
+    let default_account = accounts.iter().find(|account| account.is_default);
+    ui.set_default_account_name(
+        default_account
+            .map(|account| account.name.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_default_account_initial(
+        default_account
+            .and_then(|account| account.name.chars().next())
+            .map(|first| first.to_uppercase().collect::<String>())
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_default_account_kind(
+        default_account
+            .map(|account| account.kind.as_str())
+            .unwrap_or_default()
+            .into(),
+    );
 }
 
 /// The accounts a launch can be made as, for the Launch as menu.
@@ -10195,6 +10768,13 @@ fn account_launch_entries(rows: &[AccountData]) -> Vec<MenuRow> {
 fn account_rows(rows: Vec<AccountData>) -> Vec<AccountRow> {
     rows.into_iter()
         .map(|row| AccountRow {
+            initial: row
+                .name
+                .chars()
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>())
+                .unwrap_or_default()
+                .into(),
             id: row.id.into(),
             name: row.name.into(),
             kind: row.kind.into(),
@@ -10816,8 +11396,10 @@ fn apply_mod_install_plan(
     // planned would replace what they are looking at, and would leave the
     // linked-server rows describing a different operation than the one on
     // screen.
+    // The Add mods dialog is where the request was made, so the confirmation
+    // takes its place.
     let modal = ui.get_modal();
-    if !modal.is_empty() && modal != "mod-plan" {
+    if !modal.is_empty() && modal != "mod-plan" && modal != "add-mods" {
         let name = if plan.title.is_empty() {
             plan.project.as_str()
         } else {
@@ -10840,14 +11422,21 @@ fn apply_mod_install_plan(
 
 /// Shows what one finished operation did to each target that took part.
 fn apply_linked_result(ui: &AppWindow, result: backend::LinkedResultData) {
+    // The Add mods dialog asked for the operation, and a report that needs
+    // nothing from the reader leaves it open for the next mod.
+    let in_catalog = ui.get_modal() == "add-mods";
     let owns_modal = {
         let modal = ui.get_modal();
-        modal.is_empty() || result.scope.covers(modal.as_str())
+        modal.is_empty() || in_catalog || result.scope.covers(modal.as_str())
     };
     let needs_review =
         presentation::linked_result_needs_review(result.rows.iter().map(|row| row.tone.as_str()));
     let summary = result.summary.clone();
     ui.set_mod_action_pending(false);
+    if in_catalog && !needs_review {
+        ui.invoke_present_toast(summary.into(), false);
+        return;
+    }
     if !owns_modal {
         // The dialog on screen is not this operation's to replace, so the
         // outcome is said in one line instead of the per-target report.
@@ -11039,6 +11628,7 @@ fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
             description: row.description.into(),
             author: row.author.into(),
             note: row.note.into(),
+            downloads: row.downloads.into(),
             icon: cached_image(&row.icon),
             // Both are decided against state the row cannot see, so a fresh
             // page arrives unmarked and is marked by the two passes below.
@@ -11086,13 +11676,6 @@ fn java_rows(rows: Vec<JavaData>) -> Vec<JavaRow> {
             pinning: row.pinned_by.unwrap_or_default().into(),
         })
         .collect()
-}
-
-fn row_matches<'a>(query: &str, values: impl IntoIterator<Item = &'a SharedString>) -> bool {
-    query.is_empty()
-        || values
-            .into_iter()
-            .any(|value| value.to_ascii_lowercase().contains(query))
 }
 
 fn model<T: Clone + 'static>(rows: Vec<T>) -> ModelRc<T> {
@@ -11229,6 +11812,196 @@ mod tests {
                 },
             )));
         AppWindow::new().expect("window")
+    }
+
+    /// The dialog stays open with the reason when the link it was given is one
+    /// the core would refuse, and sends nothing.
+    #[test]
+    fn a_refused_issue_link_keeps_the_new_instance_dialog_open() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+        ui.set_modal("create-instance".into());
+
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "ftp://example.com/issue".into(),
+            false,
+            "".into(),
+            "".into(),
+            "".into(),
+            false,
+        );
+
+        assert_eq!(ui.get_modal(), "create-instance");
+        assert!(!ui.get_modal_error().is_empty());
+        assert!(receiver.try_recv().is_err(), "nothing was started");
+    }
+
+    /// Files let go on the New Instance dialog name its server's files once a
+    /// server is wanted, and mean nothing before.
+    #[test]
+    fn a_drop_on_the_new_instance_dialog_names_its_server_files_only_when_one_is_wanted() {
+        let ui = test_window();
+        let workspace = WorkspaceState::default();
+        ui.set_modal("create-instance".into());
+        assert_eq!(drop_intent(&ui, &workspace), DropIntent::Ignored);
+        ui.set_create_linked_server(true);
+        assert_eq!(
+            drop_intent(&ui, &workspace),
+            DropIntent::ServerPack(ServerPackTarget::NewInstance)
+        );
+    }
+
+    /// Wanting a server without naming it takes the name the dialog suggests.
+    #[test]
+    fn a_new_instance_with_a_server_and_no_name_takes_the_suggested_name() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "https://example.com/issues/7".into(),
+            true,
+            "".into(),
+            "".into(),
+            "".into(),
+            false,
+        );
+
+        let Ok(Command::CreateClient {
+            issue_link,
+            linked_server,
+            ..
+        }) = receiver.try_recv()
+        else {
+            panic!("a creation was started");
+        };
+        assert_eq!(issue_link, "https://example.com/issues/7");
+        assert_eq!(linked_server, "Repro Server");
+    }
+
+    /// Submits the New Instance dialog with a linked server and `port`.
+    fn submit_instance_with_server_port(ui: &AppWindow, port: &str, with_server: bool) {
+        ui.invoke_submit_create_instance(
+            "Repro".into(),
+            "1.20.1".into(),
+            "Vanilla".into(),
+            "".into(),
+            false,
+            "".into(),
+            with_server,
+            "".into(),
+            "".into(),
+            port.into(),
+            true,
+        );
+    }
+
+    #[test]
+    fn a_port_the_linked_server_cannot_use_keeps_the_new_instance_dialog_open() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+        ui.set_modal("create-instance".into());
+
+        for port in ["70000", "12a"] {
+            submit_instance_with_server_port(&ui, port, true);
+            assert_eq!(ui.get_modal(), "create-instance", "{port}");
+            assert!(!ui.get_modal_error().is_empty(), "{port}");
+            assert!(receiver.try_recv().is_err(), "{port} started nothing");
+        }
+    }
+
+    #[test]
+    fn a_padded_linked_server_port_is_trimmed_and_a_port_without_a_server_is_ignored() {
+        let ui = test_window();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_create_instance(&ui, &sender, &creations);
+
+        submit_instance_with_server_port(&ui, " 25570 ", true);
+        let Ok(Command::CreateClient {
+            server_port,
+            server_online,
+            ..
+        }) = receiver.try_recv()
+        else {
+            panic!("a creation was started");
+        };
+        assert_eq!(server_port, Some(25570));
+        assert!(server_online);
+
+        submit_instance_with_server_port(&ui, "70000", false);
+        let Ok(Command::CreateClient { server_port, .. }) = receiver.try_recv() else {
+            panic!("a creation was started");
+        };
+        assert_eq!(server_port, None, "no server wants the port");
+    }
+
+    #[test]
+    fn the_new_instance_dialog_starts_its_linked_server_from_the_stored_defaults_each_time() {
+        let ui = test_window();
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        register_create_instance_naming(&ui, &sender);
+        ui.set_stored_server_port_custom(true);
+        ui.set_stored_server_port("25570".into());
+        ui.set_default_server_online(false);
+
+        ui.invoke_open_create_instance_modal();
+        assert_eq!(ui.get_create_linked_port(), "25570");
+        assert!(!ui.get_create_linked_online());
+
+        ui.set_create_linked_port("30000".into());
+        ui.set_create_linked_online(true);
+        ui.set_modal("".into());
+        ui.invoke_open_create_instance_modal();
+        assert_eq!(ui.get_create_linked_port(), "25570");
+        assert!(!ui.get_create_linked_online());
+    }
+
+    #[test]
+    fn the_link_dropdown_follows_the_chosen_instance_when_the_list_changes() {
+        let ui = test_window();
+        let instance = |id: &str, name: &str| InstanceRow {
+            id: id.into(),
+            name: name.into(),
+            ..InstanceRow::default()
+        };
+        apply_server_link_choices(&ui, &[instance("a", "Alpha"), instance("b", "Beta")]);
+        ui.set_create_server_client_id("b".into());
+        ui.set_create_server_link_index(2);
+
+        apply_server_link_choices(
+            &ui,
+            &[
+                instance("c", "Aardvark"),
+                instance("a", "Alpha"),
+                instance("b", "Beta"),
+            ],
+        );
+        assert_eq!(ui.get_create_server_link_index(), 3);
+        assert_eq!(ui.get_create_server_client_id(), "b");
+
+        apply_server_link_choices(&ui, &[instance("a", "Alpha")]);
+        assert_eq!(ui.get_create_server_link_index(), 0);
+        assert_eq!(
+            ui.get_create_server_client_id(),
+            "",
+            "an instance that is gone leaves a standalone server"
+        );
     }
 
     #[test]
@@ -12537,6 +13310,8 @@ mod tests {
             name: name.to_owned(),
             kind,
             size_bytes: 2048,
+            path: std::path::PathBuf::from(name),
+            modified: String::new(),
         }
     }
 
@@ -13491,6 +14266,29 @@ mod tests {
         );
     }
 
+    /// A Mods list behind the settings is not on screen, so a dropped jar is
+    /// not meant for it.
+    #[test]
+    fn a_dropped_jar_does_not_go_to_a_mods_list_the_settings_cover() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let client = client_host();
+        ui.set_modal(SharedString::default());
+        workspace.open(&ui, client, Surface::Mods);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+
+        ui.invoke_open_settings("General".into());
+
+        assert!(ui.get_workspace_open());
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import
+        );
+    }
+
     /// The two dialogs keep separate choices, and neither shows the other's.
     #[test]
     fn a_chosen_archive_fills_only_the_field_that_asked_for_it() {
@@ -13674,6 +14472,167 @@ mod tests {
         test_workspace_sending(ui).0
     }
 
+    fn running_process(kind: &str, id: &str, name: &str) -> backend::RunningData {
+        backend::RunningData {
+            kind: kind.to_owned(),
+            id: id.to_owned(),
+            launch: String::new(),
+            name: name.to_owned(),
+            pid: "4242".to_owned(),
+            uptime: "1m".to_owned(),
+            usage: String::new(),
+            last_line: String::new(),
+            controllable: kind == "server",
+            can_stop: true,
+        }
+    }
+
+    /// A window drawn by the software renderer, showing Home with `running`
+    /// polled in and the More menu of the card named `host` open.
+    fn running_home_with_open_menu(
+        running: &[backend::RunningData],
+        host: &str,
+    ) -> (AppWindow, Workspace) {
+        let _ =
+            slint::platform::set_platform(Box::new(i_slint_backend_testing::TestingBackend::new(
+                i_slint_backend_testing::TestingBackendOptions {
+                    renderer_name: Some("software".into()),
+                    mock_time: true,
+                    threading: false,
+                },
+            )));
+        let ui = test_window();
+        register_i18n(&ui);
+        ui.window().set_size(slint::PhysicalSize::new(1480, 900));
+        ui.show().expect("show");
+        let workspace = test_workspace(&ui);
+        apply_running(&ui, &workspace, running.to_vec());
+        settle_window(&ui);
+        let more = lookup_args(
+            "gui-home-more-host",
+            [("value", Arg::from(host.to_owned()))],
+        );
+        ElementHandle::find_by_accessible_label(&ui, &more)
+            .find(|element| element.size().width > 0.0)
+            .expect("the card offers more actions")
+            .mock_single_click(slint::platform::PointerEventButton::Left);
+        settle_window(&ui);
+        (ui, workspace)
+    }
+
+    fn settle_window(ui: &AppWindow) {
+        slint::platform::update_timers_and_animations();
+        ui.window().take_snapshot().expect("render");
+    }
+
+    fn open_log_entry(ui: &AppWindow) -> Option<ElementHandle> {
+        ElementHandle::find_by_accessible_label(ui, &lookup("gui-open-log")).find(|element| {
+            element.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button)
+                && element.size().width > 0.0
+        })
+    }
+
+    #[test]
+    fn the_account_chip_gets_the_default_accounts_name_initial_and_kind() {
+        let ui = test_window();
+        let account = |name: &str, kind: &str, is_default: bool| AccountData {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            is_default,
+            credential_state: String::new(),
+        };
+        show_default_account(
+            &ui,
+            &[
+                account("steve", "Offline", false),
+                account("\u{e9}lan", "Microsoft", true),
+            ],
+        );
+        assert_eq!(ui.get_default_account_name(), "\u{e9}lan");
+        assert_eq!(ui.get_default_account_initial(), "\u{c9}");
+        assert_eq!(ui.get_default_account_kind(), "Microsoft");
+
+        show_default_account(&ui, &[]);
+        assert_eq!(ui.get_default_account_name(), "");
+        assert_eq!(ui.get_default_account_initial(), "");
+        assert_eq!(ui.get_default_account_kind(), "");
+    }
+
+    #[test]
+    fn a_failed_measurement_after_a_good_one_marks_the_cache_unreadable_until_the_next_good_one() {
+        let ui = test_window();
+        assert!(!ui.get_artifact_cache_usage_known());
+        let status = |unlimited| ArtifactCacheStatusData {
+            used: "3.1 GiB".to_owned(),
+            total: "10 GiB".to_owned(),
+            exact: true,
+            over_budget: false,
+            fill_permille: 310,
+            unlimited,
+        };
+
+        apply_artifact_cache_status(&ui, status(false));
+        assert!(ui.get_artifact_cache_usage_known());
+        assert!((ui.get_artifact_cache_fill() - 0.31).abs() < 0.001);
+        assert!(!ui.get_artifact_cache_unlimited());
+        assert!(!ui.get_artifact_cache_unreadable());
+
+        // The settings keep the last figures; Home shows only the failure.
+        apply_artifact_cache_unreadable(&ui);
+        assert!(ui.get_artifact_cache_unreadable());
+        assert!(ui.get_artifact_cache_usage_known());
+
+        apply_artifact_cache_status(&ui, status(true));
+        assert!(
+            !ui.get_artifact_cache_unreadable(),
+            "a measurement clears it"
+        );
+        assert!(ui.get_artifact_cache_unlimited());
+    }
+
+    #[test]
+    fn a_menu_open_on_a_running_card_survives_the_next_poll() {
+        let processes = [
+            running_process("client", "a", "Alpha"),
+            running_process("client", "b", "Bravo"),
+        ];
+        let (ui, workspace) = running_home_with_open_menu(&processes, "Bravo");
+        let logs: Rc<RefCell<Vec<String>>> = Rc::default();
+        let record = Rc::clone(&logs);
+        ui.on_open_workspace(move |_, id, surface| {
+            record.borrow_mut().push(format!("{id}/{surface}"));
+        });
+        assert!(open_log_entry(&ui).is_some());
+
+        // The same run, polled again a second later.
+        apply_running(&ui, &workspace, processes.to_vec());
+        settle_window(&ui);
+
+        let entry = open_log_entry(&ui).expect("the menu is still open");
+        entry.invoke_accessible_default_action();
+        assert_eq!(logs.borrow().as_slice(), ["b/Logs"]);
+    }
+
+    #[test]
+    fn a_menu_closes_when_its_card_is_given_another_run() {
+        let processes = [
+            running_process("client", "a", "Alpha"),
+            running_process("client", "b", "Bravo"),
+        ];
+        let (ui, workspace) = running_home_with_open_menu(&processes, "Alpha");
+        assert!(open_log_entry(&ui).is_some());
+
+        // Alpha ends and Bravo moves up into its card.
+        apply_running(&ui, &workspace, vec![processes[1].clone()]);
+        settle_window(&ui);
+
+        assert!(
+            open_log_entry(&ui).is_none(),
+            "a menu left open would act on the run that took its place"
+        );
+    }
+
     /// A start plans its Java before it can fail, and may have installed a
     /// managed runtime by then, so even an abandoned start re-reads what the
     /// shown hosts run.
@@ -13746,6 +14705,8 @@ mod tests {
             plan_requests: Rc::default(),
             properties: Rc::default(),
             commands: sender,
+            server_list: Rc::default(),
+            home: Rc::default(),
         };
         register_workspace(ui, &workspace);
         log_views::register(ui, &workspace.logs);
@@ -13916,10 +14877,16 @@ mod tests {
                 failure: Some("replacement failed".to_owned()),
             },
         );
-        // The shown hosts also read their Java again; only diagnoses count here.
+        // The shown hosts also read their Java and history again; only
+        // diagnoses count here.
         let sent: Vec<_> = commands
             .try_iter()
-            .filter(|command| !matches!(command, Command::LoadHostJava { .. }))
+            .filter(|command| {
+                !matches!(
+                    command,
+                    Command::LoadHostJava { .. } | Command::LoadHostEvents(_)
+                )
+            })
             .collect();
         assert!(
             matches!(sent.as_slice(), [Command::ExplainServerFailure { server: id, failure, .. }]
@@ -14067,6 +15034,181 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// The pane rows the window draws, with whether each is the quick view.
+    fn pane_overlays(ui: &AppWindow) -> Vec<(i32, bool)> {
+        ui.get_workspace_panes()
+            .iter()
+            .map(|pane| (pane.id, pane.overlay))
+            .collect()
+    }
+
+    #[test]
+    fn what_happened_to_a_host_reaches_every_pane_showing_it() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Case);
+        let rows = vec![crate::history_view::HistoryRow {
+            time: "14:02".to_owned(),
+            text: "Created in temporary storage".to_owned(),
+            detail: String::new(),
+            tone: "neutral",
+        }];
+
+        deliver_event(&ui, &workspace, Event::HostEvents { host: client, rows });
+
+        let events = first_view(&ui).events;
+        assert_eq!(events.row_count(), 1);
+        assert_eq!(
+            events.row_data(0).expect("a row").text,
+            "Created in temporary storage"
+        );
+    }
+
+    #[test]
+    fn a_host_entering_the_workspace_asks_what_happened_to_it() {
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let host = client_host();
+        workspace.open(&ui, host, Surface::Case);
+
+        assert!(
+            commands
+                .try_iter()
+                .any(|command| matches!(command, Command::LoadHostEvents(asked) if asked == host))
+        );
+    }
+
+    #[test]
+    fn the_quick_view_shows_a_host_over_the_workspace_without_changing_it() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Case);
+
+        ui.invoke_open_quick_view(server.kind().into(), server.id().into());
+
+        assert!(ui.get_quick_view_open());
+        assert_eq!(shown(&workspace), [(client, Surface::Case)], "the page");
+        let rows = pane_overlays(&ui);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], (1, false));
+        assert!(rows[1].1, "the last row is the quick view");
+        assert_ne!(rows[1].0, 1, "it is named apart from every workspace pane");
+        assert_eq!(ui.get_host_views().row_count(), 2, "one view per host");
+
+        ui.invoke_close_quick_view();
+        assert!(!ui.get_quick_view_open());
+        assert_eq!(pane_overlays(&ui), [(1, false)]);
+    }
+
+    #[test]
+    fn a_quick_view_can_be_open_while_no_workspace_is() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        assert!(ui.get_quick_view_open());
+        assert!(!ui.get_workspace_open());
+        assert_eq!(pane_overlays(&ui).len(), 1);
+
+        ui.invoke_close_quick_view();
+        assert!(!ui.get_quick_view_open());
+        assert_eq!(ui.get_workspace_panes().row_count(), 0);
+        assert!(workspace.state.borrow().layout().is_none());
+    }
+
+    #[test]
+    fn the_quick_views_surface_is_chosen_without_touching_the_pages() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        let quick = pane_overlays(&ui)[1].0;
+
+        ui.invoke_show_pane_surface(quick, "Mods".into());
+
+        assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
+        assert_eq!(
+            workspace.state.borrow().quick_content(),
+            Some((client, Surface::Mods))
+        );
+    }
+
+    #[test]
+    fn opening_the_quick_view_as_a_page_replaces_the_workspace_with_what_it_showed() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        workspace.open(&ui, client, Surface::Overview);
+        ui.invoke_open_quick_view(server.kind().into(), server.id().into());
+        ui.set_quick_view_fullscreen(true);
+
+        ui.invoke_open_quick_view_as_page();
+
+        assert!(!ui.get_quick_view_open());
+        assert!(!ui.get_quick_view_fullscreen());
+        assert_eq!(shown(&workspace), [(server, Surface::Overview)]);
+    }
+
+    #[test]
+    fn a_drop_goes_to_the_mods_list_the_quick_view_shows_and_not_to_one_it_covers() {
+        let ui = test_window();
+        let (workspace, client, server) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        let quick = pane_overlays(&ui)[0].0;
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Import
+        );
+
+        ui.invoke_show_pane_surface(quick, "Mods".into());
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+
+        // Another host's list on the page makes the aim unclear.
+        workspace.open(&ui, server, Surface::Mods);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Ignored
+        );
+
+        // Fullscreen covers the page, so only the quick view's list is visible.
+        ui.set_quick_view_fullscreen(true);
+        assert_eq!(
+            drop_intent(&ui, &workspace.state.borrow()),
+            DropIntent::Mods(client)
+        );
+    }
+
+    #[test]
+    fn opening_the_quick_view_as_a_page_keeps_what_the_host_reported() {
+        let ui = test_window();
+        let (workspace, client, _) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        assert!(workspace.update(client, |view| view.crash_report = "report.txt".into()));
+
+        ui.invoke_open_quick_view_as_page();
+
+        assert_eq!(first_view(&ui).crash_report, "report.txt");
+        assert_eq!(shown(&workspace), [(client, Surface::DEFAULT)]);
+    }
+
+    #[test]
+    fn opening_settings_closes_the_quick_view() {
+        let ui = test_window();
+        let (_workspace, client, _) = listed_workspace(&ui);
+        ui.invoke_open_quick_view(client.kind().into(), client.id().into());
+        ui.set_quick_view_open(true);
+        let closed = Rc::new(std::cell::Cell::new(0));
+        let count = Rc::clone(&closed);
+        ui.on_close_quick_view(move || count.set(count.get() + 1));
+
+        ui.invoke_open_settings("General".into());
+
+        assert!(ui.get_settings_open());
+        assert_eq!(closed.get(), 1);
     }
 
     /// A workspace listing one client and one server, as a snapshot fills it.
@@ -15190,6 +16332,36 @@ mod tests {
     }
 
     #[test]
+    fn launching_a_pair_while_the_settings_are_open_leaves_them_for_the_panes() {
+        let ui = test_window();
+        let (workspace, _, client, server) = paired_workspace(&ui);
+        ui.invoke_open_settings("General".into());
+
+        ui.invoke_launch_and_connect(client.id().into(), server.id().into());
+
+        assert!(!ui.get_settings_open());
+        assert!(ui.get_workspace_open());
+        assert_eq!(
+            shown(&workspace),
+            [(client, Surface::Overview), (server, Surface::Console)]
+        );
+    }
+
+    #[test]
+    fn starting_a_server_while_the_settings_are_open_leaves_them_for_its_console() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        ui.invoke_open_settings("General".into());
+        let server = server_host();
+
+        workspace.show_console(&ui, server);
+
+        assert!(!ui.get_settings_open());
+        assert!(ui.get_workspace_open());
+        assert_eq!(shown(&workspace), [(server, Surface::Console)]);
+    }
+
+    #[test]
     fn launch_and_connect_leaves_a_full_workspace_as_it_is() {
         let ui = test_window();
         let toasts = toasts(&ui);
@@ -15336,18 +16508,22 @@ mod tests {
         );
         assert_eq!(
             ui.get_workspace_back_label(),
-            lookup("gui-back-instances").as_str(),
-            "a split leaves for the page it was opened from"
+            lookup("gui-back-home").as_str(),
+            "a split leaves for Home"
         );
 
         ui.invoke_choose_pane_host(2, "client".into(), client.id().into());
         ui.invoke_show_pane_surface(2, "Overview".into());
         assert_eq!(ui.get_host_views().row_count(), 1);
+
+        ui.invoke_workspace_back();
+        assert!(!ui.get_workspace_open());
+        assert!(ui.get_shows_home());
     }
 
     /// The host picker lists running hosts first, a client ranked by what runs
     /// on its card, offers each client's linked servers on its card, and lists
-    /// a linked server on its own only when the Servers page would.
+    /// a linked server on its own only when the host list would.
     #[test]
     fn the_host_picker_lists_running_hosts_first_and_linked_servers_on_their_client() {
         let ui = test_window();
@@ -15667,11 +16843,7 @@ mod tests {
 
         assert_eq!(shown(&workspace), [(server, Surface::Console)]);
         assert!(ui.get_workspace_open());
-        assert_eq!(
-            ui.get_page(),
-            SERVERS_PAGE,
-            "a single server's workspace belongs to the servers page"
-        );
+        assert!(!ui.get_shows_home());
         let console = ui
             .get_log_views()
             .row_data(0)
@@ -15695,25 +16867,23 @@ mod tests {
         workspace.show_console(&ui, server);
 
         assert_eq!(shown(&workspace), [(server, Surface::Console)]);
-        assert_eq!(ui.get_page(), SERVERS_PAGE);
         assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-instance"));
         ui.invoke_workspace_back();
         assert_eq!(shown(&workspace), [(client, Surface::Overview)]);
-        assert_eq!(ui.get_page(), INSTANCES_PAGE);
         assert!(ui.get_workspace_open());
     }
 
-    /// Started from the servers list there is no client to go back to, so
-    /// Back leaves the workspace.
+    /// Started from the list there is no client to go back to, so the pane
+    /// offers no Back.
     #[test]
-    fn starting_a_server_from_the_servers_list_has_no_way_back() {
+    fn starting_a_server_from_the_list_has_no_back_button() {
         let ui = test_window();
         let workspace = test_workspace(&ui);
 
         workspace.show_console(&ui, server_host());
-        assert_eq!(ui.get_workspace_back_label(), lookup("gui-back-servers"));
-        ui.invoke_workspace_back();
+        assert_eq!(ui.get_workspace_back_label(), "");
 
+        ui.invoke_workspace_back();
         assert!(!ui.get_workspace_open());
         assert!(shown(&workspace).is_empty());
     }
@@ -15811,11 +16981,16 @@ mod tests {
     #[test]
     fn duplicate_creation_is_rejected_until_the_original_request_finishes() {
         let key = CreationKey::Client {
+            server_online: false,
+            server_port: None,
             name: "Rendering Repro".to_owned(),
             minecraft: "1.20.1".to_owned(),
             loader: "Forge".to_owned(),
             loader_version: "47.3.0".to_owned(),
             persistent: false,
+            issue_link: String::new(),
+            linked_server: String::new(),
+            server_pack: None,
         };
         let mut tracker = CreationTracker::default();
         let request = tracker.accept(key.clone(), pending_creation(&key, false));
@@ -15840,6 +17015,7 @@ mod tests {
     #[test]
     fn distinct_creation_requests_can_run_together() {
         let first = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: "client-one".to_owned(),
             minecraft: "1.20.1".to_owned(),
@@ -15883,6 +17059,7 @@ mod tests {
         ui.invoke_follow_host(2, "client".into(), client_b.id().into(), "Overview".into());
 
         let first = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: client_a.id(),
             minecraft: String::new(),
@@ -16038,7 +17215,7 @@ mod tests {
             ),
             (
                 ephervex_core::ApplicationTheme::BuiltIn(
-                    ephervex_core::ApplicationColorScheme::Light,
+                    ephervex_core::ApplicationColorScheme::Workbench,
                 ),
                 "gui-color-scheme-light",
             ),
@@ -16082,8 +17259,8 @@ mod tests {
         assert_eq!(
             labels,
             [
-                lookup("gui-color-scheme-dark"),
-                lookup("gui-color-scheme-light")
+                lookup("gui-color-scheme-light"),
+                lookup("gui-color-scheme-dark")
             ],
             "the Halloween theme is never offered"
         );
@@ -16201,19 +17378,51 @@ mod tests {
         assert_eq!(
             labels,
             [
-                lookup("gui-color-scheme-dark"),
                 lookup("gui-color-scheme-light"),
+                lookup("gui-color-scheme-dark"),
                 "Modrinth".to_owned()
             ]
         );
         let ids: Vec<SharedString> = ui.get_theme_ids().iter().collect();
-        assert_eq!(ids, ["dark", "light", "user:modrinth"]);
+        assert_eq!(ids, ["workbench", "dark", "user:modrinth"]);
         assert_eq!(ui.get_theme_index(), 2);
         assert_eq!(ui.get_application_theme(), "user:modrinth");
         assert_eq!(ui.get_themes_folder(), "/config/themes");
         let problems: Vec<SharedString> = ui.get_theme_problems().iter().collect();
         assert_eq!(problems, ["broken.toml: Skipped."]);
         assert_eq!(ui.global::<Theme>().get_accent(), accent);
+    }
+
+    /// A card shows the colors of its own theme, so Light looks light and Dark
+    /// looks dark whichever one is painted now.
+    #[test]
+    fn a_theme_card_shows_its_own_colors_whichever_theme_is_painted() {
+        use crate::ui::BuiltInPalettes;
+
+        let ui = test_window();
+        let palettes = ui.global::<BuiltInPalettes>();
+        let (light, dark) = (palettes.get_workbench(), palettes.get_workbench_dark());
+        for scheme in [
+            ephervex_core::ApplicationColorScheme::Workbench,
+            ephervex_core::ApplicationColorScheme::Dark,
+        ] {
+            let chosen = ephervex_core::ApplicationTheme::BuiltIn(scheme);
+            apply_theme_settings(
+                &ui,
+                &chosen,
+                false,
+                &unseasoned(&chosen),
+                &crate::theme_files::UserThemes::default(),
+                &crate::theme_files::BrandingImages::default(),
+                "",
+            );
+            let swatches: Vec<_> = ui.get_theme_swatches().iter().collect();
+            assert_eq!(swatches.len(), 2, "{scheme:?}");
+            assert_eq!(swatches[0].fill, light.background, "{scheme:?}");
+            assert_eq!(swatches[0].outline, light.border_strong, "{scheme:?}");
+            assert_eq!(swatches[1].fill, dark.background, "{scheme:?}");
+            assert_eq!(swatches[1].outline, dark.border_strong, "{scheme:?}");
+        }
     }
 
     /// The chosen theme folder's decoded branding, read the way a settings
@@ -16892,7 +18101,7 @@ mod tests {
             can_restart: true,
             ..ServerRow::default()
         };
-        ui.set_global_servers(model(vec![server_row]));
+        ui.set_listed_servers(model(vec![server_row]));
         let (sender, commands) = std::sync::mpsc::channel();
         let lifecycle = Rc::new(RefCell::new(HostLifecycle::default()));
         register_restart_actions(&ui, &sender, &lifecycle);
@@ -16929,7 +18138,7 @@ mod tests {
         let (ui, commands, lifecycle, _client, server) = restart_window();
         ui.set_host_views(model(vec![HostView {
             kind: "server".into(),
-            server: ui.get_global_servers().row_data(0).expect("row"),
+            server: ui.get_listed_servers().row_data(0).expect("row"),
             ..HostView::default()
         }]));
         ui.invoke_server_restart(server.to_string().into());
@@ -16938,7 +18147,7 @@ mod tests {
         };
         let stages = |ui: &AppWindow| -> Vec<String> {
             [
-                ui.get_global_servers().row_data(0).expect("row"),
+                ui.get_listed_servers().row_data(0).expect("row"),
                 ui.get_host_views().row_data(0).expect("view").server,
             ]
             .iter()
@@ -16995,6 +18204,83 @@ mod tests {
         assert!(can_restart(&ui), "stamped again after a refresh");
     }
 
+    #[test]
+    fn an_instances_row_carries_its_issue_link() {
+        let mut record = crate::presentation::samples::client_record(
+            ephervex_model::StorageClass::Temporary,
+            ephervex_model::LoaderSelection::vanilla(),
+        );
+        record.issue_link = Some("https://example.com/issues/7".to_owned());
+        let item = crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, []);
+
+        let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+        assert_eq!(row.issue_link, "https://example.com/issues/7");
+        assert!(
+            row.summary.contains("Issue: https://example.com/issues/7"),
+            "the summary names the issue: {}",
+            row.summary
+        );
+    }
+
+    #[test]
+    fn a_stored_issue_link_the_core_would_refuse_is_not_shown() {
+        for link in [
+            "https://user:token@example.com/issues/7",
+            "https://example.com/is\u{202E}sues",
+            "javascript:alert(1)",
+        ] {
+            let mut record = crate::presentation::samples::client_record(
+                ephervex_model::StorageClass::Temporary,
+                ephervex_model::LoaderSelection::vanilla(),
+            );
+            record.issue_link = Some(link.to_owned());
+            let item =
+                crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, []);
+
+            let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+            assert_eq!(row.issue_link, "", "{link}");
+        }
+    }
+
+    #[test]
+    fn an_instances_row_carries_its_case() {
+        let mut item = crate::presentation::InstancePresentation::from_record(
+            &crate::presentation::samples::client_record(
+                ephervex_model::StorageClass::Temporary,
+                ephervex_model::LoaderSelection::vanilla(),
+            ),
+            0,
+            0,
+            None,
+            [],
+        );
+        item.case.add_step("Place a belt").expect("step");
+        item.case.add_step("Fill it").expect("step");
+        item.case.set_step_done(1, true);
+        item.case.set_note("Only when full").expect("note");
+        item.case.count_reproduced();
+
+        let row = listed_instance(item, &[], chrono::Utc::now()).row;
+
+        assert_eq!(row.case_done, 1);
+        assert_eq!(row.case_note, "Only when full");
+        assert_eq!(row.case_reproduced, 1);
+        let steps: Vec<(i32, String, bool)> = row
+            .case_steps
+            .iter()
+            .map(|step| (step.id, step.text.to_string(), step.done))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (1, "Place a belt".to_owned(), true),
+                (2, "Fill it".to_owned(), false)
+            ]
+        );
+    }
+
     /// The overview reports the work on the row of the instance it belongs to,
     /// so the rows have to be told about it, and told again when it ends.
     #[test]
@@ -17013,6 +18299,7 @@ mod tests {
         ui.set_instances(model(rows));
 
         let building = CreationKey::Server {
+            online: false,
             name: "First Server".to_owned(),
             client: "client-a".to_owned(),
             minecraft: String::new(),
@@ -17237,6 +18524,7 @@ mod tests {
             let client = "client-one";
             let linked = !client.is_empty();
             CreationKey::Server {
+                online: false,
                 name: "Client One Server".to_owned(),
                 client: client.to_owned(),
                 minecraft: if linked {
@@ -17282,15 +18570,6 @@ mod tests {
             upsert_activity(&mut rows, activity(&index.to_string(), "completed"));
         }
         assert_eq!(rows.len(), 100);
-    }
-
-    #[test]
-    fn row_filtering_is_case_insensitive_and_searches_exact_metadata() {
-        let name = SharedString::from("Vanilla Repro");
-        let loader = SharedString::from("Minecraft 1.21.1 | Vanilla");
-        assert!(row_matches("repro", [&name, &loader]));
-        assert!(row_matches("1.21.1", [&name, &loader]));
-        assert!(!row_matches("forge", [&name, &loader]));
     }
 
     #[test]
@@ -17371,11 +18650,11 @@ mod tests {
     }
 
     #[test]
-    fn modrinth_search_does_not_reuse_the_server_filter() {
+    fn modrinth_search_does_not_reuse_the_host_list_search() {
         let source = ui_markup();
         assert!(source.contains("root.search(root.host.browser-provider, self.text)"));
-        assert!(source.contains("text <=> root.server-query"));
-        assert!(!source.contains("root.server-query)"));
+        assert!(source.contains("list-query <=> root.list-query"));
+        assert!(!source.contains("search(root.list-query"));
     }
 
     /// What a Properties save of a running server sends after the form was
@@ -17754,7 +19033,7 @@ mod tests {
     }
 
     #[test]
-    fn context_menus_expose_entity_actions_without_redundant_inspector_deletion() {
+    fn context_menus_expose_entity_actions() {
         let source = ui_markup();
         for label in [
             "gui-open-workspace",
@@ -18401,6 +19680,8 @@ mod tests {
         let (ui, workspace, commands, server) = server_mods_window();
         register_browser_install(&ui, &workspace.commands, &workspace);
         register_mod_browser(&ui, &workspace.commands, &workspace);
+        ui.set_add_mods_host(0);
+        ui.set_modal("add-mods".into());
         let id = server.id();
         ui.invoke_search_mods(
             "server".into(),
@@ -18430,6 +19711,7 @@ mod tests {
                     author: String::new(),
                     icon: String::new(),
                     note: String::new(),
+                    downloads: String::new(),
                     server_support: String::new(),
                     blocked_reason: String::new(),
                 }],
@@ -19383,6 +20665,43 @@ mod tests {
 
         apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
 
+        assert_eq!(ui.get_modal(), "mod-result");
+    }
+
+    #[test]
+    fn an_install_confirmation_replaces_the_add_mods_dialog_it_was_asked_from() {
+        let server = ephervex_model::ServerId::new().to_string();
+        let ui = test_window();
+        let (workspace, commands) = test_workspace_sending(&ui);
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        ui.set_modal("add-mods".into());
+        ui.invoke_install_from_browser(
+            "server".into(),
+            server.as_str().into(),
+            "modrinth".into(),
+            "utilitix".into(),
+        );
+        commands.try_iter().for_each(drop);
+
+        apply_mod_install_plan(
+            &ui,
+            server_plan(&server, "utilitix", &[("quiet-lib", "Quiet Library")]),
+            &workspace,
+            &workspace.commands,
+        );
+
+        assert_eq!(ui.get_modal(), "mod-plan");
+    }
+
+    #[test]
+    fn a_report_that_needs_nothing_leaves_the_add_mods_dialog_open() {
+        let ui = test_window();
+        ui.set_modal("add-mods".into());
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "ok"));
+        assert_eq!(ui.get_modal(), "add-mods");
+
+        apply_linked_result(&ui, linked_result(backend::ModalScope::NONE, "error"));
         assert_eq!(ui.get_modal(), "mod-result");
     }
 
@@ -20394,13 +21713,16 @@ mod tests {
     }
 
     #[test]
-    fn card_workspace_actions_select_the_target_before_opening_it() {
+    fn a_card_press_opens_its_host_on_the_overview_surface() {
         let source = ui_markup();
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-instance-id = id; root.selected-instance-index = index; root.select-instance(id); root.open-workspace(\"client\", id, \"Overview\");"
+            "open-client(id) => { shell.list-open = false; root.open-host(\"client\", id); }"
         ));
         assert!(source.contains(
-            "open-workspace(id) => { root.selected-global-server-id = id; root.selected-global-server-index = index; root.select-server(id); root.open-workspace(\"server\", id, \"Overview\");"
+            "open-server(id) => { shell.list-open = false; root.open-host(\"server\", id); }"
+        ));
+        assert!(source.contains(
+            "function open-host(kind: string, id: string) {\n        root.open-host-surface(kind, id, \"Overview\");"
         ));
         // A card's own touch area has to be declared before the layout holding
         // its buttons, so that it sits under them. Slint resolves a pointer
@@ -20408,15 +21730,19 @@ mod tests {
         // the press first and the button never sees it. What that costs the
         // user is proven in `tests/card_pointer_targets.rs`; this only keeps the
         // arrangement visible where it is written.
-        for component in ["component InstanceCard", "component ServerCard"] {
+        let face = ui_declaration(source, "component HostCardFace").expect("the card face");
+        assert!(
+            face.find("@children").expect("the card's own children")
+                < face
+                    .find("body := VerticalLayout")
+                    .expect("the card layout"),
+            "the face puts the card's touch area under its buttons"
+        );
+        for component in ["component ClientCard", "component ServerCard"] {
             let card = ui_declaration(source, component).expect("the card component");
-            let area = card
-                .find("card-area := ContextTouchArea")
-                .expect("a card touch area");
-            let layout = card.find("HorizontalLayout {").expect("the card layout");
             assert!(
-                area < layout,
-                "{component}'s touch area is over its buttons"
+                card.contains("card-area := ContextTouchArea"),
+                "{component} has a touch area of its own"
             );
         }
     }
@@ -20453,19 +21779,16 @@ mod tests {
     #[test]
     fn activity_details_wrap_in_cards_with_content_driven_height() {
         let source = ui_markup();
-        assert!(source.contains("component ActivityCard inherits Rectangle"));
-        assert!(source.contains("height: max(102px, detail-text.preferred-height + 82px)"));
-        assert!(source.contains("detail-text := BodyText { text: item.detail; visible: item.detail != \"\"; wrap: word-wrap; }"));
+        let card = ui_declaration(source, "component ActivityCard inherits HomeCard")
+            .expect("the activity card");
+        assert!(card.contains("detail.preferred-height"));
+        assert!(card.contains("wrap: word-wrap"));
     }
 
     #[test]
-    fn global_navigation_keeps_diagnostics_contextual() {
+    fn logs_are_a_surface_of_each_host_workspace() {
         let source = ui_markup();
-        let logs = "gui-logs";
-        assert!(!source.contains(&format!(
-            r#"label: GuiI18n.text("{logs}"); selected: root.page == 2"#
-        )));
-        // Logs is a surface of each host's workspace, read through that pane's viewer.
+        // Read through that pane's viewer, not a page of their own.
         assert!(source.contains("if host.available && pane.surface == \"Logs\""));
         assert!(source.contains("root.log-show(pane.id, \"files\")"));
     }
@@ -20484,8 +21807,8 @@ mod tests {
             source
                 .matches("root.pending-snapshot-deletion-note = ")
                 .count(),
-            6,
-            "every Delete, including the ones a narrow overview moves to a row of their own"
+            9,
+            "every Delete, including the ones a narrow overview moves to a row of their own and the two in the host column"
         );
         assert!(source.contains("text: root.pending-snapshot-deletion-note"));
     }
@@ -20505,10 +21828,8 @@ mod tests {
         // One reusable row component drives every preference: nearly two
         // hundred hand-written rows would be a second copy of the catalog.
         assert!(source.contains("component MinecraftPreferenceRowCard inherits Rectangle"));
-        assert!(
-            source
-                .contains("for row in root.minecraft-preference-rows : MinecraftPreferenceRowCard")
-        );
+        assert!(source.contains("for row[index] in root.minecraft-preference-rows"));
+        assert!(source.contains(": MinecraftPreferenceRowCard {"));
         assert!(source.contains("ScrollView { viewport-width: self.width;"));
     }
 
@@ -21171,11 +22492,6 @@ mod tests {
         assert!(server_is_globally_visible(&standalone, false));
         assert!(!server_is_globally_visible(&linked, false));
         assert!(server_is_globally_visible(&linked, true));
-        assert_eq!(
-            global_selection_index(std::slice::from_ref(&standalone), "linked"),
-            None,
-            "a hidden selected linked server must not retain a stale index"
-        );
     }
 
     /// A name that opens a web page has to look like one before it is pressed.
@@ -21202,12 +22518,15 @@ mod tests {
     #[test]
     fn linked_server_workspace_and_pending_creation_remain_contextual() {
         let source = ui_markup();
-        assert!(source.contains("for server in host.linked-servers"));
+        assert!(source.contains("listed-servers: split ? host.linked-servers"));
+        assert!(source.contains("for server in self.listed-servers"));
+        assert!(source.contains("for server in root.servers : LinkedServerRow"));
         assert!(source.contains("root.follow-host(pane.id, \"server\", server.id, \"Overview\")"));
         // Scoped by the model it renders rather than by hiding rows, which
         // would leave the room they would have taken behind them.
-        assert!(source.contains("for pending in host.pending-servers"));
-        assert!(source.contains("NameRules.linked-server-name(name)"));
+        assert!(source.contains("listed-pending: split ? host.pending-servers"));
+        assert!(source.contains("for pending in self.listed-pending"));
+        assert!(source.contains("NameRules.linked-server-name(client-name)"));
     }
 
     #[test]
@@ -21234,10 +22553,9 @@ mod tests {
         assert!(source.contains("callback choose-default-mod-catalog(string)"));
         assert!(backend.contains("Command::SaveDefaultModCatalog"));
         assert!(backend.contains("app.set_default_mod_catalog(catalog)"));
-        // The chips follow the stored value, so a refused write cannot leave a
+        // The segments follow the stored value, so a refused write cannot leave a
         // catalog selected that was never recorded.
-        assert!(source.contains("selected: root.default-mod-catalog == \"modrinth\""));
-        assert!(source.contains("selected: root.default-mod-catalog == \"curseforge\""));
+        assert!(source.contains("current: root.default-mod-catalog == \"curseforge\" ? 1 : root.default-mod-catalog == \"modrinth\" ? 0 : -1"));
         // A name a newer Ephervex recorded is reported as itself.
         assert!(source.contains("root.configured-mod-catalog"));
         assert!(source.contains("gui-preferred-mod-catalog-unrecognized"));
@@ -22434,7 +23752,7 @@ mod tests {
     }
 
     #[test]
-    fn leaving_the_page_that_shows_the_capturing_row_ends_the_capture() {
+    fn leaving_the_settings_that_show_the_capturing_row_ends_the_capture() {
         let markup = ui_markup();
         let changed = |property: &str| {
             let start = markup
@@ -22445,7 +23763,7 @@ mod tests {
             body.contains("minecraft-cancel-capture")
         };
         assert!(changed("settings-tab"));
-        assert!(changed("page"));
+        assert!(changed("settings-open"));
     }
 
     /// Tall enough to put every row of a category on screen, which is where a
@@ -22569,8 +23887,7 @@ mod tests {
 
             ui.window()
                 .set_size(slint::PhysicalSize::new(1480, SCREEN_HEIGHT));
-            ui.set_page(4);
-            ui.set_settings_tab("Minecraft".into());
+            ui.invoke_open_settings("Minecraft".into());
             ui.show().expect("show");
             slint::platform::update_timers_and_animations();
             Self {
@@ -22943,5 +24260,332 @@ mod tests {
             screen.key_changes(&following),
             "Tab out of the field left no control to take keys"
         );
+    }
+
+    fn server_item(
+        name: &str,
+        linked_client: Option<ephervex_model::InstanceId>,
+        favorite: bool,
+    ) -> crate::presentation::ServerPresentation {
+        let mut status = crate::presentation::samples::server_status(
+            ephervex_core::RuntimeClassification::Stopped,
+        );
+        status.record.name = name.to_owned();
+        status.record.linked_client_id = linked_client;
+        let mut item = crate::presentation::ServerPresentation::from_status(&status);
+        item.favorite = favorite;
+        item
+    }
+
+    fn client_item(
+        name: &str,
+        launched_ago: Option<chrono::TimeDelta>,
+        attention: &[ephervex_model::AttentionReason],
+    ) -> crate::presentation::InstancePresentation {
+        let mut record = crate::presentation::samples::client_record(
+            ephervex_model::StorageClass::Temporary,
+            ephervex_model::LoaderSelection::vanilla(),
+        );
+        record.name = name.to_owned();
+        record.last_launched_at = launched_ago.map(|ago| chrono::Utc::now() - ago);
+        for reason in attention {
+            record.add_attention(reason.clone());
+        }
+        crate::presentation::InstancePresentation::from_record(&record, 0, 0, None, [])
+    }
+
+    fn apply_hosts(
+        ui: &AppWindow,
+        workspace: &Workspace,
+        clients: Vec<crate::presentation::InstancePresentation>,
+        servers: Vec<crate::presentation::ServerPresentation>,
+    ) -> (Vec<InstanceRow>, Vec<ServerRow>) {
+        let clients = apply_instance_snapshot(
+            ui,
+            clients,
+            Vec::new(),
+            ephervex_core::InstanceSort::default(),
+            ephervex_core::VersionOrder::default(),
+            &mut InstanceListState::default(),
+            &mut workspace.home.borrow_mut(),
+        );
+        let servers = apply_server_snapshot(
+            ui,
+            servers,
+            &mut workspace.server_list.borrow_mut(),
+            &mut workspace.home.borrow_mut(),
+        );
+        let rows = (clients, servers);
+        workspace
+            .state
+            .borrow_mut()
+            .set_rows(rows.0.clone(), rows.1.clone());
+        rows
+    }
+
+    #[test]
+    fn the_server_list_shows_the_servers_the_linked_setting_and_the_search_allow() {
+        let ui = test_window();
+        let owner = ephervex_model::InstanceId::new();
+        let servers = || {
+            vec![
+                server_item("Creative", None, false),
+                server_item("Survival", None, true),
+                server_item("Linked build", Some(owner), false),
+                server_item("Linked favorite", Some(owner), true),
+            ]
+        };
+        let cases: [(bool, &str, &[&str]); 7] = [
+            (false, "", &["Survival", "Creative"]),
+            (
+                true,
+                "",
+                &["Survival", "Linked favorite", "Creative", "Linked build"],
+            ),
+            (false, "creative", &["Creative"]),
+            (false, "SURV", &["Survival"]),
+            (true, "linked", &["Linked favorite", "Linked build"]),
+            (false, "linked", &[]),
+            (true, "zzz", &[]),
+        ];
+        for (show_linked, query, expected) in cases {
+            ui.set_show_linked_servers(show_linked);
+            ui.set_list_query(query.into());
+            let mut list = ServerListState::default();
+            apply_server_snapshot(&ui, servers(), &mut list, &mut HomeState::default());
+            let names: Vec<String> = ui
+                .get_listed_servers()
+                .iter()
+                .map(|row| row.name.to_string())
+                .collect();
+            assert_eq!(
+                names, expected,
+                "show linked: {show_linked}, search: {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_server_list_follows_the_search_without_a_new_snapshot() {
+        let ui = test_window();
+        let mut list = ServerListState::default();
+        apply_server_snapshot(
+            &ui,
+            vec![
+                server_item("Creative", None, false),
+                server_item("Survival", None, false),
+            ],
+            &mut list,
+            &mut HomeState::default(),
+        );
+        assert_eq!(ui.get_listed_servers().row_count(), 2);
+        ui.set_list_query("surv".into());
+        list.render(&ui);
+        let names: Vec<_> = ui.get_listed_servers().iter().map(|row| row.name).collect();
+        assert_eq!(names, ["Survival"]);
+    }
+
+    #[test]
+    fn list_rows_carry_their_state_line_problem_count_and_last_run() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let broken = [
+            ephervex_model::AttentionReason::MissingRoot,
+            ephervex_model::AttentionReason::InterruptedMutation,
+        ];
+        let (clients, servers) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![
+                client_item("Fresh", None, &[]),
+                client_item("Used", Some(chrono::TimeDelta::hours(2)), &[]),
+                client_item("Broken", Some(chrono::TimeDelta::days(3)), &broken),
+            ],
+            vec![server_item("Server", None, false)],
+        );
+        let line = |name: &str| {
+            let row = clients.iter().find(|row| row.name == name).expect("row");
+            (
+                row.state_line.to_string(),
+                row.last_run.to_string(),
+                row.problems,
+            )
+        };
+        assert_eq!(line("Fresh"), ("Not yet".to_owned(), String::new(), 0));
+        assert_eq!(
+            line("Used"),
+            ("Ready".to_owned(), "2 hours ago".to_owned(), 0)
+        );
+        assert_eq!(
+            line("Broken"),
+            ("Needs fix".to_owned(), "3 days ago".to_owned(), 2)
+        );
+        assert_eq!(servers[0].problems, 0);
+        assert!(servers[0].state_line.starts_with(servers[0].state.as_str()));
+        assert!(servers[0].state_line.ends_with(servers[0].address.as_str()));
+        assert_eq!(servers[0].last_run, "");
+    }
+
+    #[test]
+    fn a_pane_showing_a_host_marks_its_card_in_every_list_and_closing_clears_it() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let clients_before = vec![client_item("A", None, &[]), client_item("B", None, &[])];
+        let (clients, servers) = apply_hosts(
+            &ui,
+            &workspace,
+            clients_before.clone(),
+            vec![server_item("S", None, false)],
+        );
+        let open_names = |ui: &AppWindow| {
+            let mut names: Vec<String> = ui
+                .get_instances()
+                .iter()
+                .filter(|row| row.open)
+                .map(|row| row.name.to_string())
+                .collect();
+            names.extend(
+                ui.get_listed_servers()
+                    .iter()
+                    .filter(|row| row.open)
+                    .map(|row| row.name.to_string()),
+            );
+            names
+        };
+        assert!(open_names(&ui).is_empty());
+
+        let first = backend::parse_instance_id(clients[0].id.as_str()).expect("an id");
+        workspace.open(&ui, InstalledHost::Instance(first), Surface::Overview);
+        assert_eq!(open_names(&ui), [clients[0].name.to_string()]);
+
+        // A snapshot rebuilds the rows from records, which do not know a pane
+        // shows one of them.
+        apply_hosts(&ui, &workspace, clients_before, Vec::new());
+        workspace.refresh(&ui);
+        assert_eq!(ui.get_instances().iter().filter(|row| row.open).count(), 1);
+
+        let server = backend::parse_server_id(servers[0].id.as_str()).expect("an id");
+        workspace.open(&ui, InstalledHost::Server(server), Surface::Overview);
+        assert!(ui.get_instances().iter().all(|row| !row.open));
+
+        workspace.close(&ui);
+        assert!(open_names(&ui).is_empty());
+    }
+
+    #[test]
+    fn a_failed_run_of_a_host_no_pane_shows_reaches_home_until_it_starts_again() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        let (clients, _) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("Crashy", None, &[])],
+            Vec::new(),
+        );
+        let host = InstalledHost::Instance(
+            backend::parse_instance_id(clients[0].id.as_str()).expect("an id"),
+        );
+        assert!(!workspace.state.borrow().shown().contains(&host));
+
+        fail_client_run(&workspace, host, 0);
+        workspace.publish_home(&ui);
+        let attention = ui.get_home_attention();
+        assert_eq!(attention.row_count(), 1);
+        let row = attention.row_data(0).expect("a row");
+        assert_eq!(
+            (row.kind.as_str(), row.id.as_str(), row.host_name.as_str()),
+            ("client", host.id().as_str(), "Crashy")
+        );
+        assert_eq!(row.title, lookup("gui-run-failed-client"));
+        assert_eq!(row.surface, "Diagnostics");
+        assert_eq!(ui.get_home_summary(), "1 problem");
+
+        workspace.forget_last_run(host);
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 0);
+    }
+
+    #[test]
+    fn dismissing_a_run_failure_removes_it_from_home() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        diagnosis_flow::register(&ui, &workspace.commands, &workspace);
+        let (clients, _) = apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("Crashy", None, &[])],
+            Vec::new(),
+        );
+        let host = InstalledHost::Instance(
+            backend::parse_instance_id(clients[0].id.as_str()).expect("an id"),
+        );
+        fail_client_run(&workspace, host, 0);
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 1);
+
+        ui.invoke_dismiss_run_failure("client".into(), host.id().into());
+        workspace.publish_home_when_due(&ui);
+        assert_eq!(ui.get_home_attention().row_count(), 0);
+    }
+
+    #[test]
+    fn home_counts_hosts_before_any_list_filter() {
+        let ui = test_window();
+        let workspace = test_workspace(&ui);
+        ui.set_list_query("no host is called this".into());
+        apply_hosts(
+            &ui,
+            &workspace,
+            vec![client_item("A", None, &[]), client_item("B", None, &[])],
+            vec![server_item("S", None, false)],
+        );
+        workspace.publish_home(&ui);
+        assert_eq!(ui.get_home_temporary_count(), 2);
+        assert_eq!(ui.get_home_persistent_count(), 0);
+        assert_eq!(ui.get_home_server_count(), 1);
+    }
+
+    #[test]
+    fn a_clients_state_line_follows_its_restart_stage() {
+        let host = client_host();
+        let mut lifecycle = HostLifecycle::default();
+        let mut row = InstanceRow {
+            id: host.id().into(),
+            state_kind: "running".into(),
+            state_line: "Running".into(),
+            ..InstanceRow::default()
+        };
+        assert!(!lifecycle.stamp_client(&mut row));
+        let request = lifecycle.request(host).expect("a restart request");
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Stopping");
+        lifecycle.apply(host, request, Some(backend::RestartStage::Starting));
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Starting");
+        lifecycle.apply(host, request, None);
+        assert!(lifecycle.stamp_client(&mut row));
+        assert_eq!(row.state_line, "Running");
+    }
+
+    #[test]
+    fn a_servers_state_line_follows_its_restart_stage() {
+        let host = server_host();
+        let mut lifecycle = HostLifecycle::default();
+        let mut row = ServerRow {
+            id: host.id().into(),
+            state: "Running".into(),
+            state_kind: "running".into(),
+            address: "localhost:25565".into(),
+            ..ServerRow::default()
+        };
+        lifecycle.servers.observe(std::slice::from_ref(&row));
+        lifecycle.stamp_server(&mut row);
+        assert_eq!(row.state_line, "Running | localhost:25565");
+        let request = lifecycle.request(host).expect("a restart request");
+        assert!(lifecycle.stamp_server(&mut row));
+        assert_eq!(row.state_line, "Restarting | localhost:25565");
+        lifecycle.apply(host, request, None);
+        lifecycle.stamp_server(&mut row);
+        assert_eq!(row.state_line, "Running | localhost:25565");
     }
 }

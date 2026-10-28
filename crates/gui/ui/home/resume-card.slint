@@ -1,0 +1,56 @@
+// A host to pick up again: when it last ran, a way to start it, and a way to open it.
+
+import { AppButton } from "../components/controls.slint";
+import { BodyText, ElidedHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ResumeRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { HostStrip } from "../host-list/host-card.slint";
+import { HomeCard, VersionChips } from "home-card.slint";
+
+export component ResumeCard inherits HomeCard {
+    in property <ResumeRow> item;
+    callback launch(string, string);
+    callback open-workspace(string, string);
+    strip: HostStrip.of(root.item.state-kind, false, root.item.needs-attention, root.item.kind == "server");
+    open-requested => { root.open-workspace(root.item.kind, root.item.id); }
+    ElidedHeading {
+        text: root.item.host-name;
+        font-size: Theme.row-heading-size;
+        clicked => { root.open-workspace(root.item.kind, root.item.id); }
+    }
+    VersionChips {
+        minecraft: root.item.minecraft;
+        loader: root.item.loader;
+        loader-kind: root.item.loader-kind;
+    }
+    BodyText {
+        text: root.item.state-line;
+        font-size: Theme.label-size;
+        font-weight: 700;
+        color: Theme.text;
+        overflow: elide;
+    }
+    // The buttons raise a hard shadow to the right and below.
+    HorizontalLayout {
+        spacing: 8px;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        alignment: start;
+        if root.item.can-launch : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-launch");
+            accessible-name: GuiI18n.value("gui-home-launch-host", root.item.host-name);
+            icon: @image-url("../../../../assets/icons/play.svg");
+            tone: "success";
+            clicked => { root.launch(root.item.kind, root.item.id); }
+        }
+        AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-open");
+            accessible-name: GuiI18n.value("gui-home-open-host", root.item.host-name);
+            icon: @image-url("../../../../assets/icons/chevron-right.svg");
+            clicked => { root.open-workspace(root.item.kind, root.item.id); }
+        }
+    }
+}

@@ -18,8 +18,7 @@ use slint::{ComponentHandle, PhysicalSize};
 
 fn open_general_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
+    ui.invoke_open_settings("General".into());
     ui.set_follow_mod_dependencies(true);
 }
 

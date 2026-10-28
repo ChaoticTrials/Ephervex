@@ -28,11 +28,13 @@
 //! looks like one.
 
 pub mod atomic;
+pub mod case_notes;
 pub mod clone;
 pub mod config;
 pub(crate) mod copy;
 pub mod diagnostics;
 pub mod folders;
+pub mod host_events;
 pub mod index;
 pub mod lock;
 pub mod metadata;
@@ -49,6 +51,9 @@ pub mod restore;
 mod test_support;
 
 pub use atomic::{AtomicWriteOptions, sync_parent, write_atomic, write_bytes_atomic};
+pub use case_notes::{
+    CaseNotes, CaseRefusal, CaseStep, MAX_CASE_NOTE_CHARS, MAX_CASE_STEP_CHARS, MAX_CASE_STEPS,
+};
 pub use clone::{CloneMethod, CloneReport, clone_file, clone_tree, clone_tree_with_check};
 pub use config::{
     AccountConfig, AccountLookup, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
@@ -63,6 +68,10 @@ pub use diagnostics::{
     SearchOutcome, TextAnchor, TextView,
 };
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
+pub use host_events::{
+    EventHost, HostEvent, HostEventKind, MAX_HOST_EVENTS, append_host_event, read_host_events,
+    remove_host_events,
+};
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
 pub use lock::{
     ForcedStop, LAUNCH_LOCK_FILE, LAUNCH_RUN_VARIABLE, LaunchLock, LaunchState, LockDisposition,

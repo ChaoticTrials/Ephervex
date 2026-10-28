@@ -1,6 +1,6 @@
 # ADR 0049 - A seasonal theme stands in for a built-in theme during its season
 
-**Status:** Accepted
+**Status:** Accepted (amended by ADR 0057)
 
 ## Context
 

@@ -24,8 +24,28 @@ export struct ToastRow {
     repeats: int,
 }
 
+// One reproduction step of an instance.
+export struct CaseStepRow {
+    id: int,
+    text: string,
+    done: bool,
+}
+
+// One line of what happened to a host: when, what, and the text under it.
+export struct CaseEventRow {
+    time: string,
+    text: string,
+    detail: string,
+    // "neutral", "good", "bad" or "notice".
+    tone: string,
+}
+
 export struct InstanceRow {
     snapshot-deletion-note: string,
+    // The issue or bug report the instance reproduces, empty when none is set.
+    issue-link: string,
+    // What the instance contributes to a bug report, as plain text.
+    summary: string,
     id: string,
     name: string,
     minecraft: string,
@@ -87,6 +107,20 @@ export struct InstanceRow {
     // drawn instead. A position rather than an image, so a row still compares
     // equal to itself.
     icon-slot: int,
+    // How many recorded reasons say the instance needs attention.
+    problems: int,
+    // The one line a list card shows for the host's state, without live uptime.
+    state-line: string,
+    // When the instance last ran, as relative text, empty when it never has.
+    last-run: string,
+    // What the user wrote down while reproducing a bug on this instance.
+    case-steps: [CaseStepRow],
+    // How many of the steps are checked off.
+    case-done: int,
+    case-note: string,
+    case-reproduced: int,
+    // Whether a pane currently shows this host.
+    open: bool,
 }
 
 // One entry of a popup menu. A field left out of a literal is its default, so
@@ -154,6 +188,42 @@ export struct ServerRow {
     pair-starting: bool,
     favorite: bool,
     icon-slot: int,
+    // How many recorded reasons say the server needs attention.
+    problems: int,
+    // The state and the address, as the one line a list card shows.
+    state-line: string,
+    // When the server last started, as relative text, empty when it never has.
+    last-run: string,
+    // Whether a pane currently shows this host.
+    open: bool,
+}
+
+// One problem on the Home page: a recorded reason a host needs attention, or
+// a failed run this session. `kind` is "client" or "server" and `surface` is
+// the host surface that explains it.
+export struct AttentionRow {
+    kind: string,
+    id: string,
+    host-name: string,
+    title: string,
+    detail: string,
+    surface: string,
+}
+
+// A host the Home page offers to continue with.
+export struct ResumeRow {
+    kind: string,
+    id: string,
+    host-name: string,
+    last-run: string,
+    // The line under the chips: when the host last ran.
+    state-line: string,
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
+    state-kind: string,
+    needs-attention: bool,
+    can-launch: bool,
 }
 
 export struct ImpactRow {
@@ -271,6 +341,9 @@ export struct BundlePartRow {
     name: string,
     kind: string,
     size: string,
+    // Where the file is, and when it was last written, worded for the page.
+    path: string,
+    modified: string,
     selected: bool,
 }
 
@@ -439,6 +512,9 @@ export struct ModSearchRow {
     // A short, already-localized note about the result, such as whether it
     // fits this instance. Not a number and not a catalog statistic.
     note: string,
+    // How often the catalog says the project was downloaded, worded for the
+    // row; empty when it does not say.
+    downloads: string,
     // Whether this instance already has the project. Decided against the
     // managed mods list, so it follows an install without a re-search.
     installed: bool,
@@ -503,6 +579,11 @@ export struct RunningRow {
     // and there is nothing yet to compare against.
     usage: string,
     last-line: string,
+    // The host's version and loader as its list card shows them, empty when
+    // the host is not one the launcher lists.
+    minecraft: string,
+    loader: string,
+    loader-kind: string,
     // The host's icon in `HostIcons.images`, or -1 when it has none or the
     // host is not one the launcher lists.
     icon-slot: int,
@@ -541,6 +622,14 @@ export struct LogView {
     error-enabled: bool,
     fatal-enabled: bool,
     other-enabled: bool,
+    // How many retained records each level has, whatever the filters show.
+    trace-count: int,
+    debug-count: int,
+    info-count: int,
+    warn-count: int,
+    error-count: int,
+    fatal-count: int,
+    other-count: int,
     revision: int,
     // The selection in reading order, as byte offsets into each end's own
     // row. -1 is no selection.
@@ -569,9 +658,17 @@ export struct ActivityRow {
 export struct AccountRow {
     id: string,
     name: string,
+    // The first letter of the name, capitalized, for the avatar.
+    initial: string,
     kind: string,
     is-default: bool,
     credential-state: string,
+}
+
+// What a theme card shows of its own theme, whichever theme is painted now.
+export struct ThemeSwatch {
+    fill: color,
+    outline: color,
 }
 
 export struct JavaRow {
@@ -893,6 +990,8 @@ export struct HostView {
     diagnosis-problems: [DiagnosticFindingRow],
     diagnosis-customized: [DiagnosticFindingRow],
     diagnosis-checks: [DiagnosticCheckRow],
+    // What happened to the host, oldest first.
+    events: [CaseEventRow],
     diagnosis-crash-report: string,
     // The fix under review: "", "loading", "ready", "failed", or "applying".
     fix-state: string,
@@ -948,4 +1047,7 @@ export struct WorkspacePaneRow {
     can-split-beside: bool,
     can-split-below: bool,
     can-close: bool,
+    // Whether the pane is the quick view, shown over the window rather than
+    // in the workspace.
+    overlay: bool,
 }

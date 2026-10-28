@@ -118,6 +118,10 @@ pub struct SnapshotRestore {
 enum RestoreTarget {
     Client {
         record: ClientRecord,
+        /// The host's own metadata as it stood before the restore, whose
+        /// issue link a restored snapshot must not replace. Absent when that
+        /// metadata could not be read, which leaves the snapshot's link alone.
+        canonical: Option<ClientRecord>,
         /// The temporary tree the record's persistent root supersedes, which
         /// is removed once the restore is final.
         superseded: Option<PathBuf>,
@@ -135,6 +139,8 @@ impl RestoreTarget {
         Ok(match host {
             InstalledHost::Instance(id) => Self::Client {
                 record: app.client(id)?,
+                // Unreadable metadata must not block the restore that replaces it.
+                canonical: app.current_client(id).ok(),
                 superseded: app.registry().superseded_client_root(id)?,
             },
             InstalledHost::Server(id) => Self::Server {
@@ -782,6 +788,7 @@ impl App {
         match target {
             RestoreTarget::Client {
                 record: current,
+                canonical,
                 superseded,
             } => {
                 let path = ephervex_storage::metadata::client_metadata_path(&current.root);
@@ -801,6 +808,9 @@ impl App {
                 }
                 restored.root = current.root;
                 restored.storage = current.storage;
+                if let Some(canonical) = canonical {
+                    restored.issue_link = canonical.issue_link;
+                }
                 let warnings = self
                     .registry()
                     .update_client_committed_claimed(&mut restored, claim)
@@ -1418,6 +1428,104 @@ mod tests {
             )
             .expect("read safety state"),
             b"changed"
+        );
+    }
+
+    #[test]
+    fn restoring_a_snapshot_keeps_the_issue_link_the_instance_has_now() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(
+                NewClient::new("link restore", "1.21.1", LoaderSelection::vanilla())
+                    .with_issue_link("https://example.invalid/issues/1"),
+            )
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let captured = app
+            .create_snapshot(
+                host,
+                "old link",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+
+        app.set_client_issue_link(client.id, Some("https://example.invalid/issues/2"))
+            .expect("change the link");
+        app.restore_snapshot(
+            host,
+            captured.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore snapshot");
+
+        assert_eq!(
+            app.current_client(client.id)
+                .expect("client")
+                .issue_link
+                .as_deref(),
+            Some("https://example.invalid/issues/2")
+        );
+
+        app.set_client_issue_link(client.id, None)
+            .expect("clear the link");
+        app.restore_snapshot(
+            host,
+            captured.id,
+            SnapshotRestoreOptions::default(),
+            &CancellationToken::new(),
+        )
+        .expect("restore snapshot again");
+        assert_eq!(
+            app.current_client(client.id).expect("client").issue_link,
+            None,
+            "a cleared link is not brought back by the snapshot"
+        );
+    }
+
+    #[test]
+    fn restoring_over_unreadable_metadata_keeps_the_snapshots_issue_link() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let app = App::open_at(Paths::rooted_at(temporary.path())).expect("open app");
+        let client = app
+            .create_client_for_test(
+                NewClient::new("damaged", "1.21.1", LoaderSelection::vanilla())
+                    .with_issue_link("https://example.invalid/issues/1"),
+            )
+            .expect("create client");
+        let host = InstalledHost::Instance(client.id);
+        let captured = app
+            .create_snapshot(
+                host,
+                "with link",
+                SnapshotOrigin::Manual,
+                &CancellationToken::new(),
+            )
+            .expect("create snapshot");
+        std::fs::write(
+            ephervex_storage::metadata::client_metadata_path(&client.root),
+            b"{ not json",
+        )
+        .expect("damage metadata");
+
+        app.restore_snapshot(
+            host,
+            captured.id,
+            SnapshotRestoreOptions {
+                safety_snapshot: false,
+            },
+            &CancellationToken::new(),
+        )
+        .expect("restore snapshot");
+
+        assert_eq!(
+            app.current_client(client.id)
+                .expect("client")
+                .issue_link
+                .as_deref(),
+            Some("https://example.invalid/issues/1")
         );
     }
 

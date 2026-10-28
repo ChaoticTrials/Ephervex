@@ -39,7 +39,6 @@ fn named_row(title: &str, project_id: &str, state: &str) -> RelationRow {
 
 /// The page of a mod that needs a library and is needed by another mod.
 fn managing_a_mod(ui: &AppWindow) {
-    ui.set_selected_instance_id("an-id".into());
     ui.set_mod_action_path("mods/SkyblockBuilder.jar".into());
     ui.set_mod_action_name("Skyblock Builder".into());
     ui.set_mod_action_requires(rows(&[row("LibX", "gui-mod-relation-required", "")]));

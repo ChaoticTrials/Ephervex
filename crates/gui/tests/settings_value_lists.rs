@@ -62,10 +62,9 @@ fn an_empty_watched_folder_list_says_what_is_watched_instead() {
 }
 
 /// The rows are read down one page, so a folder that is inset differently from
-/// a favorite release, or runs the width of the page while the others do not, is
-/// what makes the page look unfinished.
+/// a site or a favorite release is what makes the page look unfinished.
 #[test]
-fn a_watched_folder_row_is_inset_and_capped_like_a_favorite_version_row() {
+fn a_watched_folder_row_is_inset_like_a_trusted_site_row() {
     let ui = window();
     storage_settings(&ui);
     ui.set_watched_download_folders(["/tmp"].map(SharedString::from).as_slice().into());
@@ -74,26 +73,16 @@ fn a_watched_folder_row_is_inset_and_capped_like_a_favorite_version_row() {
     // away from reports nothing.
     let folder = shown(&ui, "/tmp").expect("the folder has a row");
     let left = folder.absolute_position().x;
-    let remove = buttons_labeled(&ui, "gui-remove");
-    let remove = remove.first().expect("the folder can be removed");
-    let width = remove.absolute_position().x + remove.size().width - left;
 
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
-    ui.set_favorite_minecraft_versions(["1.21.1"].map(SharedString::from).as_slice().into());
+    ui.invoke_open_settings("General".into());
+    ui.set_trusted_pack_hosts(["example.com"].map(SharedString::from).as_slice().into());
     settle(&ui);
-    let version = shown(&ui, "1.21.1").expect("the version has a row");
+    let site = shown(&ui, "example.com").expect("the site has a row");
 
     assert!(
-        (left - version.absolute_position().x).abs() < 1.0,
-        "a folder starts at {left}px beside a version at {}px",
-        version.absolute_position().x
-    );
-    // The column these cards are held to, so a row does not stretch across a
-    // wide window while the list under it stays put.
-    assert!(
-        width <= 520.0,
-        "a folder row runs {width}px across a 520px column"
+        (left - site.absolute_position().x).abs() < 1.0,
+        "a folder starts at {left}px beside a site at {}px",
+        site.absolute_position().x
     );
 }
 
@@ -112,8 +101,7 @@ fn buttons_labeled(ui: &AppWindow, id: &str) -> Vec<ElementHandle> {
 
 fn storage_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Storage".into());
+    ui.invoke_open_settings("Storage".into());
     // Settings pages are long, and an assertion about what is on screen has to
     // be given a screen to be on.
     ui.window().set_size(PhysicalSize::new(1480, 1600));

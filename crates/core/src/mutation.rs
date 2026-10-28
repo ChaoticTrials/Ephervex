@@ -2000,6 +2000,7 @@ mod tests {
             client_side: ephervex_mod_platform::SideSupport::Unknown,
             server_side: ephervex_mod_platform::SideSupport::Unknown,
             icon_url: None,
+            downloads: None,
         }
     }
 

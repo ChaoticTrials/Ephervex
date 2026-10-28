@@ -22,6 +22,18 @@ export component Heading inherits Text {
     vertical-stretch: 0;
 }
 
+// A short heading in the display face. Only for a few words, never for body
+// text, numbers in a table, or anything long enough to be read at length.
+export component DisplayHeading inherits Text {
+    color: Theme.text;
+    font-family: Theme.heading-family;
+    font-size: Theme.heading-size;
+    font-weight: 600;
+    vertical-alignment: center;
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+}
+
 export component Eyebrow inherits Text {
     color: Theme.text-muted;
     font-size: Theme.caption-size;
@@ -30,12 +42,28 @@ export component Eyebrow inherits Text {
     vertical-stretch: 0;
 }
 
+// A section's heading with a note: beside it when the note is short, and under
+// it, wrapped, when it is long enough to say something that has to be read.
+export component SectionHeading inherits VerticalLayout {
+    in property <string> title;
+    in property <string> detail;
+    private property <bool> long: root.detail.character-count > 90;
+    spacing: 4px;
+    padding-top: 6px;
+    HorizontalLayout {
+        spacing: 12px;
+        DisplayHeading { text: root.title; font-size: Theme.item-title-size; vertical-alignment: bottom; horizontal-stretch: 0; }
+        BodyText { text: root.long ? "" : root.detail; color: Theme.text-muted; font-size: Theme.label-size; overflow: elide; vertical-alignment: bottom; horizontal-stretch: 1; }
+    }
+    if root.long : BodyText { text: root.detail; color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
+}
+
 export component PageIntro inherits VerticalLayout {
     in property <string> title;
     in property <string> subtitle;
     spacing: 5px;
     horizontal-stretch: 1;
-    Heading { text: root.title; font-size: Theme.page-title-size; }
+    DisplayHeading { text: root.title; font-size: Theme.page-title-size; }
     if root.subtitle != "" : BodyText {
         text: root.subtitle;
         color: Theme.text-secondary;
@@ -47,7 +75,7 @@ export component SectionTitle inherits VerticalLayout {
     in property <string> title;
     in property <string> detail;
     spacing: 4px;
-    Heading { text: root.title; font-size: Theme.section-size; }
+    DisplayHeading { text: root.title; font-size: Theme.section-size; }
     if root.detail != "" : BodyText {
         text: root.detail;
         color: Theme.text-muted;
@@ -222,6 +250,7 @@ export component ElidedHeading inherits Rectangle {
         vertical-alignment: center;
     }
     area := ContextTouchArea {
+        mouse-cursor: pointer;
         clicked => { root.clicked(); }
         double-clicked => { root.double-clicked(); }
         context-requested(x, y) => { root.context-requested(x, y); }
@@ -234,9 +263,16 @@ export component ElidedHeading inherits Rectangle {
     }
 }
 
+// The name of a fact in a row of name and value.
+export component FactLabel inherits BodyText {
+    color: Theme.text-muted;
+    width: 105px;
+}
+
 export component FieldLabel inherits Text {
     color: Theme.text-secondary;
     font-size: Theme.label-size;
+    vertical-stretch: 0;
 }
 
 export component SelectableText inherits Rectangle {

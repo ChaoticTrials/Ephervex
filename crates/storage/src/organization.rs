@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 use crate::atomic::{AtomicWriteOptions, write_bytes_atomic};
+use crate::case_notes::CaseNotes;
 use crate::lock::{FileGuard, GuardError};
 use crate::paths::{PathError, Paths};
 
@@ -138,6 +139,10 @@ pub struct Organization {
     /// entry costs that icon and not the file.
     pub client_icons: BTreeMap<InstanceId, String>,
     pub server_icons: BTreeMap<ServerId, String>,
+    /// What the user wrote down while reproducing a bug on an instance. An
+    /// instance with nothing written has no entry.
+    #[serde(deserialize_with = "lenient_cases")]
+    pub client_cases: BTreeMap<InstanceId, CaseNotes>,
     #[serde(flatten)]
     unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -153,6 +158,7 @@ impl Default for Organization {
             client_groups: BTreeMap::new(),
             client_icons: BTreeMap::new(),
             server_icons: BTreeMap::new(),
+            client_cases: BTreeMap::new(),
             unknown: BTreeMap::new(),
         }
     }
@@ -196,6 +202,38 @@ impl Organization {
         self.client_groups.retain(|id, _| clients.contains(id));
         self.client_icons.retain(|id, _| clients.contains(id));
         self.server_icons.retain(|id, _| servers.contains(id));
+        self.client_cases.retain(|id, _| clients.contains(id));
+    }
+
+    /// The case written down for `client`; empty when nothing is.
+    #[must_use]
+    pub fn case_of(&self, client: InstanceId) -> CaseNotes {
+        self.client_cases.get(&client).cloned().unwrap_or_default()
+    }
+
+    /// Changes the case of `client`. An emptied case leaves no entry.
+    pub fn change_case<T>(
+        &mut self,
+        client: InstanceId,
+        change: impl FnOnce(&mut CaseNotes) -> T,
+    ) -> T {
+        let mut case = self.case_of(client);
+        let result = change(&mut case);
+        if case.is_empty() {
+            self.client_cases.remove(&client);
+        } else {
+            self.client_cases.insert(client, case);
+        }
+        result
+    }
+
+    /// Brings every case back within its bounds after a read.
+    fn repair_cases(&mut self) {
+        self.client_cases = std::mem::take(&mut self.client_cases)
+            .into_iter()
+            .map(|(client, case)| (client, case.repaired()))
+            .filter(|(_, case)| !case.is_empty())
+            .collect();
     }
 
     /// Drops assignments and color slots of groups that are not defined.
@@ -271,6 +309,26 @@ enum Stored {
     Unusable,
 }
 
+/// Reads the cases one entry at a time, so an entry that is not a case, or
+/// names no instance, costs itself and not the file.
+fn lenient_cases<'de, D>(deserializer: D) -> Result<BTreeMap<InstanceId, CaseNotes>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let serde_json::Value::Object(entries) = serde_json::Value::deserialize(deserializer)? else {
+        return Ok(BTreeMap::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|(client, case)| {
+            Some((
+                client.parse::<InstanceId>().ok()?,
+                serde_json::from_value::<CaseNotes>(case).ok()?,
+            ))
+        })
+        .collect())
+}
+
 fn read_stored(path: &Path) -> Result<Stored, OrganizationError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -295,6 +353,7 @@ fn read_stored(path: &Path) -> Result<Stored, OrganizationError> {
     Ok(match serde_json::from_slice::<Organization>(&bytes) {
         Ok(mut organization) if organization.format_version <= ORGANIZATION_FORMAT_VERSION => {
             organization.format_version = ORGANIZATION_FORMAT_VERSION;
+            organization.repair_cases();
             Stored::Valid(Box::new(organization))
         }
         _ => Stored::Unusable,
@@ -437,6 +496,13 @@ impl Organization {
 
     fn write_to(&self, path: PathBuf) -> Result<(), OrganizationError> {
         let bytes = serde_json::to_vec(self).map_err(OrganizationError::Serialization)?;
+        // A file the next read would refuse is never written.
+        if bytes.len() as u64 > MAX_ORGANIZATION_BYTES {
+            return Err(OrganizationError::Unwritable {
+                path,
+                source: std::io::Error::other("the organization file would be too large"),
+            });
+        }
         write_bytes_atomic(&path, &bytes, AtomicWriteOptions::private())
             .map_err(|source| OrganizationError::Unwritable { path, source })
     }
@@ -569,6 +635,106 @@ mod tests {
         assert_eq!(loaded.organization, Organization::default());
         assert!(loaded.set_aside.is_none());
         assert!(!paths.organization_file().exists());
+    }
+
+    #[test]
+    fn a_case_is_written_with_its_instance_and_dropped_with_it() {
+        let (_base, paths) = paths();
+        let kept = InstanceId::new();
+        let gone = InstanceId::new();
+        Organization::update(&paths, |organization| {
+            for client in [kept, gone] {
+                organization
+                    .change_case(client, |case| case.add_step("Open the world"))
+                    .expect("step");
+                organization.change_case(client, CaseNotes::count_reproduced);
+            }
+            Ok::<_, OrganizationError>(())
+        })
+        .expect("update");
+
+        let loaded = Organization::load(&paths).expect("load").organization;
+        assert_eq!(loaded.case_of(kept).steps.len(), 1);
+        assert_eq!(loaded.case_of(kept).reproduced, 1);
+
+        Organization::update(&paths, |organization| {
+            organization.retain_hosts(&BTreeSet::from([kept]), &BTreeSet::new());
+            Ok::<_, OrganizationError>(())
+        })
+        .expect("prune");
+        let loaded = Organization::load(&paths).expect("load").organization;
+        assert!(loaded.case_of(gone).is_empty());
+        assert!(!loaded.case_of(kept).is_empty());
+    }
+
+    #[test]
+    fn a_bad_case_entry_costs_that_entry_and_not_the_file() {
+        let (_base, paths) = paths();
+        let client = InstanceId::new();
+        std::fs::create_dir_all(paths.organization_file().parent().expect("parent")).expect("dir");
+        std::fs::write(
+            paths.organization_file(),
+            format!(
+                "{{\"format_version\":1,\"favorite_clients\":[\"{client}\"],\"client_cases\":{{\"{client}\":\"nope\",\"not-an-id\":{{\"note\":\"x\"}}}}}}"
+            ),
+        )
+        .expect("write");
+
+        let loaded = Organization::load(&paths).expect("load");
+        assert!(loaded.set_aside.is_none(), "the file stays in use");
+        assert!(loaded.organization.favorite_clients.contains(&client));
+        assert!(loaded.organization.client_cases.is_empty());
+    }
+
+    #[test]
+    fn an_organization_the_next_read_would_refuse_is_not_written() {
+        let (_base, paths) = paths();
+        let result = Organization::update(&paths, |organization| {
+            let heavy = "\u{1F600}".repeat(crate::case_notes::MAX_CASE_NOTE_CHARS);
+            for _ in 0..300 {
+                organization
+                    .change_case(InstanceId::new(), |case| case.set_note(&heavy))
+                    .expect("each note is within its bound");
+            }
+            Ok::<_, OrganizationError>(())
+        });
+        assert!(matches!(result, Err(OrganizationError::Unwritable { .. })));
+        assert!(!paths.organization_file().exists());
+    }
+
+    #[test]
+    fn an_emptied_case_leaves_no_entry() {
+        let mut organization = Organization::default();
+        let client = InstanceId::new();
+        let id = organization
+            .change_case(client, |case| case.add_step("Step"))
+            .expect("step");
+        assert_eq!(organization.client_cases.len(), 1);
+        organization.change_case(client, |case| case.remove_step(id));
+        assert!(organization.client_cases.is_empty());
+    }
+
+    #[test]
+    fn a_hand_edited_case_file_is_repaired_when_read() {
+        let (_base, paths) = paths();
+        let client = InstanceId::new();
+        let long = "x".repeat(crate::case_notes::MAX_CASE_NOTE_CHARS + 100);
+        let text = format!(
+            "{{\"format_version\":1,\"client_cases\":{{\"{client}\":{{\"steps\":[{{\"id\":1,\"text\":\"ok\"}},{{\"id\":1,\"text\":\"repeat\"}},{{\"id\":2,\"text\":\"  \"}}],\"note\":\"{long}\"}}}}}}"
+        );
+        std::fs::create_dir_all(paths.organization_file().parent().expect("parent")).expect("dir");
+        std::fs::write(paths.organization_file(), text).expect("write");
+
+        let case = Organization::load(&paths)
+            .expect("load")
+            .organization
+            .case_of(client);
+        assert_eq!(case.steps.len(), 1);
+        assert_eq!(case.steps[0].text, "ok");
+        assert_eq!(
+            case.note.chars().count(),
+            crate::case_notes::MAX_CASE_NOTE_CHARS
+        );
     }
 
     #[test]

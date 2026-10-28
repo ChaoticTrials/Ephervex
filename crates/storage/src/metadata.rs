@@ -502,6 +502,7 @@ mod tests {
             java_override: None,
             jvm_override: None,
             allow_pack_mod_version_changes: false,
+            issue_link: None,
             attention: vec![AttentionReason::IgnoredUnsafeCustomization(
                 "pre-launch command".to_owned(),
             )],

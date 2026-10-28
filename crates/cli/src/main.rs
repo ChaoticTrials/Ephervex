@@ -1359,6 +1359,76 @@ enum InstanceCommand {
         #[arg(long, conflicts_with = "path")]
         clear: bool,
     },
+    /// Show, set, or remove the issue link of an instance.
+    ///
+    /// The link points at the bug report or issue the instance reproduces, and
+    /// the desktop application shows it with the instance. With no options,
+    /// prints the current link. A link is a full http:// or https:// address
+    /// without a user name or password, at most 2048 bytes long. It is stored
+    /// exactly as given. `--json` reports it as `issue_link`.
+    Issue {
+        id: InstanceId,
+        /// The issue address, such as https://github.com/owner/repo/issues/42.
+        #[arg(conflicts_with = "clear")]
+        url: Option<String>,
+        /// Remove the issue link.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Show or change the case notes of an instance.
+    ///
+    /// The case is what you write down while reproducing a bug: the steps, a
+    /// note, and how often the bug showed up again. With no action, prints
+    /// them. Steps are named by the number shown beside them. `--json` reports
+    /// `steps` (each with `id`, `text` and `done`), `note` and `reproduced`.
+    Case {
+        id: InstanceId,
+        #[command(subcommand)]
+        action: Option<CaseAction>,
+    },
+}
+
+/// What a case command changes.
+#[derive(Debug, Subcommand)]
+enum CaseAction {
+    /// Add a step at the end of the list.
+    AddStep {
+        /// What to do, such as "Place a belt and fill it".
+        text: String,
+    },
+    /// Mark a step as done.
+    Done {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Mark a step as not done.
+    Undo {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Remove a step.
+    RemoveStep {
+        /// The number shown beside the step.
+        step: u32,
+    },
+    /// Replace the note, or remove it with `--clear`.
+    Note {
+        /// The new note.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        text: Option<String>,
+        /// Remove the note.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Count one more time the bug showed up, or start over with `--reset`.
+    Reproduced {
+        /// Set the count back to zero.
+        #[arg(long)]
+        reset: bool,
+    },
+    /// List what happened to the instance: when it was created, launched and
+    /// stopped, and what its log complained about.
+    History,
 }
 
 #[derive(Debug, Subcommand)]
@@ -2634,8 +2704,142 @@ async fn run_instance_command(
         | InstanceCommand::Unfavorite { .. }
         | InstanceCommand::Group { .. }
         | InstanceCommand::Icon { .. } => run_instance_organization_command(app, command, json)?,
+        InstanceCommand::Issue { id, url, clear } => {
+            run_instance_issue(app, *id, url.as_deref(), *clear, json)?;
+        }
+        InstanceCommand::Case { id, action } => {
+            run_instance_case(app, *id, action.as_ref(), json)?;
+        }
     }
     Ok(())
+}
+
+/// Shows the issue link of an instance, or sets or clears it.
+fn run_instance_issue(
+    app: &App,
+    id: InstanceId,
+    url: Option<&str>,
+    clear: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    if url.is_none() && !clear {
+        let record = app.current_client(id)?;
+        if json {
+            print_json(&serde_json::json!({
+                "id": record.id.to_string(),
+                "issue_link": record.issue_link,
+            }));
+        } else if let Some(link) = &record.issue_link {
+            outln!("{link}");
+        } else {
+            outln!("no issue link is set");
+        }
+        return Ok(());
+    }
+    app.set_client_issue_link(id, url.filter(|_| !clear))?;
+    print_instance(app, &app.current_client(id)?, json)
+}
+
+/// Shows the case notes of an instance, after applying the change asked for.
+fn run_instance_case(
+    app: &App,
+    id: InstanceId,
+    action: Option<&CaseAction>,
+    json: bool,
+) -> anyhow::Result<()> {
+    // Refuses an instance that does not exist before anything is written.
+    app.current_client(id)?;
+    match action {
+        None => {}
+        Some(CaseAction::AddStep { text }) => app.add_case_step(id, text)?,
+        Some(CaseAction::Done { step }) => app.set_case_step_done(id, *step, true)?,
+        Some(CaseAction::Undo { step }) => app.set_case_step_done(id, *step, false)?,
+        Some(CaseAction::RemoveStep { step }) => app.remove_case_step(id, *step)?,
+        Some(CaseAction::Note { text, clear }) => {
+            app.set_case_note(id, text.as_deref().filter(|_| !clear).unwrap_or_default())?;
+        }
+        Some(CaseAction::Reproduced { reset: false }) => app.count_case_reproduced(id)?,
+        Some(CaseAction::Reproduced { reset: true }) => app.reset_case_reproduced(id)?,
+        Some(CaseAction::History) => {
+            print_instance_history(app, id, json);
+            return Ok(());
+        }
+    }
+    let case = app.organization()?.case_of(id);
+    if json {
+        print_json(&serde_json::json!({
+            "id": id.to_string(),
+            "steps": case
+                .steps
+                .iter()
+                .map(|step| serde_json::json!({
+                    "id": step.id,
+                    "text": step.text,
+                    "done": step.done,
+                }))
+                .collect::<Vec<_>>(),
+            "note": case.note,
+            "reproduced": case.reproduced,
+        }));
+        return Ok(());
+    }
+    if case.steps.is_empty() {
+        outln!("steps:      none");
+    } else {
+        outln!("steps:");
+        for step in &case.steps {
+            outln!(
+                "  {}. [{}] {}",
+                step.id,
+                if step.done { "x" } else { " " },
+                step.text
+            );
+        }
+    }
+    if case.note.is_empty() {
+        outln!("note:       none");
+    } else {
+        outln!("note:       {}", case.note);
+    }
+    outln!("reproduced: {}", case.reproduced);
+    Ok(())
+}
+
+/// Lists what happened to an instance, oldest first.
+fn print_instance_history(app: &App, id: InstanceId, json: bool) {
+    let events = app.host_events(ephervex_core::InstalledHost::Instance(id));
+    if json {
+        print_json(&serde_json::json!({
+            "id": id.to_string(),
+            "events": events
+                .iter()
+                .map(|event| serde_json::json!({
+                    "at": event.at.to_rfc3339(),
+                    "kind": event.kind,
+                    "subject": event.subject,
+                    "detail": event.detail,
+                }))
+                .collect::<Vec<_>>(),
+        }));
+        return;
+    }
+    if events.is_empty() {
+        outln!("nothing has happened to this instance yet");
+    }
+    for event in &events {
+        let kind = serde_json::to_value(event.kind)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        outln!(
+            "{}  {kind}  {}",
+            event.at.format("%Y-%m-%d %H:%M:%S UTC"),
+            terminal_safe(&event.subject)
+        );
+        for line in event.detail.lines() {
+            outln!("    {}", terminal_safe(line));
+        }
+    }
 }
 
 fn run_instance_organization_command(
@@ -4753,6 +4957,13 @@ fn print_instance_list(app: &App, args: &InstanceListArgs, json: bool) -> anyhow
     let organized = Organized::load(app)?;
 
     if json {
+        // The index rows lack the issue link, which only the metadata holds.
+        for record in records.values_mut() {
+            record.issue_link = app
+                .current_client(record.id)
+                .ok()
+                .and_then(|current| current.issue_link);
+        }
         let values: Vec<_> = listed
             .iter()
             .filter_map(|facts| records.get(&facts.id))
@@ -9045,6 +9256,9 @@ fn print_instance(app: &App, record: &ClientRecord, json: bool) -> anyhow::Resul
         outln!("loader:    {}", record.loader);
         outln!("root:      {}", record.root.display());
         let view = app.organization_or_empty();
+        if let Some(link) = &record.issue_link {
+            outln!("issue:     {link}");
+        }
         if view.is_favorite_client(record.id) {
             outln!("favorite:  yes");
         }
@@ -10447,6 +10661,7 @@ fn instance_json(app: &App, record: &ClientRecord) -> anyhow::Result<serde_json:
 }
 
 /// `icon` is the stored image file, or null when there is none or it is gone.
+/// `issue_link` is the address the user attached, or null.
 fn instance_json_with(
     app: &App,
     record: &ClientRecord,
@@ -10474,6 +10689,7 @@ fn instance_json_with(
                 "version": record.loader.version,
             },
             "root": json_path(&record.root),
+            "issue_link": record.issue_link,
             "source": record.source,
             "attention": record.attention,
             "needs_attention": record.needs_attention(),
@@ -11184,6 +11400,7 @@ mod tests {
                 client_side: SideSupport::Unsupported,
                 server_side: SideSupport::Required,
                 icon_url: None,
+                downloads: None,
             },
             version: ModVersionInfo {
                 provider: ModProvider::Modrinth,

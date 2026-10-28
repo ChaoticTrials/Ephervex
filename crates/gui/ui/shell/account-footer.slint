@@ -1,0 +1,112 @@
+// The account that launches use and the way to change it, with Settings beside.
+
+import { IconButton, KeyboardFocus } from "../components/controls.slint";
+import { PopupMenu } from "../components/menus.slint";
+import { Plate } from "../components/surface.slint";
+import { GuiI18n } from "../globals.slint";
+import { MenuRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component AccountFooter inherits HorizontalLayout {
+    // The default account's name, its first letter, and what sort of account
+    // it is. All empty when there is none.
+    in property <string> account-name;
+    in property <string> account-initial;
+    in property <string> account-kind;
+    // One row per account, its id the account's.
+    in property <[MenuRow]> account-entries;
+    callback choose-account(string);
+    callback manage-accounts();
+    callback open-settings();
+    spacing: 12px;
+    cross-axis-alignment: center;
+    // The buttons raise a hard shadow to the right and below.
+    padding-right: Theme.shadow-room;
+    padding-bottom: Theme.shadow-room;
+    chip := Rectangle {
+        horizontal-stretch: 1;
+        height: Theme.button-height-big;
+        accessible-role: button;
+        accessible-label: root.account-name != "" ? GuiI18n.value("gui-account-current", root.account-name) : GuiI18n.text("gui-account-switch");
+        accessible-action-default => { chip.open-menu(); }
+        public function open-menu() {
+            // Opens upward, since the footer is at the bottom of the window.
+            menu.show({ x: 0px, y: -((root.account-entries.length + 1) * Theme.menu-row-height + 2 * Theme.menu-frame-padding + Theme.shadow-offset-card + 4px) });
+        }
+        Plate {
+            width: chip.width;
+            height: chip.height;
+            radius: Theme.button-radius;
+            lift: area.has-hover ? Theme.shadow-offset-card + 1px : Theme.shadow-offset-card;
+            fill: Theme.surface;
+            HorizontalLayout {
+                padding: 7px;
+                spacing: 10px;
+                // The initial on the main action's fill; absent without an account.
+                if root.account-initial != "" : Rectangle {
+                    width: self.height;
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.primary-fill;
+                    Text {
+                        text: root.account-initial;
+                        color: Theme.on-primary;
+                        font-family: Theme.heading-family;
+                        font-size: Theme.row-heading-size;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    alignment: center;
+                    Text {
+                        text: root.account-name != "" ? root.account-name : GuiI18n.text("gui-no-accounts");
+                        color: Theme.text;
+                        font-size: Theme.body-size;
+                        font-weight: 700;
+                        overflow: elide;
+                    }
+                    if root.account-kind != "" : Text {
+                        text: root.account-kind;
+                        color: Theme.text-muted;
+                        font-size: Theme.caption-size;
+                        overflow: elide;
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Image {
+                        width: Theme.button-icon-size;
+                        height: Theme.button-icon-size;
+                        source: @image-url("../../../../assets/icons/chevron-down.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                    }
+                }
+            }
+        }
+        KeyboardFocus { width: chip.width; height: chip.height; ring-radius: Theme.button-radius; activated => { chip.open-menu(); } }
+        area := TouchArea {
+            mouse-cursor: MouseCursor.pointer;
+            clicked => { chip.open-menu(); }
+        }
+        menu := PopupMenu {
+            choices: root.account-entries;
+            entries: [{ id: "manage", label: GuiI18n.text("gui-account-manage") }];
+            chosen(id) => { root.choose-account(id); }
+            activated(id) => { root.manage-accounts(); }
+        }
+    }
+    IconButton {
+        // As tall as the account chip beside it, with the same shadow.
+        width: Theme.button-height-big;
+        height: Theme.button-height-big;
+        glyph-size: 24px;
+        lift: Theme.shadow-offset-card;
+        icon: @image-url("../../../../assets/icons/nav-settings.svg");
+        accessible-name: GuiI18n.text("gui-settings");
+        clicked => { root.open-settings(); }
+    }
+}

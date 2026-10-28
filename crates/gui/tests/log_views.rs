@@ -1042,7 +1042,7 @@ fn long_chunks(count: usize) -> ModelRc<LogChunk> {
 }
 
 /// One unwrapped row's height, measured from the view itself rather than
-/// assumed, because it follows the resolved monospace family.
+/// assumed, because it follows the bundled monospace family.
 fn one_line_height(ui: &AppWindow) -> f32 {
     set_view(ui, |view| view.wrap_lines = false);
     settle(ui);
@@ -1153,5 +1153,39 @@ fn server() -> ServerRow {
         pair_starting: false,
         favorite: false,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
+}
+
+/// A pane too narrow for the toolbar's controls keeps them whole and apart,
+/// reachable by scrolling the row, rather than squeezing them over one another.
+#[test]
+fn a_narrow_pane_keeps_the_log_toolbar_controls_apart() {
+    let ui = window();
+    ui.window().set_size(PhysicalSize::new(1120, 900));
+    server_logs(&ui);
+    set_view(&ui, |view| {
+        view.chunks = chunks(5);
+        view.has_content = true;
+    });
+    settle(&ui);
+
+    let place = |key: &str| {
+        let element = ElementHandle::find_by_accessible_label(&ui, &lookup(key))
+            .find(|element| element.size().width > 0.0)
+            .expect("the toolbar control is shown");
+        let left = element.absolute_position().x;
+        (left, left + element.size().width)
+    };
+    let selection = place("gui-copy-selection");
+    let retained = place("gui-copy-retained");
+    assert!(
+        selection.1 <= retained.0 + 0.5,
+        "Copy selection ends at {}, Copy retained starts at {}",
+        selection.1,
+        retained.0
+    );
 }

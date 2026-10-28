@@ -6,14 +6,16 @@ export global Theme {
     in-out property <float> text-scale: 1;
     // The palette every color below reads, chosen from the user's
     // preference. Components read the tokens, never the palette.
-    in-out property <ThemePalette> palette: BuiltInPalettes.dark;
+    in-out property <ThemePalette> palette: BuiltInPalettes.workbench;
     // The scheme the shipped widgets paint in to match.
     out property <ColorScheme> widget-scheme: palette.widget-scheme;
-    // The fixed-width family this machine actually has, resolved once at
-    // startup. `font-family` is matched as a literal family name, so the
-    // generic "monospace" written here matches nothing and only stands
-    // until the real name is set. See the `monospace` module.
-    in-out property <string> mono-family: "monospace";
+    // Interface text, including the shipped widgets. The three families are
+    // bundled static fonts matched by name; weight comes from `font-weight`.
+    out property <string> body-family: "Space Grotesk";
+    // Headings.
+    out property <string> heading-family: "Pixelify Sans";
+    // Logs, versions, paths, and other technical text.
+    out property <string> mono-family: "IBM Plex Mono";
     out property <length> caption-size: 11px * text-scale;
     out property <length> label-size: 12px * text-scale;
     out property <length> body-size: 13px * text-scale;
@@ -21,8 +23,12 @@ export global Theme {
     out property <length> section-size: 16px * text-scale;
     out property <length> heading-size: 17px * text-scale;
     out property <length> item-title-size: 18px * text-scale;
+    // The name on a host list card.
+    out property <length> card-title-size: 17px * text-scale;
     out property <length> brand-size: 20px * text-scale;
     out property <length> workspace-title-size: 23px * text-scale;
+    // The title of a dialog.
+    out property <length> modal-title-size: 22px * text-scale;
     out property <length> about-title-size: 24px * text-scale;
     out property <length> diagnostics-title-size: 25px * text-scale;
     out property <length> page-title-size: 27px * text-scale;
@@ -38,11 +44,9 @@ export global Theme {
     // because hovering it is what raised the popover.
     out property <color> overlay: palette.overlay;
     out property <color> border: palette.border;
-    // One step under `background`, for the chrome that frames a page:
-    // the top bar, the navigation column and the status bar.
+    // The track of a switch that is off.
     out property <color> bar: palette.bar;
-    // Six equal segments along the top bar. Transparent colors leave the
-    // ribbon absent without changing the height or the other page chrome.
+    // Kept for theme-file compatibility; nothing is drawn with them.
     out property <color> header-ribbon-1: palette.header-ribbon-1;
     out property <color> header-ribbon-2: palette.header-ribbon-2;
     out property <color> header-ribbon-3: palette.header-ribbon-3;
@@ -51,10 +55,10 @@ export global Theme {
     out property <color> header-ribbon-6: palette.header-ribbon-6;
     // The floor a technical view is read against - a console, a crash
     // report, a log file - held apart from `background` so a page and the
-    // output on it are never the same surface.
+    // output on it are never the same surface. A disabled field is drawn on it too.
     out property <color> well: palette.well;
-    // A selected row, the card form of the same, and the stronger tint a
-    // selected chip takes.
+    // The highlighted entry of a menu, a dropdown list or the More list, and a
+    // hovered license row, a selected card, and the fill a selected filter chip takes.
     out property <color> selection: palette.selection;
     out property <color> selection-card: palette.selection-card;
     out property <color> selection-strong: palette.selection-strong;
@@ -62,7 +66,8 @@ export global Theme {
     // waiting for a key. Both are an accent held far enough back that what
     // sits on them stays readable.
     out property <color> toggle-on: palette.toggle-on;
-    // The knob of a switch that is on, which has to stand apart from its track.
+    // The knob of a switch, drawn inside the outline every switch has, which
+    // keeps it apart from the track.
     out property <color> toggle-knob: palette.toggle-knob;
     out property <color> capture-active: palette.capture-active;
     out property <color> accent: palette.accent;
@@ -125,46 +130,162 @@ export global Theme {
     // and the wash that puts a modal in front of everything else.
     out property <color> shadow: palette.shadow;
     out property <color> scrim: palette.scrim;
+    // The offset shadow of a card, button, dialog, or panel, kept hard-edged.
+    out property <color> shadow-hard: palette.shadow-hard;
+    // The outline drawn around a card, button, chip, or panel.
+    out property <color> border-strong: palette.border-strong;
+    // The fill of the selected navigation, settings and workspace tab items,
+    // of an icon button under the pointer and of a slider, and the ring
+    // around the selected card. The main button reads `primary-fill`.
+    out property <color> accent-primary: palette.accent-primary;
+    // A caption on an accent or state fill, held apart from `text` so it stays
+    // readable when `text` changes with the page.
+    out property <color> on-accent: palette.on-accent;
+    // The fills of the tags that say what a host is doing: running, in
+    // progress, needing attention. Running also fills a success button and
+    // toast, in progress a lavender button, and stopped an info button. A
+    // server tag takes its own.
+    out property <color> state-running: palette.state-running;
+    out property <color> state-building: palette.state-building;
+    out property <color> state-attention: palette.state-attention;
+    out property <color> state-stopped: palette.state-stopped;
+    out property <color> state-server: palette.state-server;
+    // The fills of the chip that names a host's loader, one per loader.
+    out property <color> chip-forge: palette.chip-forge;
+    out property <color> chip-neoforge: palette.chip-neoforge;
+    out property <color> chip-vanilla: palette.chip-vanilla;
+    // The paper of the workflow banner and of a favorite star that is on.
+    out property <color> note-fill: palette.note-fill;
+    // The fill of a problem box, which carries `danger` text.
+    out property <color> danger-soft: palette.danger-soft;
+    // The fill of something that is fine or in use, such as a healthy diagnosis or the Java runtime in use.
+    out property <color> ok-soft: palette.ok-soft;
+    // The hairline grid drawn over the window floor.
+    out property <color> grid-line: palette.grid-line;
+    // A console or log that is drawn dark on any page, its text, the quieter
+    // text of times and sources on it, and an error line on it.
+    out property <color> terminal: palette.terminal;
+    out property <color> on-terminal: palette.on-terminal;
+    out property <color> on-terminal-muted: palette.on-terminal-muted;
+    out property <color> terminal-error: palette.terminal-error;
     // Every control that can share a toolbar row is this tall, so a row
     // that mixes a button, a chip and a field lines up without each caller
     // having to know what the others chose.
-    out property <length> control-height: 36px;
+    out property <length> control-height: button-height;
+    // The width of the outline around a card, button, chip, or panel.
+    out property <length> strong-border-width: 2px;
+    // The width of a chip's outline, which is lighter than a card's.
+    out property <length> chip-border-width: 1.5px;
+    // The width of the accent ring around the selected card, outside its outline.
+    out property <length> selection-outline-width: 4px;
+    // Corner radii of a card or panel, a small control, a chip, and a button.
+    out property <length> card-radius: 12px;
+    out property <length> small-radius: 9px;
+    out property <length> chip-radius: 6px;
+    out property <length> button-radius: 11px;
+    // The corner radius of a dialog, larger than a card's so it reads as the
+    // frontmost surface.
+    out property <length> dialog-radius: 18px;
+    // How far the hard shadow falls, down and to the right: under a card, under
+    // a small button, and under a dialog or the quick view.
+    out property <length> shadow-offset-card: 4px;
+    out property <length> shadow-offset-small: 3px;
+    out property <length> shadow-offset-dialog: 8px;
+    // How much of a disabled control's own paint remains.
+    out property <float> disabled-opacity: 0.45;
+    // The room a scrolling container keeps at its right and bottom edges, so the
+    // hard shadow of a face against them, and a face lifted or pressed, is not
+    // clipped. A raised face also moves `lift-room` up and left.
+    out property <length> shadow-room: shadow-offset-card + 1px;
+    out property <length> lift-room: 1px;
+    // The side of one square of the grid over the window floor.
+    out property <length> grid-size: 32px;
+    // Button heights: small, default, and big.
+    out property <length> button-height-small: 30px;
+    out property <length> button-height: 38px;
+    out property <length> button-height-big: 48px;
+    // The side of the glyph a button draws before its caption.
+    out property <length> button-icon-size: 15px;
+    // The height of a progress bar on a card.
+    out property <length> progress-bar-height: 10px;
+    // The greeting at the top of Home, and the large readout on a Home card.
+    out property <length> greeting-size: 32px * text-scale;
+    out property <length> stat-size: 26px * text-scale;
+    // The narrowest a Home card is laid out at; the grid of cards drops a
+    // column rather than going below it.
+    out property <length> home-card-min-width: 340px;
+    // The tilt of the status stamp on a page header.
+    out property <angle> stamp-angle: -4deg;
     // The outline drawn around a control that has keyboard focus. Every
     // focusable control draws the same one, so the focused control is the
     // same thing to find wherever Tab lands.
     out property <length> focus-ring-width: 2px;
     // The clear gap between a control's own edge and its focus outline.
     out property <length> focus-ring-offset: 1px;
-    // The primary navigation column. Named because the page bodies beside
-    // it have to know how much of the window is left.
-    out property <length> sidebar-width: 218px;
-    // One entity card's height and the gap under it. Named because the
-    // cards and the arithmetic that scrolls one into view have to agree,
-    // and a list of fixed-height rows is the only reason that arithmetic
-    // can be written at all.
-    out property <length> card-height: 112px;
+    // The gap under a card in a list.
     out property <length> card-gap: 12px;
     // One dependency's row in the third-party license list. Named because a
     // ListView of several hundred rows only virtualizes when every row is
     // the same declared height, so the row and the list have to agree.
     out property <length> license-row-height: 30px;
     // The smallest a pane of a split workspace is drawn. Below it the
-    // panes scroll together instead of overlapping or squeezing their
-    // headers, and the pane geometry arithmetic reads the same numbers.
+    // panes keep this size and are cut off at the window's edge instead of
+    // overlapping or squeezing their headers, and the pane geometry
+    // arithmetic reads the same numbers.
     out property <length> workspace-pane-min-width: 360px;
     out property <length> workspace-pane-min-height: 260px;
     // The column a Minecraft default row keeps its editor and Reset action in
     // once the page is wide enough to split the row. Wide enough for the
     // window size editor's second line beside Reset.
-    out property <length> preference-control-column-width: max(560px, 600px * text-scale);
+    // The band a Minecraft default row opens with when it starts a section.
+    // The second column of a wide page keeps a band of the same height so the
+    // columns' first rows stay level.
+    out property <length> preference-heading-height: 42px * text-scale;
+    out property <length> preference-control-column-width: max(520px, 540px * text-scale);
     // The narrowest row that is split: the control column, the row's inset and
-    // gap, and a text column wide enough for all four badges at the longest
-    // status. Narrower rows stack.
-    out property <length> preference-row-split-width: preference-control-column-width + 400px * text-scale + 34px;
+    // gap, and a text column wide enough for the row's tags. Narrower rows
+    // stack.
+    out property <length> preference-row-split-width: preference-control-column-width + 200px * text-scale + 34px;
+    // The least width the quick view takes while it is not fullscreen.
+    out property <length> quick-view-min-width: 520px;
+    // One row of a popup menu and the padding around its rows. Named because
+    // a menu opened upward has to know how tall it will be.
+    out property <length> menu-row-height: 30px * text-scale;
+    out property <length> menu-frame-padding: 4px;
     // One host surface tab. Every tab is this wide so a tab bar can tell
     // how many fit before the rest move under More.
     out property <length> workspace-tab-width: 112px * text-scale;
     // The narrowest a surface tab gets, in a bar too narrow for two tabs
     // at full width.
     out property <length> workspace-tab-min-width: 90px * text-scale;
+    // The width of the list column on the left of the shell.
+    out property <length> list-column-width: 300px;
+    // The width of the column on the right of the shell.
+    out property <length> side-column-width: 296px;
+    // The padding around the shell's content and the gap between its columns.
+    out property <length> shell-padding: 20px;
+    out property <length> shell-gap: 22px;
+    // The window width from which the list column sits beside the page; below
+    // it the list is a drawer opened from a rail. The page then keeps room for
+    // two split panes.
+    out property <length> shell-list-inline-width: 1120px;
+    // The window width from which the side column sits beside the page; below
+    // it the column is a drawer opened from a rail.
+    out property <length> shell-side-inline-width: 1240px;
+    // The window width from which the column beside a host page sits beside
+    // it; below it the column is a drawer opened from the page's header.
+    out property <length> shell-host-side-inline-width: 1600px;
+    // The padding inside a drawer, which is a plate over the page.
+    out property <length> shell-drawer-padding: 18px;
+    // The width of the rail that holds a drawer's button.
+    out property <length> shell-rail-width: 48px;
+    // The smallest the window can be resized to.
+    out property <length> window-min-width: 1000px;
+    out property <length> window-min-height: 760px;
+    // The height of a chip.
+    out property <length> chip-height: 22px * text-scale;
+    // The count badge on a card's top-right corner, and how far it overhangs the
+    // corner, which a scrolling list pads for.
+    out property <length> corner-badge-size: 22px * text-scale;
+    out property <length> corner-badge-overhang: 9px;
 }

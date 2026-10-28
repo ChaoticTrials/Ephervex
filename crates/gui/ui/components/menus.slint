@@ -10,6 +10,7 @@
 // and a button opens it with `show`.
 
 import { MenuRow } from "../models.slint";
+import { Plate } from "surface.slint";
 import { Theme } from "../theme.slint";
 
 // A touch area that also reports a press of the secondary button and where it
@@ -31,10 +32,10 @@ component MenuRowView inherits Rectangle {
     callback hovered();
     callback unhovered();
     callback picked();
-    height: root.entry.hidden ? 0px : root.entry.separator ? 9px : 30px * Theme.text-scale;
+    height: root.entry.hidden ? 0px : root.entry.separator ? 9px : Theme.menu-row-height;
     preferred-width: root.entry.hidden || root.entry.separator ? 0px : label.preferred-width + (root.entry.submenu ? 44px : 24px);
     visible: !root.entry.hidden;
-    border-radius: 4px;
+    border-radius: Theme.chip-radius;
     background: root.highlighted ? Theme.selection : transparent;
 
     label := Text {
@@ -44,6 +45,7 @@ component MenuRowView inherits Rectangle {
         text: root.entry.separator ? "" : root.entry.label;
         color: root.entry.disabled ? Theme.text-muted : Theme.text;
         font-size: Theme.body-size;
+        font-weight: 600;
         overflow: elide;
         vertical-alignment: center;
     }
@@ -105,7 +107,7 @@ export component PopupMenu inherits Rectangle {
     height: 0px;
     private property <length> anchor-x;
     private property <length> anchor-y;
-    private property <length> frame-padding: 4px;
+    private property <length> frame-padding: Theme.menu-frame-padding;
     // The row a picking key would choose, or -1 for none.
     private property <int> highlight: -1;
     private property <int> count: root.choices.length + root.entries.length;
@@ -169,9 +171,10 @@ export component PopupMenu inherits Rectangle {
     popup := PopupWindow {
         x: root.anchor-x;
         y: root.anchor-y;
-        // The layout's own preferred size already includes its padding.
-        width: min(420px, max(180px, list.preferred-width));
-        height: list.preferred-height;
+        // The layout's own preferred size already includes its padding, and
+        // the hard shadow falls outside it.
+        width: min(420px, max(180px, list.preferred-width)) + Theme.shadow-offset-card;
+        height: list.preferred-height + Theme.shadow-offset-card;
         close-policy: close-on-click-outside;
         forward-focus: keys;
 
@@ -195,14 +198,12 @@ export component PopupMenu inherits Rectangle {
                 return accept;
             }
 
-            Rectangle {
-                border-radius: 7px;
-                border-width: 1px;
-                border-color: Theme.border;
-                background: Theme.overlay;
-                drop-shadow-blur: 16px;
-                drop-shadow-offset-y: 6px;
-                drop-shadow-color: Theme.shadow;
+            Plate {
+                width: parent.width - Theme.shadow-offset-card;
+                height: parent.height - Theme.shadow-offset-card;
+                lift: Theme.shadow-offset-card;
+                radius: Theme.button-radius;
+                fill: Theme.overlay;
                 list := VerticalLayout {
                     padding: root.frame-padding;
                     for choice[index] in root.choices : MenuRowView {

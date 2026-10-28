@@ -4,6 +4,8 @@
 # "Modrinth" under Settings > General > Interface theme. See docs/themes.md
 # for the format.
 #
+# Scroll bars and lists follow the parent, so a dark theme names "dark".
+#
 # Every color is set here so the file also lists what a theme can change.
 # A theme of your own only needs the colors it changes; the rest come from
 # its parent.
@@ -52,12 +54,12 @@ accent = "#1bd96a"
 accent-secondary = "#4f9cff"
 success = "#1bd96a"
 warning = "#ffa347"
-danger = "#ff496e"
+danger = "#ff5f80"
 
 # Filled buttons. The primary green is deeper than the brand green so the
 # light caption on it stays readable.
 primary-fill = "#0f7a3c"
-primary-fill-hover = "#118444"
+primary-fill-hover = "#107f3f"
 on-primary = "#ecf9fb"
 danger-fill = "#6e2233"
 danger-fill-hover = "#8a2a40"
@@ -65,14 +67,14 @@ danger-fill-hover = "#8a2a40"
 # Text.
 text = "#ecf9fb"
 text-secondary = "#b0bac5"
-text-muted = "#7c8591"
+text-muted = "#98a1ad"
 on-danger = "#fff0f3"
 log-error = "#ff7a93"
 
 # Server marks, catalogs and loaders.
 server = "#c78aff"
 modrinth = "#1bd96a"
-curseforge = "#f16436"
+curseforge = "#f47547"
 vanilla = "#91bd59"
 forge = "#5981c0"
 neoforge = "#c0664d"
@@ -88,3 +90,35 @@ group-tone-6 = "#3fd6c6"
 # What is drawn over the window.
 shadow = "#00000099"
 scrim = "#000000a6"
+
+# Outlines and hard shadows, and the grid over the window floor.
+shadow-hard = "#000000"
+border-strong = "#ecf9fb"
+grid-line = "#ffffff09"
+
+# The main action, and a caption on any accent or state fill.
+accent-primary = "#1bd96a"
+on-accent = "#0e0f12"
+
+# What a host is doing.
+state-running = "#1bd96a"
+state-building = "#c78aff"
+state-attention = "#ff496e"
+state-stopped = "#4f9cff"
+state-server = "#4f9cff"
+
+# Sticky notes and warnings, and problem boxes.
+note-fill = "#3a3320"
+danger-soft = "#4a1f2a"
+ok-soft = "#1a372b"
+
+# Consoles and logs drawn on their own dark floor.
+terminal = "#0e0f12"
+on-terminal = "#d6dde5"
+on-terminal-muted = "#7c8591"
+terminal-error = "#ff7a93"
+
+# The loader chip on a host card, with `text` drawn on it.
+chip-forge = "#4a3626"
+chip-neoforge = "#52301f"
+chip-vanilla = "#2f4a26"

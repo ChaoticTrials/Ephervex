@@ -100,6 +100,7 @@ fn project(raw: CurseForgeProject) -> ModProject {
         client_side,
         server_side,
         icon_url: raw.logo.and_then(|logo| non_empty(logo.url)),
+        downloads: raw.download_count,
     }
 }
 

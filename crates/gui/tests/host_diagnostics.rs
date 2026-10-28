@@ -203,10 +203,7 @@ fn problems_and_customizations_say_which_they_are_in_words() {
             )
         ));
         assert!(
-            visible(
-                &ui,
-                &lookup_args("gui-diagnosis-requires", [("value", Arg::from("Flywheel"))])
-            ),
+            visible(&ui, "Flywheel"),
             "the chain says why the dependency is needed"
         );
         assert!(visible(&ui, &lookup("gui-diagnosis-checked-title")));
@@ -233,7 +230,13 @@ fn after_a_failed_run_the_likely_cause_leads_and_customizations_fold_away() {
     });
     settle(&ui);
 
-    assert!(visible(&ui, &lookup("gui-diagnosis-likely-cause")));
+    assert!(visible(
+        &ui,
+        &format!(
+            "{}: Flywheel is turned off",
+            lookup("gui-diagnosis-badge-likely-cause")
+        )
+    ));
     let customized = format!(
         "{}: Custom JVM arguments",
         lookup("gui-diagnosis-badge-customized")
@@ -663,7 +666,7 @@ fn every_action_on_the_server_failure_notice_dismisses_it() {
 #[test]
 fn the_server_failure_notice_stays_inside_its_pane_at_the_smallest_split() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(980, 3000));
+    support::set_minimum_width(&ui, 3000);
     for scale in [1.0, 1.5] {
         ui.global::<Theme>().set_text_scale(scale);
         failed_server(&ui, "crash-2026-09-27_12.00.00-server.txt");
@@ -729,7 +732,7 @@ fn every_action_stays_inside_its_pane_at_the_smallest_split() {
     let ui = window();
     // Only as wide as the window may be, and tall enough that a 1.5x surface
     // is still on screen for the testing backend to find.
-    ui.window().set_size(PhysicalSize::new(980, 3000));
+    support::set_minimum_width(&ui, 3000);
     for scale in [1.0, 1.5] {
         ui.global::<Theme>().set_text_scale(scale);
         for (server_host, kind, _) in host_kinds() {
@@ -788,12 +791,16 @@ fn bundle_rows(selected: bool) -> ModelRc<BundlePartRow> {
             name: "logs/latest.log".into(),
             kind: lookup("gui-bundle-kind-game-log").into(),
             size: "2.0 KiB".into(),
+            path: "/tmp/logs/latest.log".into(),
+            modified: "3 h ago".into(),
             selected,
         },
         BundlePartRow {
             name: "crash-reports/crash-new.txt".into(),
             kind: lookup("gui-bundle-kind-crash-report").into(),
             size: "4.0 KiB".into(),
+            path: "/tmp/crash-reports/crash-new.txt".into(),
+            modified: "2026-10-20 12:00".into(),
             selected: false,
         },
     ]))
@@ -962,6 +969,11 @@ fn instance() -> InstanceRow {
         group_index: 0,
         group_tone: 0,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
+        ..InstanceRow::default()
     }
 }
 
@@ -1007,6 +1019,10 @@ fn server(running: bool) -> ServerRow {
         pair_starting: false,
         favorite: false,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
     }
 }
 
@@ -1044,7 +1060,7 @@ fn window() -> AppWindow {
     // Tall enough that the whole surface is on screen: the testing backend
     // finds only what is within the window, and the bundle choice sits below
     // the findings.
-    ui.window().set_size(PhysicalSize::new(1480, 1400));
+    ui.window().set_size(PhysicalSize::new(2000, 1600));
     ui.show().expect("show");
     ui
 }

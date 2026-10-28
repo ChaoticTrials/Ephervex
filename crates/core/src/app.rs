@@ -16,7 +16,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
+use crate::host_events::storage_event_subject;
 use crate::instance::{CreatedClient, PreferenceContext, validated_entity_name};
+use crate::issue_link::validated_issue_link;
+use crate::mods::InstalledHost;
 use ephervex_download::{
     CacheLayout, DownloadManager, DownloaderConfig, MetadataCacheError, OperationReporter,
 };
@@ -149,6 +152,14 @@ pub struct ApplicationDisplaySettings {
 pub struct ServerApplicationSettings {
     pub make_default_account_operator: bool,
     pub operator_permission_level: OperatorPermissionLevel,
+    /// Whether a new server is offered [`Self::port`] instead of an
+    /// automatically chosen one.
+    pub custom_port: bool,
+    /// The port a new server is offered when [`Self::custom_port`] is set.
+    pub port: u16,
+    /// Whether a new server checks players against Mojang's accounts unless
+    /// told otherwise.
+    pub online_mode: bool,
 }
 
 /// Configured and resolved locations for persistent instances.
@@ -479,7 +490,33 @@ impl App {
                 .config
                 .server_defaults
                 .operator_permission_level,
+            custom_port: self.storage.config.server_defaults.custom_port,
+            port: self.storage.config.server_defaults.port,
+            online_mode: self.storage.config.server_defaults.online_mode,
         }
+    }
+
+    /// Persists the port a new server is offered, keeping the stored port when
+    /// none is given. A port of zero is refused: it asks the operating system
+    /// to choose, which a default cannot mean.
+    pub fn set_server_port_default(
+        &mut self,
+        custom_port: bool,
+        port: Option<u16>,
+    ) -> CoreResult<()> {
+        if port == Some(0) {
+            return Err(ephervex_server::ServerError::InvalidProperty {
+                key: "server-port".to_owned(),
+                reason: "the port must be from 1 to 65535",
+            }
+            .into());
+        }
+        self.mutate_config(|config| {
+            config.server_defaults.custom_port = custom_port;
+            if let Some(port) = port {
+                config.server_defaults.port = port;
+            }
+        })
     }
 
     /// The `server.properties` values new servers start with, by key.
@@ -605,6 +642,12 @@ impl App {
         // Before the catalog lookups, since a refused name costs nothing to
         // find out and nothing is published until it passes.
         request.name = validated_entity_name(&request.name)?;
+        request.issue_link = request
+            .issue_link
+            .as_deref()
+            .map(validated_issue_link)
+            .transpose()?
+            .flatten();
         let validation = self.validate_client_target(&request).await;
         let preferences = after_successful_validation(
             validation,
@@ -695,6 +738,12 @@ impl App {
             discard_unpublished(registry, &record);
             return Err(error.into());
         }
+        self.record_host_event(
+            InstalledHost::Instance(record.id),
+            ephervex_storage::HostEventKind::Created,
+            storage_event_subject(record.storage),
+            "",
+        );
         Ok(CreatedClient {
             record,
             preferences,
@@ -2284,6 +2333,50 @@ mod tests {
     }
 
     #[test]
+    fn creating_a_client_starts_its_history() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let events = app.host_events(InstalledHost::Instance(record.id));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, ephervex_storage::HostEventKind::Created);
+        assert_eq!(events[0].subject, "temporary");
+    }
+
+    #[test]
+    fn removing_a_client_forgets_its_history() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = app
+            .create_client_for_test(NewClient::new(
+                "Repro",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        assert!(
+            !app.host_events(InstalledHost::Instance(record.id))
+                .is_empty()
+        );
+
+        app.delete_client(record.id, FileDisposition::Remove)
+            .expect("remove");
+
+        assert!(
+            app.host_events(InstalledHost::Instance(record.id))
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn failed_target_validation_publishes_no_instance_or_directory() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = app_rooted_at(base.path());
@@ -3413,7 +3506,7 @@ mod tests {
             ApplicationDisplaySettings {
                 text_scale: ApplicationTextScale::Default,
                 technical_text_size: TechnicalTextSize::Default,
-                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
+                theme: ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
                 seasonal_themes: true,
                 show_linked_servers: false,
             }
@@ -3438,6 +3531,31 @@ mod tests {
                 show_linked_servers: false,
             }
         );
+    }
+
+    /// The dark and light names are still the user's recorded choice, so saving
+    /// the other display settings must not rewrite them to the built-in name.
+    #[test]
+    fn saving_display_settings_keeps_a_recorded_dark_or_light_theme() {
+        for name in ["dark", "light"] {
+            let base = tempfile::tempdir().expect("temp dir");
+            let mut app = app_rooted_at(base.path());
+            app.mutate_config(|config| name.clone_into(&mut config.display.color_scheme))
+                .expect("record the theme");
+            let recorded = app.application_display_settings().theme;
+            assert_ne!(recorded, ApplicationTheme::default(), "{name}");
+
+            app.set_application_display_settings(
+                ApplicationTextScale::Large,
+                TechnicalTextSize::Default,
+                &recorded,
+            )
+            .expect("save display settings");
+
+            let reopened = app_rooted_at(base.path());
+            assert_eq!(reopened.config().display.color_scheme, name);
+            assert_eq!(reopened.application_display_settings().theme, recorded);
+        }
     }
 
     /// A season's theme is worked out from the recorded theme each time, so
@@ -3536,9 +3654,39 @@ mod tests {
             ServerApplicationSettings {
                 make_default_account_operator: false,
                 operator_permission_level: OperatorPermissionLevel::from_value(2).expect("level"),
+                custom_port: false,
+                port: 25565,
+                online_mode: false,
             }
         );
         assert!(reopened.config().minecraft_preferences.is_empty());
+    }
+
+    #[test]
+    fn the_default_server_port_persists_and_zero_is_refused() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let mut app = app_rooted_at(base.path());
+        let defaults = app.server_application_settings();
+        assert!(!defaults.custom_port);
+        assert_eq!(defaults.port, 25565);
+
+        app.set_server_port_default(true, Some(25570))
+            .expect("save the port default");
+        let reopened = app_rooted_at(base.path());
+        let saved = reopened.server_application_settings();
+        assert!(saved.custom_port);
+        assert_eq!(saved.port, 25570);
+
+        let mut unchanged = app_rooted_at(base.path());
+        assert!(unchanged.set_server_port_default(true, Some(0)).is_err());
+        assert_eq!(unchanged.server_application_settings().port, 25570);
+
+        unchanged
+            .set_server_port_default(false, None)
+            .expect("switch back to an automatic port");
+        let kept = unchanged.server_application_settings();
+        assert!(!kept.custom_port);
+        assert_eq!(kept.port, 25570, "the custom port is remembered");
     }
 
     #[test]

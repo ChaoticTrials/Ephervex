@@ -637,6 +637,12 @@ impl App {
             forget_absent_mods(&copy.record.root);
         }
         self.inherit_organization(source, copy.record.id);
+        self.record_host_event(
+            crate::mods::InstalledHost::Instance(copy.record.id),
+            ephervex_storage::HostEventKind::Created,
+            crate::host_events::storage_event_subject(copy.record.storage),
+            "",
+        );
         Ok(copy)
     }
 

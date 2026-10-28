@@ -1,4 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" color="#6F797F">
-  <path d="M24 4 40 13v19L24 41 8 32V13L24 4Z" stroke="currentColor" stroke-width="1.7"/>
-  <path d="M8.8 13.4 24 22l15.2-8.6M24 22v18" stroke="currentColor" stroke-width="1.45" opacity=".82"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" fill="none" color="#6F797F" stroke="currentColor" stroke-width="2.52" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="scale(2)">
+    <path d="M12.23 2.89 C14.95 4.2 18.15 6.0 20.45 7.43 C20.66 10.1 20.5 13.25 20.72 16.55 C18.0 18.1 14.4 20.08 11.78 21.25 C9.27 20 6.43 18.25 3.48 16.74 C3.66 13.8 3.44 10.05 3.7 7.63 C6.25 6.08 9.47 4.48 12.23 2.89 Z" />
+    <path d="M3.94 7.83 C6.23 9.0 9.47 10.55 12.17 12.18 C15.1 10.87 17.5 9.16 20.2 7.75" />
+    <path d="M12.17 12.18 C12.2 14.53 11.8 17.6 11.83 20.92" />
+  </g>
 </svg>
+

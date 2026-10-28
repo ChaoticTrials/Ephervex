@@ -1,0 +1,56 @@
+// What a host's Launch, Stop, Restart and Kill actions say and when they can
+// be used. Read by the page header and by the Run card, so both agree.
+
+import { GuiI18n, ServerHints } from "../globals.slint";
+import { HostView } from "../models.slint";
+
+export global HostActions {
+    pure public function is-client(host: HostView) -> bool {
+        return host.kind == "client";
+    }
+    pure public function running(host: HostView) -> bool {
+        return host.kind == "client" ? host.client.can-kill : host.server.can-stop;
+    }
+    pure public function primary-label(host: HostView) -> string {
+        if (host.kind == "client") {
+            return host.client.can-kill ? GuiI18n.text("gui-stop-game") : GuiI18n.text("gui-launch");
+        }
+        return host.server.can-stop ? GuiI18n.text("gui-stop") : GuiI18n.text("gui-start");
+    }
+    pure public function primary-tone(host: HostView) -> string {
+        return host.kind == "client" && host.client.can-kill ? "danger" : "primary";
+    }
+    pure public function primary-enabled(host: HostView) -> bool {
+        return host.available && (host.kind == "client" ? host.client.can-launch || host.client.can-kill : host.server.can-start || host.server.can-stop);
+    }
+    pure public function primary-hint(host: HostView) -> string {
+        if (!host.available) {
+            return GuiI18n.text("gui-workspace-host-gone");
+        }
+        if (host.kind == "client") {
+            return host.client.needs-attention ? GuiI18n.text("gui-hint-needs-attention") : GuiI18n.text("gui-hint-state-changing");
+        }
+        return ServerHints.start(host.server.state-kind, host.server.installed);
+    }
+    pure public function kill-enabled(host: HostView) -> bool {
+        return host.available && host.kind != "client" && host.server.can-kill;
+    }
+    pure public function kill-hint(host: HostView) -> string {
+        return !host.available ? GuiI18n.text("gui-workspace-host-gone") : ServerHints.kill(host.server.state-kind);
+    }
+    pure public function restart-enabled(host: HostView) -> bool {
+        return host.available && (host.kind == "client" ? host.client.can-kill && host.client.can-restart : host.server.can-restart);
+    }
+    pure public function restart-hint(host: HostView) -> string {
+        if (!host.available) {
+            return GuiI18n.text("gui-workspace-host-gone");
+        }
+        if (host.kind == "client") {
+            if (!host.client.can-kill) {
+                return GuiI18n.text("gui-hint-restart-client-stopped");
+            }
+            return !host.client.can-restart ? GuiI18n.text("gui-restart-client-unavailable") : "";
+        }
+        return ServerHints.restart(host.server.state-kind);
+    }
+}

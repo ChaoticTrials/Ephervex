@@ -368,7 +368,7 @@ impl App {
             lock.record_game_pid(process.pid()).await?;
             outcome.game_pid = Some(process.pid());
             observer.emit(LaunchEvent::Running { pid: process.pid() });
-            self.record_launch_time(instance);
+            self.record_launch_time(instance, &outcome.account);
             info!(
                 instance = %instance,
                 version = %outcome.minecraft_version,
@@ -379,6 +379,7 @@ impl App {
             process.wait_with_early_output(observer, cancel).await?
         };
         outcome.exit = Some(exit);
+        self.record_client_exit(instance, &exit);
         if !exit.is_success() {
             outcome.java_failure = self
                 .java_runtime_failure(
@@ -394,7 +395,13 @@ impl App {
 
     /// Recorded before the wait, so a launch that never returns - a game that
     /// hangs, a machine that loses power - still shows as having been launched.
-    fn record_launch_time(&self, instance: InstanceId) {
+    fn record_launch_time(&self, instance: InstanceId, account: &str) {
+        self.record_host_event(
+            InstalledHost::Instance(instance),
+            ephervex_storage::HostEventKind::Launched,
+            account,
+            "",
+        );
         let launched_at = chrono::Utc::now();
         if let Err(error) = self
             .registry_for_services()
@@ -421,7 +428,7 @@ impl App {
             .start_hosted_game(record, options, outcome, lock, observer, cancel)
             .await?;
         outcome.game_pid = Some(game.pid());
-        self.record_launch_time(record.id);
+        self.record_launch_time(record.id, &outcome.account);
         info!(
             instance = %record.id,
             version = %outcome.minecraft_version,

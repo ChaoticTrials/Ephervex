@@ -13,8 +13,8 @@ use ephervex_core::{InstalledHost, SearchQuery};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
+use super::HostLifecycle;
 use super::log_views::LogViews;
-use super::{HostLifecycle, SERVERS_PAGE};
 use crate::backend;
 use crate::ui::{
     AppWindow, HostView, InstanceRow, PendingEntityRow, ServerRow, WorkspaceHostChoice,
@@ -27,6 +27,9 @@ use crate::workspace_layout::{
 /// The workspace's layout, and the rows its host views are built from.
 pub(super) struct WorkspaceState {
     layout: Option<WorkspaceLayout>,
+    /// The host shown over whatever the window shows, with the workspace
+    /// beneath it unchanged.
+    quick: Option<WorkspaceLayout>,
     /// Every client's and server's row from the newest snapshot, before the
     /// lists' own filters: a pane shows its host whatever those lists hide.
     clients: Vec<InstanceRow>,
@@ -38,7 +41,7 @@ pub(super) struct WorkspaceState {
     host_views: Rc<VecModel<HostView>>,
     panes: Rc<VecModel<WorkspacePaneRow>>,
     /// What a pane's host picker offers: every client, and the servers the
-    /// Servers page lists. A linked server is also offered on its client.
+    /// host list shows. A linked server is also offered on its client.
     client_choices: Rc<VecModel<WorkspaceHostChoice>>,
     server_choices: Rc<VecModel<WorkspaceHostChoice>>,
     /// Each host kind's navigation, built once so a re-rendered host view
@@ -51,6 +54,7 @@ impl Default for WorkspaceState {
     fn default() -> Self {
         Self {
             layout: None,
+            quick: None,
             clients: Vec::new(),
             servers: Vec::new(),
             reported: HashMap::new(),
@@ -123,6 +127,35 @@ impl WorkspaceState {
         .unwrap_or(-1)
     }
 
+    /// A host's Minecraft version, loader, and loader kind as its card shows
+    /// them, or empty strings for a host the launcher does not list.
+    pub(super) fn host_target(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> (SharedString, SharedString, SharedString) {
+        let target = |row: Option<(&SharedString, &SharedString, &SharedString)>| {
+            row.map_or_else(Default::default, |(minecraft, loader, kind)| {
+                (minecraft.clone(), loader.clone(), kind.clone())
+            })
+        };
+        match kind {
+            "client" => target(
+                self.clients
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| (&row.minecraft, &row.loader, &row.loader_kind)),
+            ),
+            "server" => target(
+                self.servers
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map(|row| (&row.minecraft, &row.loader, &row.loader_kind)),
+            ),
+            _ => Default::default(),
+        }
+    }
+
     /// Takes the newest rows of every host.
     pub(super) fn set_rows(&mut self, clients: Vec<InstanceRow>, servers: Vec<ServerRow>) {
         self.clients = clients;
@@ -165,13 +198,46 @@ impl WorkspaceState {
         self.layout.take()
     }
 
+    /// Shows `host` in the quick view, replacing what it showed.
+    pub(super) fn open_quick(&mut self, host: InstalledHost, surface: Surface) -> PaneChange {
+        let before = self.quick_content();
+        let layout = WorkspaceLayout::quick_view(host, surface);
+        let after = layout
+            .panes()
+            .first()
+            .map(|placed| (placed.pane.host(), placed.pane.surface()));
+        self.quick = Some(layout);
+        PaneChange { before, after }
+    }
+
+    /// Closes the quick view, answering whether one was open.
+    pub(super) fn close_quick(&mut self) -> bool {
+        self.quick.take().is_some()
+    }
+
+    pub(super) const fn quick(&self) -> Option<&WorkspaceLayout> {
+        self.quick.as_ref()
+    }
+
+    /// What the quick view shows.
+    pub(super) fn quick_content(&self) -> Option<(InstalledHost, Surface)> {
+        let placed = self.quick.as_ref()?.panes();
+        placed
+            .first()
+            .map(|placed| (placed.pane.host(), placed.pane.surface()))
+    }
+
     /// Applies `change` to the layout and reports what `pane` showed before and after.
     pub(super) fn change_pane(
         &mut self,
         pane: PaneId,
         change: impl FnOnce(&mut WorkspaceLayout) -> bool,
     ) -> Option<PaneChange> {
-        let layout = self.layout.as_mut()?;
+        let layout = if pane.is_quick_view() {
+            self.quick.as_mut()?
+        } else {
+            self.layout.as_mut()?
+        };
         let before = layout.pane(pane).map(|pane| (pane.host(), pane.surface()));
         if !change(layout) {
             return None;
@@ -260,7 +326,11 @@ impl WorkspaceState {
         {
             let mut row = shown_row.clone();
             change_row(&mut row, reported);
-            row.workflow_pane = workflow_pane(self.layout.as_ref(), host, &row.workflow_surface);
+            row.workflow_pane = workflow_pane(
+                [self.layout.as_ref(), self.quick.as_ref()],
+                host,
+                &row.workflow_surface,
+            );
             // A rewritten row leaves the lists inside it waiting for the pane to
             // read it again, and Slint drops an in-place change to such a list
             // until then. Only a row that changed is rewritten.
@@ -274,16 +344,6 @@ impl WorkspaceState {
     /// The hosts the workspace shows, in reading order.
     pub(super) fn shown(&self) -> Vec<InstalledHost> {
         self.shown.clone()
-    }
-
-    /// Whether some pane shows `surface` of `host`.
-    pub(super) fn shows(&self, host: InstalledHost, surface: Surface) -> bool {
-        self.layout.as_ref().is_some_and(|layout| {
-            layout
-                .panes()
-                .iter()
-                .any(|placed| placed.pane.host() == host && placed.pane.surface() == surface)
-        })
     }
 
     /// The first pane, in reading order, showing `host`.
@@ -313,15 +373,27 @@ impl WorkspaceState {
         lifecycle: &HostLifecycle,
         logs: &LogViews,
     ) -> Vec<InstalledHost> {
-        let Some(layout) = &self.layout else {
+        let mut hosts = self
+            .layout
+            .as_ref()
+            .map_or_else(Vec::new, WorkspaceLayout::hosts);
+        if let Some(quick) = &self.quick {
+            for host in quick.hosts() {
+                if !hosts.contains(&host) {
+                    hosts.push(host);
+                }
+            }
+        }
+        if hosts.is_empty() {
             ui.set_workspace_open(false);
+            ui.set_quick_view_open(false);
             self.reported.clear();
             self.shown.clear();
             sync_rows(&self.panes, Vec::new());
             sync_rows(&self.host_views, Vec::new());
+            super::stamp_open_hosts(ui);
             return Vec::new();
-        };
-        let hosts = layout.hosts();
+        }
         self.reported.retain(|host, _| hosts.contains(host));
         let entered = hosts
             .iter()
@@ -347,7 +419,12 @@ impl WorkspaceState {
             .iter()
             .map(|&host| self.host_view(host, lifecycle, &pending))
             .collect();
-        let panes = pane_rows(layout, &hosts, &views, logs);
+        let mut panes = self.layout.as_ref().map_or_else(Vec::new, |layout| {
+            pane_rows(layout, &hosts, &views, logs, false)
+        });
+        if let Some(quick) = &self.quick {
+            panes.extend(pane_rows(quick, &hosts, &views, logs, true));
+        }
         let (clients, servers) = self.host_choices(
             ui.get_show_linked_servers(),
             ui.get_pane_host_query().as_str(),
@@ -356,10 +433,14 @@ impl WorkspaceState {
         sync_rows(&self.server_choices, servers);
         sync_rows(&self.host_views, views);
         sync_rows(&self.panes, panes);
-        let back = back_label(ui, layout, &hosts);
+        super::stamp_open_hosts(ui);
+        let back = self.layout.as_ref().and_then(back_label);
         self.shown = hosts;
-        ui.set_workspace_back_label(lookup(back).into());
-        ui.set_workspace_open(true);
+        ui.set_workspace_back_label(
+            back.map_or_else(SharedString::default, |key| lookup(key).into()),
+        );
+        ui.set_workspace_open(self.layout.is_some());
+        ui.set_quick_view_open(self.quick.is_some());
         entered
     }
 
@@ -377,7 +458,11 @@ impl WorkspaceState {
             InstalledHost::Instance(_) => self.client_surfaces.clone(),
             InstalledHost::Server(_) => self.server_surfaces.clone(),
         };
-        view.workflow_pane = workflow_pane(self.layout.as_ref(), host, &view.workflow_surface);
+        view.workflow_pane = workflow_pane(
+            [self.layout.as_ref(), self.quick.as_ref()],
+            host,
+            &view.workflow_surface,
+        );
         view.available = false;
         match host {
             InstalledHost::Instance(_) => {
@@ -421,7 +506,7 @@ impl WorkspaceState {
     }
 
     /// What the host picker offers: every client with its linked servers, and
-    /// the servers the Servers page lists, running hosts first. A client
+    /// the servers the host list shows, running hosts first. A client
     /// ranks by what runs on its card: itself and a linked server, then
     /// itself, then only a linked server, then nothing. Within a rank,
     /// favorites come first and the lists' own order decides the rest.
@@ -523,7 +608,7 @@ impl WorkspaceState {
     }
 }
 
-fn target_summary(minecraft: &str, loader: &str) -> SharedString {
+pub(super) fn target_summary(minecraft: &str, loader: &str) -> SharedString {
     lookup_args(
         "gui-target-summary",
         [
@@ -540,6 +625,7 @@ fn pane_rows(
     hosts: &[InstalledHost],
     views: &[HostView],
     logs: &LogViews,
+    quick: bool,
 ) -> Vec<WorkspacePaneRow> {
     let shape = layout.shape();
     layout
@@ -562,7 +648,18 @@ fn pane_rows(
                 host: index(shown),
                 log: logs.slot_of(id),
                 surface: surface.id().into(),
-                label: pane_label(shape, placed.placement, &name, surface).into(),
+                label: if quick {
+                    lookup_args(
+                        "gui-pane-label-quick-view",
+                        [
+                            ("host", Arg::from(name.as_str())),
+                            ("surface", Arg::from(lookup(surface.label()))),
+                        ],
+                    )
+                } else {
+                    pane_label(shape, placed.placement, &name, surface)
+                }
+                .into(),
                 surface_choice: index(
                     Surface::offered_by(host)
                         .iter()
@@ -572,9 +669,10 @@ fn pane_rows(
                 column: i32::from(placed.placement.column),
                 row: i32::from(placed.placement.row),
                 stacked: placed.placement.stacked,
-                can_split_beside: layout.can_split_beside(id),
-                can_split_below: layout.can_split_below(id),
-                can_close: layout.can_close(id),
+                can_split_beside: !quick && layout.can_split_beside(id),
+                can_split_below: !quick && layout.can_split_below(id),
+                can_close: quick || layout.can_close(id),
+                overlay: quick,
             }
         })
         .collect()
@@ -587,20 +685,15 @@ fn index(position: Option<usize>) -> i32 {
         .unwrap_or(-1)
 }
 
-/// Where Back leaves for. A split leaves for the page it was opened from,
-/// whichever hosts it shows; a single workspace for its host's list, or for
-/// the client it was followed from.
-fn back_label(ui: &AppWindow, layout: &WorkspaceLayout, hosts: &[InstalledHost]) -> &'static str {
-    if layout.shape() == Shape::Single {
-        match hosts.first() {
-            Some(InstalledHost::Server(_)) if layout.way_back().is_some() => "gui-back-instance",
-            Some(InstalledHost::Server(_)) => "gui-back-servers",
-            _ => "gui-back-instances",
-        }
-    } else if ui.get_page() == SERVERS_PAGE {
-        "gui-back-servers"
+/// Where Back leaves for: the client a single pane was followed from, or Home
+/// for a split. A single pane opened from the list has no Back.
+fn back_label(layout: &WorkspaceLayout) -> Option<&'static str> {
+    if layout.shape() != Shape::Single {
+        Some("gui-back-home")
+    } else if layout.way_back().is_some() {
+        Some("gui-back-instance")
     } else {
-        "gui-back-instances"
+        None
     }
 }
 
@@ -612,8 +705,12 @@ fn pair_placement(layout: Option<&WorkspaceLayout>, view: &HostView) -> (bool, b
     } else {
         backend::parse_instance_id(&view.server.paired_client_id).map(InstalledHost::Instance)
     };
-    let (Some(counterpart), Some(layout)) = (counterpart, layout) else {
+    let Some(counterpart) = counterpart else {
         return (false, false);
+    };
+    // With no workspace open, showing the pair opens one.
+    let Some(layout) = layout else {
+        return (false, true);
     };
     let shown = layout.hosts().contains(&counterpart);
     let room = shown
@@ -626,17 +723,19 @@ fn pair_placement(layout: Option<&WorkspaceLayout>, view: &HostView) -> (bool, b
 
 /// The first pane, in reading order, showing `host` on the surface its
 /// workflow is shown in full on, or 0 when none does. Pane ids start at 1.
-fn workflow_pane(layout: Option<&WorkspaceLayout>, host: InstalledHost, surface: &str) -> i32 {
+fn workflow_pane(
+    layouts: [Option<&WorkspaceLayout>; 2],
+    host: InstalledHost,
+    surface: &str,
+) -> i32 {
     let Some(surface) = Surface::parse(surface) else {
         return 0;
     };
-    layout
-        .and_then(|layout| {
-            layout
-                .panes()
-                .into_iter()
-                .find(|placed| placed.pane.host() == host && placed.pane.surface() == surface)
-        })
+    layouts
+        .into_iter()
+        .flatten()
+        .flat_map(WorkspaceLayout::panes)
+        .find(|placed| placed.pane.host() == host && placed.pane.surface() == surface)
         .and_then(|placed| i32::try_from(placed.pane.id().get()).ok())
         .unwrap_or(0)
 }
@@ -868,7 +967,7 @@ mod tests {
 
     #[test]
     fn the_picker_is_offered_every_host_whatever_the_instance_list_hides() {
-        // The workspace is given the rows before the Instances page's filters,
+        // The workspace is given the rows before the host list's filters,
         // so a filter there cannot hide a host from a pane.
         let state = state(
             vec![

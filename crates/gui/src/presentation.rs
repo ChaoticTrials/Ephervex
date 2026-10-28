@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use ephervex_core::{
     ARTIFACT_CACHE_LIMIT_PRESETS, ArtifactCacheLimit, ArtifactCacheLimitError, BlockedProviderFile,
     ByteUnit, ClientRecord, DEFAULT_ARTIFACT_CACHE_LIMIT_BYTES, DeclaredProject,
@@ -19,8 +20,8 @@ use ephervex_core::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::{
-    DefaultModCatalog, LoaderKind, ModProvider, ModRelationKind, Operation, OperationStatus,
-    StorageClass,
+    AttentionReason, DefaultModCatalog, LoaderKind, ModProvider, ModRelationKind, Operation,
+    OperationStatus, StorageClass,
 };
 use slint::SharedString;
 
@@ -103,9 +104,107 @@ pub fn loader_choices(minecraft: &str, current: &str) -> LoaderChoices {
     }
 }
 
+/// The longest a value taken from imported metadata is allowed to run in a
+/// sentence a card or a Home row shows.
+const SHOWN_DETAIL_LIMIT: usize = 80;
+
+/// `text` cut to at most `limit` characters, with three periods where it was cut.
+#[must_use]
+pub fn bounded_text(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_owned();
+    }
+    let kept: String = text.chars().take(limit.saturating_sub(3)).collect();
+    format!("{}...", kept.trim_end())
+}
+
+/// Why a record says a host needs attention, in the user's language.
+///
+/// The detail a reason carries comes from an imported pack, so it is cut to a
+/// bounded length before it reaches a sentence.
+#[must_use]
+pub fn attention_reason_text(reason: &AttentionReason) -> String {
+    let with_detail = |id: &str, detail: &str| {
+        lookup_args(
+            id,
+            [(
+                "detail",
+                Arg::from(bounded_text(detail, SHOWN_DETAIL_LIMIT)),
+            )],
+        )
+    };
+    match reason {
+        AttentionReason::UnsupportedLoader(detail) => {
+            with_detail("gui-attention-unsupported-loader", detail)
+        }
+        AttentionReason::UnsupportedLaunchCustomization(detail) => {
+            with_detail("gui-attention-unsupported-launch-customization", detail)
+        }
+        AttentionReason::IgnoredUnsafeCustomization(detail) => {
+            with_detail("gui-attention-ignored-unsafe-customization", detail)
+        }
+        AttentionReason::MissingRoot => lookup("gui-attention-missing-root"),
+        AttentionReason::BestEffortServerConversion => {
+            lookup("gui-attention-best-effort-server-conversion")
+        }
+        AttentionReason::ManualDownloadRequired(detail) => {
+            with_detail("gui-attention-manual-download-required", detail)
+        }
+        AttentionReason::UnknownServerApplicability(detail) => {
+            with_detail("gui-attention-unknown-server-applicability", detail)
+        }
+        AttentionReason::InterruptedMutation => lookup("gui-attention-interrupted-mutation"),
+        AttentionReason::Unknown => lookup("gui-attention-unknown"),
+    }
+}
+
+fn attention_texts(reasons: &[AttentionReason]) -> Vec<String> {
+    reasons.iter().map(attention_reason_text).collect()
+}
+
+/// The one line a client's list card shows for its state: a restart under way,
+/// else what it is doing now, else that it needs fixing, else whether it has
+/// run. When it last ran is the card's own field beside the line, so the line
+/// does not say it. `restart_stage` is "stopping", "starting" or empty, and
+/// `last_run` is empty for an instance that never launched.
+#[must_use]
+pub fn client_state_line(
+    state_kind: &str,
+    restart_stage: &str,
+    needs_attention: bool,
+    last_run: &str,
+) -> String {
+    match (restart_stage, state_kind) {
+        ("stopping", _) => return lookup("gui-state-stopping"),
+        ("starting", _) => return lookup("gui-state-starting"),
+        _ => {}
+    }
+    match state_kind {
+        "running" => lookup("gui-state-running"),
+        "starting" => lookup("gui-state-starting"),
+        "orphaned" => lookup("gui-state-orphaned"),
+        _ if needs_attention => lookup("gui-state-line-needs-fix"),
+        _ if last_run.is_empty() => lookup("gui-state-line-not-yet"),
+        _ => lookup("gui-state-line-idle"),
+    }
+}
+
+/// The one line a server's list card shows: its state and its address.
+#[must_use]
+pub fn server_state_line(state: &str, address: &str) -> String {
+    lookup_args(
+        "gui-state-line-server",
+        [("state", Arg::from(state)), ("address", Arg::from(address))],
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstancePresentation {
     pub snapshot_deletion_note: String,
+    /// Filled in from the organization, which a record knows nothing about.
+    pub case: ephervex_core::CaseNotes,
+    /// The issue or bug report the instance reproduces, empty when none is set.
+    pub issue_link: String,
     pub id: String,
     pub name: String,
     pub minecraft: String,
@@ -122,6 +221,9 @@ pub struct InstancePresentation {
     pub unstoppable_linked_servers: usize,
     pub managed_mods: usize,
     pub needs_attention: bool,
+    /// Each recorded reason the instance needs attention, in the user's language.
+    pub attention: Vec<String>,
+    pub last_launched_at: Option<DateTime<Utc>>,
     pub state: String,
     pub state_kind: &'static str,
     pub can_launch: bool,
@@ -206,6 +308,15 @@ impl InstancePresentation {
         };
         Self {
             snapshot_deletion_note: String::new(),
+            case: ephervex_core::CaseNotes::default(),
+            // A link edited by hand into the metadata that the core would
+            // refuse is not shown, so credentials or hidden marks in it
+            // never reach the screen; Add replaces it.
+            issue_link: record
+                .issue_link
+                .as_deref()
+                .and_then(|link| ephervex_core::validated_issue_link(link).ok().flatten())
+                .unwrap_or_default(),
             id: record.id.to_string(),
             name: record.name.clone(),
             minecraft: record.minecraft_version.clone(),
@@ -220,6 +331,8 @@ impl InstancePresentation {
             unstoppable_linked_servers: 0,
             managed_mods,
             needs_attention: record.needs_attention(),
+            attention: attention_texts(&record.attention),
+            last_launched_at: record.last_launched_at,
             state,
             state_kind,
             can_launch: launch_state.is_none() && !record.needs_attention(),
@@ -286,6 +399,9 @@ pub struct ServerPresentation {
     pub path: String,
     pub installed: bool,
     pub needs_attention: bool,
+    /// Each recorded reason the server needs attention, in the user's language.
+    pub attention: Vec<String>,
+    pub last_started_at: Option<DateTime<Utc>>,
     pub can_start: bool,
     pub can_stop: bool,
     pub can_restart: bool,
@@ -378,6 +494,8 @@ impl ServerPresentation {
             path: record.root.display().to_string(),
             installed,
             needs_attention: record.needs_attention(),
+            attention: attention_texts(&record.attention),
+            last_started_at: record.last_started_at,
             can_start: installed && !status.runtime.may_be_running() && !needs_recovery,
             can_stop: controlled,
             can_restart: controlled,
@@ -559,6 +677,34 @@ pub const fn loader_kind_name(kind: LoaderKind) -> &'static str {
         LoaderKind::Forge => "forge",
         LoaderKind::NeoForge => "neoforge",
     }
+}
+
+/// A download count worded for a result row, such as "1.2M downloads".
+#[must_use]
+pub fn downloads_text(count: u64) -> String {
+    lookup_args(
+        "gui-mod-downloads",
+        [("value", Arg::from(compact_count(count)))],
+    )
+}
+
+/// A count in few characters: whole below a thousand, then one decimal of the
+/// thousands, millions, or billions, with a trailing `.0` left off.
+fn compact_count(count: u64) -> String {
+    const UNITS: [(u64, &str); 3] = [(1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")];
+    for (size, suffix) in UNITS {
+        if count >= size {
+            // Tenths, rounded down so a figure never reads higher than it is.
+            let tenths = count / (size / 10);
+            let whole = tenths / 10;
+            return if tenths % 10 == 0 {
+                format!("{whole}{suffix}")
+            } else {
+                format!("{whole}.{}{suffix}", tenths % 10)
+            };
+        }
+    }
+    count.to_string()
 }
 
 #[must_use]
@@ -1192,11 +1338,98 @@ impl ModRelationPresentation {
     }
 }
 
+/// Records to present, shared by the tests that need a host.
+#[cfg(test)]
+pub(crate) mod samples {
+    #![allow(clippy::expect_used)]
+
+    use std::path::PathBuf;
+
+    use chrono::Utc;
+    use ephervex_core::{
+        ClientRecord, ImportSource, RuntimeClassification, ServerInstallation,
+        ServerPersistenceHealth, ServerRecord, ServerStatus,
+    };
+    use ephervex_model::{
+        InstanceId, LoaderSelection, ServerId, ServerLaunch, ServerRelativePath, StorageClass,
+    };
+
+    pub(crate) fn client_record(storage: StorageClass, loader: LoaderSelection) -> ClientRecord {
+        ClientRecord {
+            id: InstanceId::new(),
+            name: "Reproduction".to_owned(),
+            root: PathBuf::from("/tmp/reproduction"),
+            storage,
+            minecraft_version: "1.20.1".to_owned(),
+            loader,
+            source: ImportSource::manual(),
+            java_override: None,
+            jvm_override: None,
+            allow_pack_mod_version_changes: false,
+            issue_link: None,
+            attention: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_launched_at: None,
+        }
+    }
+
+    pub(crate) fn server_status(runtime: RuntimeClassification) -> ServerStatus {
+        ServerStatus {
+            record: ServerRecord {
+                id: ServerId::new(),
+                name: "Test server".to_owned(),
+                root: PathBuf::from("/tmp/server"),
+                storage: StorageClass::Temporary,
+                linked_client_id: None,
+                minecraft_version: "1.20.1".to_owned(),
+                loader: LoaderSelection::vanilla(),
+                installation: ServerInstallation::Installed {
+                    launch: ServerLaunch::Jar {
+                        path: ServerRelativePath::new("server.jar").expect("safe relative path"),
+                    },
+                },
+                network: ephervex_core::ServerNetworkSettings::default(),
+                operator_setup: None,
+                source: ImportSource::manual(),
+                java_override: None,
+                jvm_override: None,
+                allow_pack_mod_version_changes: false,
+                attention: Vec::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_started_at: None,
+            },
+            persistence: ServerPersistenceHealth::Healthy,
+            runtime,
+            properties_awaiting_restart: Vec::new(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
 
     use ephervex_core::{DependencyKnowledge, ImpactedMod, ModOrigin, ModPresence};
+
+    #[test]
+    fn a_download_count_is_worded_in_few_characters_and_never_rounded_up() {
+        for (count, shown) in [
+            (0, "0"),
+            (999, "999"),
+            (1_000, "1K"),
+            (1_250, "1.2K"),
+            (999_999, "999.9K"),
+            (1_000_000, "1M"),
+            (12_340_000, "12.3M"),
+            (2_000_000_000, "2B"),
+            (u64::MAX, "18446744073.7B"),
+        ] {
+            assert_eq!(super::compact_count(count), shown, "{count}");
+        }
+        assert_eq!(super::downloads_text(1_500), "1.5K downloads");
+    }
 
     fn impacted(name: &str, distance: u32) -> ImpactedMod {
         ImpactedMod {
@@ -1350,17 +1583,11 @@ mod tests {
         assert!(!view.has_cascade());
     }
 
-    use std::path::PathBuf;
     use std::{net::IpAddr, num::NonZeroU16};
 
     use chrono::Utc;
-    use ephervex_core::{
-        ImportSource, LaunchAndConnectAvailability, RuntimeClassification, ServerInstallation,
-        ServerPersistenceHealth, ServerPreparation,
-    };
-    use ephervex_model::{
-        ConnectionTarget, InstanceId, LoaderSelection, ServerId, ServerLaunch, ServerRelativePath,
-    };
+    use ephervex_core::{LaunchAndConnectAvailability, RuntimeClassification, ServerPreparation};
+    use ephervex_model::{ConnectionTarget, InstanceId, LoaderSelection};
 
     use super::*;
 
@@ -1386,56 +1613,7 @@ mod tests {
         assert!(!linked_result_needs_review([]));
     }
 
-    fn client(storage: StorageClass, loader: LoaderSelection) -> ClientRecord {
-        ClientRecord {
-            id: InstanceId::new(),
-            name: "Reproduction".to_owned(),
-            root: PathBuf::from("/tmp/reproduction"),
-            storage,
-            minecraft_version: "1.20.1".to_owned(),
-            loader,
-            source: ImportSource::manual(),
-            java_override: None,
-            jvm_override: None,
-            allow_pack_mod_version_changes: false,
-            attention: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            last_launched_at: None,
-        }
-    }
-
-    fn server(runtime: RuntimeClassification) -> ServerStatus {
-        ServerStatus {
-            record: ServerRecord {
-                id: ServerId::new(),
-                name: "Test server".to_owned(),
-                root: PathBuf::from("/tmp/server"),
-                storage: StorageClass::Temporary,
-                linked_client_id: None,
-                minecraft_version: "1.20.1".to_owned(),
-                loader: LoaderSelection::vanilla(),
-                installation: ServerInstallation::Installed {
-                    launch: ServerLaunch::Jar {
-                        path: ServerRelativePath::new("server.jar").expect("safe relative path"),
-                    },
-                },
-                network: ephervex_core::ServerNetworkSettings::default(),
-                operator_setup: None,
-                source: ImportSource::manual(),
-                java_override: None,
-                jvm_override: None,
-                allow_pack_mod_version_changes: false,
-                attention: Vec::new(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-                last_started_at: None,
-            },
-            persistence: ServerPersistenceHealth::Healthy,
-            runtime,
-            properties_awaiting_restart: Vec::new(),
-        }
-    }
+    use super::samples::{client_record as client, server_status as server};
 
     #[test]
     fn instance_storage_and_supported_loader_names_are_exact() {
@@ -1562,6 +1740,118 @@ mod tests {
         assert!(item.needs_attention);
         assert!(!item.can_launch);
         assert!(!item.can_kill);
+    }
+
+    #[test]
+    fn every_recorded_attention_reason_is_worded_and_carries_its_detail() {
+        use ephervex_model::AttentionReason as Reason;
+        let with_detail = [
+            Reason::UnsupportedLoader("Quilt".to_owned()),
+            Reason::UnsupportedLaunchCustomization("wrapper".to_owned()),
+            Reason::IgnoredUnsafeCustomization("pre-launch command".to_owned()),
+            Reason::ManualDownloadRequired("sodium.jar".to_owned()),
+            Reason::UnknownServerApplicability("iris.jar".to_owned()),
+        ];
+        for reason in &with_detail {
+            let (Reason::UnsupportedLoader(detail)
+            | Reason::UnsupportedLaunchCustomization(detail)
+            | Reason::IgnoredUnsafeCustomization(detail)
+            | Reason::ManualDownloadRequired(detail)
+            | Reason::UnknownServerApplicability(detail)) = reason
+            else {
+                unreachable!("only reasons with a detail are listed")
+            };
+            assert!(attention_reason_text(reason).contains(detail.as_str()));
+        }
+        let plain = [
+            Reason::MissingRoot,
+            Reason::BestEffortServerConversion,
+            Reason::InterruptedMutation,
+            Reason::Unknown,
+        ];
+        let texts: std::collections::BTreeSet<String> =
+            plain.iter().map(attention_reason_text).collect();
+        assert_eq!(texts.len(), plain.len());
+        assert!(
+            texts
+                .iter()
+                .all(|text| !text.is_empty() && !text.contains("gui-"))
+        );
+    }
+
+    #[test]
+    fn an_attention_detail_from_a_pack_is_cut_to_a_bounded_length() {
+        let long = "x".repeat(500);
+        let text = attention_reason_text(&ephervex_model::AttentionReason::ManualDownloadRequired(
+            long,
+        ));
+        assert!(text.chars().count() < 200);
+        assert!(text.contains("..."));
+        assert_eq!(bounded_text("short", 10), "short");
+        assert_eq!(bounded_text("exactly-10", 10), "exactly-10");
+        assert_eq!(bounded_text("longer than ten", 10), "longer...");
+    }
+
+    #[test]
+    fn a_presented_host_carries_its_attention_reasons_and_last_run() {
+        let mut record = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        let launched = Utc::now();
+        record.last_launched_at = Some(launched);
+        record.add_attention(ephervex_model::AttentionReason::MissingRoot);
+        record.add_attention(ephervex_model::AttentionReason::InterruptedMutation);
+        let item = InstancePresentation::from_record(&record, 0, 0, None, []);
+        assert_eq!(item.last_launched_at, Some(launched));
+        assert_eq!(
+            item.attention,
+            [
+                attention_reason_text(&ephervex_model::AttentionReason::MissingRoot),
+                attention_reason_text(&ephervex_model::AttentionReason::InterruptedMutation),
+            ]
+        );
+
+        let mut status = server(RuntimeClassification::Stopped);
+        status.record.last_started_at = Some(launched);
+        status
+            .record
+            .add_attention(ephervex_model::AttentionReason::BestEffortServerConversion);
+        let item = ServerPresentation::from_status(&status);
+        assert_eq!(item.last_started_at, Some(launched));
+        assert_eq!(item.attention.len(), 1);
+    }
+
+    #[test]
+    fn a_client_state_line_prefers_what_it_is_doing_then_its_problems_then_whether_it_has_run() {
+        assert_eq!(
+            client_state_line("running", "", true, "just now"),
+            "Running"
+        );
+        assert_eq!(client_state_line("starting", "", false, ""), "Starting");
+        assert_eq!(client_state_line("orphaned", "", false, ""), "Orphaned");
+        assert_eq!(
+            client_state_line("ready", "", true, "1 day ago"),
+            "Needs fix"
+        );
+        assert_eq!(client_state_line("ready", "", false, ""), "Not yet");
+        assert_eq!(
+            client_state_line("running", "stopping", true, "just now"),
+            "Stopping"
+        );
+        assert_eq!(
+            client_state_line("ready", "starting", false, ""),
+            "Starting"
+        );
+        assert_eq!(
+            client_state_line("ready", "", false, "2 hours ago"),
+            "Ready"
+        );
+    }
+
+    #[test]
+    fn a_server_state_line_is_its_state_and_address() {
+        assert_eq!(
+            server_state_line("Stopped", "localhost:25565"),
+            "Stopped | localhost:25565"
+        );
     }
 
     #[test]

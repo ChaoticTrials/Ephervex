@@ -80,6 +80,19 @@ pub enum ServerPackTarget {
     NewServer,
     /// The server an import builds alongside its client.
     Import,
+    /// The server a new instance is created with.
+    NewInstance,
+}
+
+/// One change to an instance's case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseChange {
+    AddStep(String),
+    SetStepDone { step: u32, done: bool },
+    RemoveStep(u32),
+    SetNote(String),
+    CountReproduced,
+    ResetReproduced,
 }
 
 #[derive(Debug)]
@@ -91,6 +104,8 @@ pub enum Command {
         host: InstalledHost,
         choices: bool,
     },
+    /// Reads what happened to a host.
+    LoadHostEvents(InstalledHost),
     /// Probes an executable the user named and gives a host's verdict on it.
     CheckHostJavaPath {
         host: InstalledHost,
@@ -98,6 +113,16 @@ pub enum Command {
     },
     /// Installs the managed Java a host expects.
     InstallHostJava(InstalledHost),
+    /// Changes what is written down about reproducing a bug on an instance.
+    ChangeCase {
+        client: InstanceId,
+        change: CaseChange,
+    },
+    /// Sets or clears the issue link of an instance; an empty link clears it.
+    SetIssueLink {
+        client: InstanceId,
+        link: String,
+    },
     /// Marks or unmarks a host as a favorite.
     SetFavorite {
         host: InstalledHost,
@@ -225,6 +250,18 @@ pub enum Command {
         loader: String,
         loader_version: String,
         persistent: bool,
+        /// The issue the instance reproduces; empty when none is given.
+        issue_link: String,
+        /// The name of a server to create linked to the new instance; empty
+        /// when none is wanted.
+        linked_server: String,
+        /// Published server files to build that server from, rather than from
+        /// the instance's own recipe.
+        server_pack: Option<PathBuf>,
+        /// The port that server takes; none leaves it to be chosen.
+        server_port: Option<u16>,
+        /// Whether that server checks players against Mojang's accounts.
+        server_online: bool,
     },
     ImportPack {
         archive: PathBuf,
@@ -564,6 +601,8 @@ pub enum Command {
         loader_version: String,
         persistent: bool,
         port: Option<u16>,
+        /// Whether the server checks players against Mojang's accounts.
+        online: bool,
         /// A published server archive to install as the server's content,
         /// instead of reconstructing it from a client's recipe.
         server_pack: Option<PathBuf>,
@@ -766,6 +805,12 @@ pub enum Command {
     SaveCurseForgeApiKey(String),
     RemoveCurseForgeApiKey,
     OpenCurseForgeKeyHelp,
+    /// Open Ephervex's source page in the browser.
+    OpenSourcePage,
+    /// Open the website of the toolkit the interface is built with.
+    OpenSlintPage,
+    /// Open a file the diagnostic planner listed in the desktop's editor or viewer.
+    OpenFile(PathBuf),
     SaveStorageRoot(String),
     PickWatchedFolder,
     /// Choose jars to add to a host's mods folder from a file dialog.
@@ -797,6 +842,12 @@ pub enum Command {
     SaveDefaultModCatalog {
         catalog: Option<ModProvider>,
     },
+    /// The port a new server is offered.
+    SaveServerPortDefault {
+        custom_port: bool,
+        /// `None` keeps the stored port.
+        port: Option<u16>,
+    },
     /// Everything the General settings page edits, saved together.
     SaveGeneralSettings {
         text_scale: ephervex_core::ApplicationTextScale,
@@ -808,6 +859,9 @@ pub enum Command {
     },
     LoadJavaRuntimes,
     RefreshJava,
+    /// Probes an executable named in the launcher's Java settings and reports
+    /// what it is.
+    CheckJavaPath(PathBuf),
     /// The canonical executable of the runtime to remove.
     RemoveManagedJavaRuntime(String),
     SaveJavaSettings {
@@ -1015,6 +1069,9 @@ pub struct SettingsData {
     pub theme: ephervex_core::ApplicationTheme,
     /// Whether a seasonal theme may stand in for a built-in theme.
     pub seasonal_themes: bool,
+    /// Whether a season is on today, which is when the settings page offers
+    /// the switch for seasonal themes.
+    pub season_on_today: bool,
     /// The theme the interface paints in today: [`Self::theme`], or a
     /// season's theme standing in for it.
     pub shown_theme: ephervex_core::seasonal_theme::ShownTheme,
@@ -1033,6 +1090,13 @@ pub struct SettingsData {
     pub favorite_minecraft_versions: Vec<String>,
     pub make_default_account_operator: bool,
     pub operator_permission_level: u8,
+    /// Whether a new server is offered [`Self::default_server_port`] instead of
+    /// an automatically chosen port.
+    pub default_server_port_custom: bool,
+    pub default_server_port: u16,
+    /// Whether a new server checks players against Mojang's accounts unless
+    /// the dialog says otherwise.
+    pub default_server_online_mode: bool,
     /// The `server.properties` values new servers start with, by key.
     pub server_property_defaults: std::collections::BTreeMap<String, String>,
     pub java_auto_detect: bool,
@@ -1188,7 +1252,7 @@ pub struct LocalModRefusalData {
     pub reason: String,
 }
 
-/// One thing this launcher is running, as the Running page shows it.
+/// One thing this launcher is running, as Home's Running section shows it.
 #[derive(Debug, Clone)]
 pub struct RunningData {
     /// `"client"` or `"server"`, which decides where every action goes.
@@ -1449,9 +1513,12 @@ pub struct ModSearchData {
     /// on both sides of the panel.
     pub icon: String,
     /// A short localized note about the result, such as whether it fits this
-    /// instance. The catalogs do not publish one comparable statistic between
-    /// them, and inventing a number here would only look like one.
+    /// instance.
     pub note: String,
+    /// The catalog's own download figure for the project, worded for the row,
+    /// or empty when it does not say. Each provider counts its own way, so the
+    /// figure is only read against other results from the same one.
+    pub downloads: String,
     /// What the catalog states about the server side: empty when it says the
     /// mod runs there, `unknown` when it says nothing, `client-only` when it
     /// says the mod cannot. Only filled for a server's results.
@@ -1615,6 +1682,10 @@ pub struct BundlePartData {
     /// The core kind, by its stable identifier.
     pub kind: &'static str,
     pub size_bytes: u64,
+    /// Where the file is, as the planner reports it. Only handed back to open it.
+    pub path: PathBuf,
+    /// When it was last written, worded for the page. Empty when unknown.
+    pub modified: String,
 }
 
 /// What one bundle export wrote.
@@ -1797,6 +1868,11 @@ pub enum Event {
     HostRuntime(HostRuntimeData),
     /// A host's Java, as [`Command::LoadHostJava`] read it.
     HostJava(Box<HostJavaData>),
+    /// What happened to a host, as [`Command::LoadHostEvents`] read it.
+    HostEvents {
+        host: InstalledHost,
+        rows: Vec<crate::history_view::HistoryRow>,
+    },
     /// A launch chose its Java runtime or ended, either of which may follow
     /// the install of a managed one.
     JavaPlanned,
@@ -1813,10 +1889,10 @@ pub enum Event {
     },
     /// An install for a host ended, whichever way.
     HostJavaInstallSettled(InstalledHost),
-    /// An import committed its instance and is now creating that instance's
-    /// linked server. The pending card stops standing in for a second instance
+    /// An import or a creation committed its instance and is now creating that
+    /// instance's linked server. The pending card stops standing in for a second instance
     /// and its progress moves onto the instance's own row.
-    ImportLinkedServerStarted {
+    LinkedServerStarted {
         request_id: String,
         instance: String,
         server_name: String,
@@ -2108,6 +2184,12 @@ pub enum Event {
         request: u64,
     },
     JavaRuntimes(Vec<JavaData>),
+    /// What probing the preferred Java executable found: the runtime it is,
+    /// or why it is not one.
+    JavaPathChecked {
+        path: String,
+        result: Result<String, String>,
+    },
     Activity(ActivityData),
     Toast {
         message: String,
@@ -2279,6 +2361,8 @@ pub enum Event {
     },
     WatchedFolderPicked(PathBuf),
     ArtifactCacheStatus(ArtifactCacheStatusData),
+    /// The cache could not be measured; the error itself goes out as a toast.
+    ArtifactCacheUnreadable,
 }
 
 /// The reusable artifact cache as the storage settings show it.
@@ -2292,6 +2376,11 @@ pub struct ArtifactCacheStatusData {
     /// bound, and the view says so rather than presenting it as exact.
     pub exact: bool,
     pub over_budget: bool,
+    /// How much of the budget is used, in thousandths and at most 1000. Zero
+    /// when there is no budget to fill.
+    pub fill_permille: u16,
+    /// Whether the cache has no budget.
+    pub unlimited: bool,
 }
 
 /// What the shared-store maintenance operations report back.
@@ -3434,11 +3523,17 @@ fn run_worker(
                 loader,
                 loader_version,
                 persistent,
+                issue_link,
+                linked_server,
+                server_pack,
+                server_port,
+                server_online,
             } => match loader_selection(&loader, &loader_version) {
                 Ok(loader) => {
                     let paths = app.paths().clone();
                     let entity = name.clone();
                     let reports = events.clone();
+                    let creation_id = request_id.clone();
                     spawn_creation_operation(
                         paths,
                         &events,
@@ -3447,22 +3542,67 @@ fn run_worker(
                             id: request_id,
                             title: "operation-creating-instance",
                             entity,
-                            report_progress: false,
+                            // The server's progress is the card the user watches.
+                            report_progress: !linked_server.is_empty(),
                         },
-                        move |app, _reporter, _cancel| async move {
-                            app.create_client_reporting(
-                                NewClient::new(name, minecraft, loader)
-                                    .with_storage(storage_class(persistent)),
-                            )
-                            .await
-                            .map(|created| {
-                                let _ = reports.send(Event::ClientCreated {
-                                    instance: created.record.id.to_string(),
-                                });
-                                CreationOutcome::Created(localized_value(
+                        move |mut app, reporter, cancel| async move {
+                            let mut request = NewClient::new(name, minecraft, loader)
+                                .with_storage(storage_class(persistent));
+                            if !issue_link.is_empty() {
+                                request = request.with_issue_link(issue_link);
+                            }
+                            let created = app.create_client_reporting(request).await?;
+                            let _ = reports.send(Event::ClientCreated {
+                                instance: created.record.id.to_string(),
+                            });
+                            if linked_server.is_empty() {
+                                return Ok(CreationOutcome::Created(localized_value(
                                     "gui-created-entity",
                                     &created.record.name,
-                                ))
+                                )));
+                            }
+                            // The instance exists whatever happens next, so a
+                            // server that fails is reported beside it, not
+                            // as the instance failing.
+                            send_snapshot(&mut app, &reports);
+                            let _ = reports.send(Event::LinkedServerStarted {
+                                request_id: creation_id,
+                                instance: created.record.id.to_string(),
+                                server_name: linked_server.clone(),
+                            });
+                            let mut server = NewServer::linked(linked_server, created.record.id)
+                                .with_storage(created.record.storage)
+                                .with_online_mode(server_online);
+                            if let Some(port) = server_port {
+                                server = server.with_port(port);
+                            }
+                            let options = ServerCreateOptions {
+                                install_java_if_missing: true,
+                                content: server_pack.map_or(ServerContentSource::Recipe, |path| {
+                                    ServerContentSource::Archive { path }
+                                }),
+                                reporter: Some(reporter),
+                                ..ServerCreateOptions::default()
+                            };
+                            let name = created.record.name;
+                            Ok(match app.create_server(server, &options, &cancel).await {
+                                Ok(_) => CreationOutcome::Created(localized_value(
+                                    "gui-created-with-server",
+                                    &name,
+                                )),
+                                Err(error) if error.is_cancellation() => {
+                                    CreationOutcome::CreatedWithProblem(localized_value(
+                                        "gui-created-server-canceled",
+                                        &name,
+                                    ))
+                                }
+                                Err(error) => {
+                                    CreationOutcome::CreatedWithProblem(localized_values(
+                                        "gui-created-server-failed",
+                                        &name,
+                                        &localized_error(&error),
+                                    ))
+                                }
                             })
                         },
                     );
@@ -5318,6 +5458,7 @@ fn run_worker(
                 loader_version,
                 persistent,
                 port,
+                online,
                 server_pack,
             } => {
                 let acquisition_host = client.as_ref().map(ToString::to_string);
@@ -5331,10 +5472,9 @@ fn run_worker(
                 };
                 match request {
                     Ok(mut request) => {
+                        request = request.with_online_mode(online);
                         if let Some(port) = port {
-                            let mut network = request.network.clone();
-                            network.port = port;
-                            request = request.with_network(network);
+                            request = request.with_port(port);
                         }
                         let paths = app.paths().clone();
                         let acquisition_events = events.clone();
@@ -5678,6 +5818,28 @@ fn run_worker(
                         send_host_mods(&app, host, &events, &refreshed_mods, false);
                     }
                     Err(error) => send_scoped_modal_error(&events, ModalScope::DELETE_MOD, &error),
+                }
+            }
+            Command::ChangeCase { client, change } => {
+                let result = match change {
+                    CaseChange::AddStep(text) => app.add_case_step(client, &text),
+                    CaseChange::SetStepDone { step, done } => {
+                        app.set_case_step_done(client, step, done)
+                    }
+                    CaseChange::RemoveStep(step) => app.remove_case_step(client, step),
+                    CaseChange::SetNote(note) => app.set_case_note(client, &note),
+                    CaseChange::CountReproduced => app.count_case_reproduced(client),
+                    CaseChange::ResetReproduced => app.reset_case_reproduced(client),
+                };
+                match result {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
+                }
+            }
+            Command::SetIssueLink { client, link } => {
+                match app.set_client_issue_link(client, Some(&link)) {
+                    Ok(_) => send_snapshot(&mut app, &events),
+                    Err(error) => send_error(&events, &error),
                 }
             }
             Command::SetFavorite { host, favorite } => {
@@ -6223,6 +6385,30 @@ fn run_worker(
                     error: !opened,
                 });
             }
+            Command::OpenSourcePage => {
+                if !ephervex_core::open_in_browser(ephervex_core::SOURCE_REPOSITORY) {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-source-page-unavailable"),
+                        error: true,
+                    });
+                }
+            }
+            Command::OpenSlintPage => {
+                if !ephervex_core::open_in_browser("https://slint.dev/") {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-slint-page-unavailable"),
+                        error: true,
+                    });
+                }
+            }
+            Command::OpenFile(path) => {
+                if !ephervex_core::open_file(&path) {
+                    let _ = events.send(Event::Toast {
+                        message: lookup("gui-file-unavailable"),
+                        error: true,
+                    });
+                }
+            }
             Command::SaveStorageRoot(root) => {
                 let path = nonempty(&root).map(Path::new);
                 match app.set_persistent_instance_root(path) {
@@ -6258,7 +6444,10 @@ fn run_worker(
                                 artifact_cache_status_data(&status),
                             ));
                         }
-                        Err(error) => send_error(&events, &error),
+                        Err(error) => {
+                            let _ = events.send(Event::ArtifactCacheUnreadable);
+                            send_error(&events, &error);
+                        }
                     },
                 );
             }
@@ -6339,6 +6528,15 @@ fn run_worker(
                     send_snapshot(&mut app, &events);
                 }
             }
+            Command::SaveServerPortDefault { custom_port, port } => {
+                match app.set_server_port_default(custom_port, port) {
+                    Ok(()) => send_snapshot(&mut app, &events),
+                    Err(error) => {
+                        send_error(&events, &error);
+                        send_snapshot(&mut app, &events);
+                    }
+                }
+            }
             Command::SaveGeneralSettings {
                 text_scale,
                 technical_text_size,
@@ -6363,6 +6561,10 @@ fn run_worker(
                         send_snapshot(&mut app, &events);
                     }
                 }
+            }
+            Command::LoadHostEvents(host) => {
+                let rows = crate::history_view::rows(&app.host_events(host), chrono::Local::now());
+                let _ = events.send(Event::HostEvents { host, rows });
             }
             Command::LoadHostJava { host, choices } => {
                 let inventory = Arc::clone(&java_inventory);
@@ -6389,6 +6591,30 @@ fn run_worker(
                             .map(|choice| crate::java_view::choice_view(&choice))
                             .map_err(|error| localized_error(&error));
                         let _ = events.send(Event::HostJavaPathChecked { host, result });
+                    },
+                );
+            }
+            Command::CheckJavaPath(path) => {
+                spawn_in_lane(
+                    &java_lane,
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let probed = path.to_string_lossy().into_owned();
+                        let result = runtime
+                            .block_on(app.test_java_runtime(&path))
+                            .map(|java| {
+                                crate::java_view::reported_runtime_line(
+                                    &java.version_string,
+                                    &java.vendor,
+                                    &java.arch,
+                                )
+                            })
+                            .map_err(|error| localized_error(&error));
+                        let _ = events.send(Event::JavaPathChecked {
+                            path: probed,
+                            result,
+                        });
                     },
                 );
             }
@@ -6789,6 +7015,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         presentation.snapshot_deletion_note =
             snapshot_deletion_note(app, InstalledHost::Instance(record.id));
         presentation.icon = organization.client_icon(record.id);
+        presentation.case = organization.case_of(record.id);
         presentation.facts.favorite = organization.is_favorite_client(record.id);
         presentation.facts.group = organization.group_of(record.id);
         presentation.facts.linking = linking
@@ -6815,7 +7042,7 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         .map(|account| AccountData {
             id: account.id.to_string(),
             name: account.name,
-            kind: account.kind.to_string(),
+            kind: account_kind_name(account.kind),
             is_default: account.is_default,
             credential_state: match account.credential {
                 CredentialPresence::Stored => lookup("gui-credential-stored"),
@@ -6897,6 +7124,8 @@ fn application_settings_on(
         forced,
         today,
     );
+    let season_on_today =
+        forced.is_some() || ephervex_core::seasonal_theme::season_on(today).is_some();
     let themes_folder = app
         .paths()
         .config_dir()
@@ -6939,6 +7168,7 @@ fn application_settings_on(
         technical_text_size_pixels: display.technical_text_size.pixels(),
         theme: display.theme,
         seasonal_themes: display.seasonal_themes,
+        season_on_today,
         shown_theme,
         user_themes,
         branding,
@@ -6949,6 +7179,9 @@ fn application_settings_on(
         favorite_minecraft_versions: app.favorite_minecraft_versions().to_vec(),
         make_default_account_operator: server.make_default_account_operator,
         operator_permission_level: server.operator_permission_level.value(),
+        default_server_port_custom: server.custom_port,
+        default_server_port: server.port,
+        default_server_online_mode: server.online_mode,
         server_property_defaults: app.server_property_defaults().clone(),
         java_auto_detect: java.auto_detect,
         java_auto_download: java.auto_download,
@@ -6973,6 +7206,11 @@ fn application_settings_on(
     })
 }
 
+/// The account kind as a user reads it, never the stable identifier used in config and logs.
+fn account_kind_name(kind: ephervex_model::AccountKind) -> String {
+    lookup(kind.message_id())
+}
+
 /// The measured cache, formatted for the storage settings.
 fn artifact_cache_status_data(
     status: &ephervex_core::ArtifactCacheStatus,
@@ -6985,6 +7223,15 @@ fn artifact_cache_status_data(
         ),
         exact: status.complete,
         over_budget: status.is_over_budget(),
+        fill_permille: status
+            .limit
+            .bytes()
+            .filter(|limit| *limit > 0)
+            .map_or(0, |limit| {
+                let permille = u128::from(status.used_bytes) * 1000 / u128::from(limit);
+                u16::try_from(permille.min(1000)).unwrap_or(1000)
+            }),
+        unlimited: status.limit.bytes().is_none(),
     }
 }
 
@@ -7029,6 +7276,11 @@ fn bundle_parts(
                 name: part.name.clone(),
                 kind: part.kind.as_str(),
                 size_bytes: part.size_bytes,
+                path: part.path.clone(),
+                modified: std::fs::metadata(&part.path)
+                    .and_then(|metadata| metadata.modified())
+                    .map(|modified| modified_time(DateTime::<Utc>::from(modified)))
+                    .unwrap_or_default(),
             })
             .collect(),
         Err(error) => {
@@ -7845,6 +8097,38 @@ fn format_uptime(seconds: Option<i64>) -> String {
                 ("hours", Arg::from(seconds / 3_600)),
                 ("minutes", Arg::from((seconds % 3_600) / 60)),
             ],
+        )
+    }
+}
+
+/// How long ago a host last ran, in the largest unit that says it, or nothing
+/// when it never has. A time in the future reads as just now.
+pub(crate) fn format_last_run(last_run: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
+    let Some(last_run) = last_run else {
+        return String::new();
+    };
+    let seconds = now.signed_duration_since(last_run).num_seconds().max(0);
+    let count = |value: i64| usize::try_from(value).unwrap_or(0);
+    if seconds < 60 {
+        lookup("gui-last-run-just-now")
+    } else if seconds < 3_600 {
+        localized_count("gui-last-run-minutes", count(seconds / 60))
+    } else if seconds < 86_400 {
+        localized_count("gui-last-run-hours", count(seconds / 3_600))
+    } else if seconds < 30 * 86_400 {
+        localized_count("gui-last-run-days", count(seconds / 86_400))
+    } else {
+        lookup_args(
+            "gui-last-run-on",
+            [(
+                "date",
+                Arg::from(
+                    last_run
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d")
+                        .to_string(),
+                ),
+            )],
         )
     }
 }
@@ -9649,8 +9933,7 @@ fn forward_launch_event(
             // The same row, still active, now saying what it is actually doing.
             // Preparation is over and the game is running; without this the
             // activity list describes a download for as long as the session
-            // lasts, and the status bar's count is the only sign anything is
-            // happening at all.
+            // lasts, and nothing else says anything is happening at all.
             if let Ok(observed) = observed_operation.lock()
                 && let Some(operation) = observed.clone()
             {
@@ -10725,6 +11008,9 @@ enum OperationReport {
 /// How a pending client or server creation reached its terminal state.
 enum CreationOutcome {
     Created(String),
+    /// Created, with something left undone that the user needs to hear about
+    /// as a problem, such as a linked server that failed.
+    CreatedWithProblem(String),
     /// The user left a manual artifact-acquisition prompt. The staged server
     /// was already discarded, so there is no error and no success to report.
     Abandoned,
@@ -10882,6 +11168,13 @@ fn spawn_creation_operation<F, Fut>(
                     let _ = events.send(Event::Toast {
                         message,
                         error: false,
+                    });
+                }
+                Ok(CreationOutcome::CreatedWithProblem(message)) => {
+                    reporter.finish(OperationStatus::Completed);
+                    let _ = events.send(Event::Toast {
+                        message,
+                        error: true,
                     });
                 }
                 Ok(CreationOutcome::Abandoned) => {
@@ -12108,7 +12401,13 @@ fn search_row(
         InstalledHost::Instance(_) => (String::new(), String::new()),
         InstalledHost::Server(_) => server_result_notes(&hit),
     };
+    let downloads = hit
+        .project
+        .downloads
+        .map(crate::presentation::downloads_text)
+        .unwrap_or_default();
     ModSearchData {
+        downloads,
         icon: icons
             .get(&hit.project.id)
             .map(|path| path.display().to_string())
@@ -12615,7 +12914,7 @@ fn create_imported_pack_server(
 ) -> Result<(), String> {
     let server_name = suggested_server_name(&pack.record.name);
     send_snapshot(app, run.events);
-    let _ = run.events.send(Event::ImportLinkedServerStarted {
+    let _ = run.events.send(Event::LinkedServerStarted {
         request_id: run.request_id.to_owned(),
         instance: pack.record.id.to_string(),
         server_name: server_name.clone(),
@@ -12659,7 +12958,7 @@ struct UiProgressSink {
     entity: String,
     allow_cancel: bool,
     /// A pending card standing in for this work in a list, which is shown
-    /// where the user is looking rather than on the activity page they would
+    /// where the user is looking rather than in the activity list they would
     /// have to go and find.
     pending: Option<String>,
 }
@@ -13984,6 +14283,20 @@ fn relative_time(timestamp: DateTime<Utc>) -> String {
     }
 }
 
+/// When a file was written, for a list of files: how long ago while that is
+/// under a day, and the date and time after.
+fn modified_time(timestamp: DateTime<Utc>) -> String {
+    let age = Utc::now().signed_duration_since(timestamp);
+    if age.num_days() < 1 {
+        relative_time(timestamp)
+    } else {
+        timestamp
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string()
+    }
+}
+
 fn format_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         format!("{bytes} B")
@@ -14233,6 +14546,74 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    fn cache_status(
+        used: u64,
+        limit: ephervex_core::ArtifactCacheLimit,
+    ) -> ArtifactCacheStatusData {
+        artifact_cache_status_data(&ephervex_core::ArtifactCacheStatus {
+            used_bytes: used,
+            entries: 1,
+            complete: true,
+            limit,
+        })
+    }
+
+    #[test]
+    fn an_account_kind_reads_as_its_localized_name_not_its_identifier() {
+        assert_eq!(
+            account_kind_name(ephervex_model::AccountKind::Microsoft),
+            "Microsoft"
+        );
+        assert_eq!(
+            account_kind_name(ephervex_model::AccountKind::Offline),
+            "Offline"
+        );
+    }
+
+    #[test]
+    fn the_cache_fill_is_the_used_share_of_the_budget_and_stops_at_full() {
+        const MIB: u64 = 1024 * 1024;
+        let limit = ephervex_core::ArtifactCacheLimit::from_bytes(100 * MIB).expect("a limit");
+        assert_eq!(cache_status(0, limit).fill_permille, 0);
+        assert_eq!(cache_status(31 * MIB, limit).fill_permille, 310);
+        let over = cache_status(250 * MIB, limit);
+        assert_eq!(over.fill_permille, 1000);
+        assert!(over.over_budget);
+        assert!(!over.unlimited);
+    }
+
+    #[test]
+    fn an_unlimited_cache_has_no_budget_to_fill() {
+        let status = cache_status(5_000_000_000, ephervex_core::ArtifactCacheLimit::Unlimited);
+        assert!(status.unlimited);
+        assert_eq!(status.fill_permille, 0);
+        assert!(!status.over_budget);
+    }
+
+    #[test]
+    fn last_run_reads_in_the_largest_unit_and_is_empty_when_a_host_never_ran() {
+        let now = DateTime::from_timestamp(1_700_000_000, 0).expect("a timestamp");
+        let ago =
+            |seconds: i64| format_last_run(Some(now - chrono::TimeDelta::seconds(seconds)), now);
+
+        assert_eq!(format_last_run(None, now), "");
+        assert_eq!(ago(10), "just now");
+        assert_eq!(ago(-120), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(59 * 60), "59 minutes ago");
+        assert_eq!(ago(3_600), "1 hour ago");
+        assert_eq!(ago(23 * 3_600 + 59 * 60), "23 hours ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(47 * 3_600), "1 day ago");
+        assert_eq!(ago(3 * 86_400 + 5), "3 days ago");
+        let old = now - chrono::TimeDelta::days(30);
+        let local_date = old
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(ago(30 * 86_400), format!("on {local_date}"));
+    }
 
     /// Keeps a test that builds a snapshot from reaching the desktop keyring,
     /// which a temporary root does not isolate.
@@ -15584,8 +15965,10 @@ mod tests {
             ShownTheme::Seasonal(SeasonalTheme::Halloween)
         );
         assert!(halloween.branding.logo.is_some() && halloween.branding.icon.is_some());
+        assert!(halloween.season_on_today);
 
         let november = application_settings_on(&app, date(11, 1), None).expect("settings");
+        assert!(!november.season_on_today, "no season is on in November");
         assert_eq!(
             november.shown_theme,
             ShownTheme::Recorded(november.theme.clone())
@@ -15597,6 +15980,10 @@ mod tests {
 
         app.set_seasonal_themes(false).expect("turn off");
         let off = application_settings_on(&app, date(10, 31), None).expect("settings");
+        assert!(
+            off.season_on_today,
+            "the switch stays offered while it is off"
+        );
         assert!(!off.seasonal_themes);
         assert_eq!(off.shown_theme, ShownTheme::Recorded(off.theme.clone()));
         assert_eq!(off.branding, crate::theme_files::BrandingImages::default());
@@ -15616,6 +16003,7 @@ mod tests {
         let forced = Some(SeasonalTheme::Halloween);
 
         let march = application_settings_on(&app, date(3, 1), forced).expect("settings");
+        assert!(march.season_on_today, "a forced season counts as on");
         assert_eq!(march.theme, ephervex_core::ApplicationTheme::default());
         assert_eq!(
             march.shown_theme,

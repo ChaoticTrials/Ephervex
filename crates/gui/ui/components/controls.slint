@@ -2,7 +2,8 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { ContextTouchArea, PopupMenu } from "menus.slint";
-import { BodyText, Heading, HoverNote } from "text.slint";
+import { ButtonPlate, Outlined, Plate } from "surface.slint";
+import { BodyText, DisplayHeading, Heading, HoverNote } from "text.slint";
 import { GuiI18n } from "../globals.slint";
 import { MenuRow } from "../models.slint";
 import { Theme } from "../theme.slint";
@@ -15,17 +16,13 @@ import { Theme } from "../theme.slint";
 // alike. Its content sets its minimum, because the description wraps to a
 // different number of lines at every text scale, and it fills its row from
 // there so two cards side by side end level.
-export component SettingCard inherits Rectangle {
+export component SettingCard inherits Plate {
     in property <string> title;
     in property <string> detail;
     // Something about the setting's inputs the user should fix, if any.
     in property <string> note;
     min-height: card.preferred-height;
     vertical-stretch: 1;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: Theme.surface;
     card := HorizontalLayout {
         padding: 16px;
         spacing: 20px;
@@ -38,6 +35,90 @@ export component SettingCard inherits Rectangle {
             if root.note != "" : BodyText { text: root.note; wrap: word-wrap; color: Theme.warning; }
         }
         @children
+    }
+}
+
+// Settings that belong together, in one plate with a hairline between rows.
+export component SettingsGroup inherits Plate {
+    height: body.preferred-height + 2 * root.outline-width;
+    radius: Theme.card-radius;
+    body := VerticalLayout {
+        padding: root.outline-width;
+        spacing: 0px;
+        @children
+    }
+}
+
+// One setting in a group: what it is on the left, how to change it on the
+// right. The rule above it is drawn for every row but the first.
+export component SettingRow inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    // Something about the setting's inputs the user should fix, if any.
+    in property <string> note;
+    // Sets the description in the monospace face, for a path.
+    in property <bool> detail-mono;
+    // The width left for the control beside the text.
+    out property <length> control-room: root.width - 2 * 18px - 20px - 240px * Theme.text-scale;
+    // Whether the control sits under the text because it does not fit beside it.
+    private property <bool> stacked: root.control-room < controls.preferred-width;
+    // What checking the setting found, colored by whether it is good news.
+    in property <string> verdict;
+    in property <bool> verdict-ok;
+    // A line of the row's own text that does something when pressed, such as
+    // opening the list of problems the setting has.
+    in property <string> link;
+    callback link-clicked();
+    min-height: card.preferred-height;
+    preferred-height: card.preferred-height;
+    if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
+    card := GridLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing-horizontal: root.stacked ? 0px : 20px;
+        spacing-vertical: 10px;
+        VerticalLayout {
+            col: 0;
+            row: 0;
+            alignment: center;
+            horizontal-stretch: 1;
+            spacing: 4px;
+            Heading { text: root.title; font-size: Theme.row-heading-size; }
+            if root.detail != "" : BodyText { text: root.detail; wrap: word-wrap; font-size: Theme.label-size; font-family: root.detail-mono ? Theme.mono-family : Theme.body-family; }
+            if root.note != "" : BodyText { text: root.note; wrap: word-wrap; color: Theme.warning; font-size: Theme.label-size; }
+            if root.verdict != "" : BodyText { text: root.verdict; wrap: word-wrap; color: root.verdict-ok ? Theme.success : Theme.danger; font-size: Theme.label-size; font-weight: 600; }
+            if root.link != "" : Rectangle {
+                height: link-label.preferred-height;
+                accessible-role: button;
+                accessible-label: root.link;
+                accessible-action-default => { root.link-clicked(); }
+                HorizontalLayout { alignment: start;
+                    Rectangle {
+                        width: link-label.preferred-width;
+                        link-label := Text { text: root.link; color: Theme.accent; font-size: Theme.label-size; font-weight: 700; }
+                        if link-keys.has-focus : Rectangle { y: parent.height - 2px; height: 2px; background: Theme.accent; }
+                        link-keys := FocusScope {
+                            key-pressed(event) => {
+                                if (event.text == " " || event.text == Key.Return) {
+                                    if (!event.repeat) { root.link-clicked(); }
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                        }
+                        TouchArea { mouse-cursor: pointer; clicked => { root.link-clicked(); } }
+                    }
+                }
+            }
+        }
+        controls := VerticalLayout {
+            col: root.stacked ? 0 : 1;
+            row: root.stacked ? 1 : 0;
+            alignment: center;
+            HorizontalLayout { @children }
+        }
     }
 }
 
@@ -62,10 +143,8 @@ export component FocusEdge inherits FocusScope {
 }
 
 // The outline drawn around a control that has keyboard focus, outside the
-// control and clear of its own edge. Primary buttons, checked switches,
-// selected chips and hovered controls already have an accent border, so a ring
-// inside it would only thicken a line that is there anyway. Sized to the
-// control it is placed in.
+// control and clear of its own edge, in the accent color so it stands apart
+// from the ink outline every control has. Sized to the control it is placed in.
 export component FocusRing inherits Rectangle {
     in property <length> ring-radius: 6px;
     // The size of the control the ring surrounds.
@@ -88,7 +167,7 @@ export component FocusRing inherits Rectangle {
 // rather than focusable and inert. Every other key is left to bubble, so
 // shortcuts held by a scope further out keep working while a button is
 // focused.
-component KeyboardFocus inherits FocusScope {
+export component KeyboardFocus inherits FocusScope {
     in property <length> ring-radius: 6px;
     callback activated();
     key-pressed(event) => {
@@ -120,7 +199,12 @@ export component AppButton inherits Rectangle {
     // to be unambiguous on its own. Two "Browse..." buttons in one dialog
     // read identically otherwise.
     in property <string> accessible-name: root.text;
+    // How the button is filled: secondary, primary, danger, success, info or lavender.
     in property <string> tone: "secondary";
+    // A glyph before the caption, drawn in the caption's color.
+    in property <image> icon;
+    // The shorter button, for a row of small controls.
+    in property <bool> compact: false;
     in property <bool> enabled: true;
     callback clicked();
     // A press of the secondary button over the control, in window coordinates,
@@ -132,33 +216,72 @@ export component AppButton inherits Rectangle {
     private property <string> hover-note: !root.enabled && root.hint != ""
         ? root.hint
         : label.preferred-width > label.width ? root.text : "";
-    min-width: max(88px, label.preferred-width + 28px);
-    height: Theme.control-height;
+    private property <bool> pointed: area.has-hover && root.enabled;
+    // The fill and the caption drawn on it come from one mapping, so a tone
+    // that is not named here is the secondary look in both.
+    private property <color> face-fill: root.tone == "primary" ? (root.pointed ? Theme.primary-fill-hover : Theme.primary-fill)
+        : root.tone == "danger" ? (root.pointed ? Theme.danger-fill-hover : Theme.danger-fill)
+        : root.tone == "success" ? Theme.state-running
+        : root.tone == "info" ? Theme.state-stopped
+        : root.tone == "lavender" ? Theme.state-building
+        : Theme.surface;
+    private property <color> caption: root.tone == "primary" ? Theme.on-primary
+        : root.tone == "danger" ? Theme.on-danger
+        : root.tone == "success" || root.tone == "info" || root.tone == "lavender" ? Theme.on-accent
+        : Theme.text;
+    // The room the glyph takes before the caption.
+    private property <length> icon-extent: root.icon.width > 0 ? Theme.button-icon-size + 6px : 0px;
+    // The caption's width, held to what is left of the button.
+    private property <length> label-used: min(label.preferred-width, root.width - 28px - root.icon-extent);
+    private property <length> content-start: (root.width - root.icon-extent - root.label-used) / 2;
+    // The width the caption needs, which buttons that belong together can be
+    // set to the largest of, whatever language their captions are in.
+    out property <length> natural-width: max(88px, label.preferred-width + 28px + root.icon-extent);
+    min-width: root.natural-width;
+    height: root.compact ? Theme.button-height-small : Theme.button-height;
     horizontal-stretch: 0;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: !enabled ? Theme.border : tone == "primary" ? Theme.accent : tone == "danger" ? Theme.danger : Theme.border;
-    background: !enabled ? transparent : area.pressed ? (tone == "primary" ? Theme.primary-fill.darker(0.2) : tone == "danger" ? Theme.danger-fill.darker(0.1) : Theme.background) : area.has-hover ? (tone == "primary" ? Theme.primary-fill-hover : tone == "danger" ? Theme.danger-fill-hover : Theme.elevated) : tone == "primary" ? Theme.primary-fill : tone == "danger" ? Theme.danger-fill : Theme.surface;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-enabled: enabled;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.clicked(); } }
-    // Held to the button's own width and elided there. `min-width` asks
-    // for room for the whole caption, but a layout that has none gives
-    // less, and a Rectangle does not clip what overflows it. The full text
-    // stays in `accessible-name`.
-    label := Text {
-        text: root.text;
-        width: root.width - 28px;
-        overflow: elide;
-        color: !root.enabled ? Theme.text-muted : root.tone == "danger" ? Theme.on-danger : root.tone == "primary" ? Theme.on-primary : Theme.text;
-        font-size: Theme.body-size;
-        font-weight: root.tone == "primary" ? 600 : 400;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    ButtonPlate {
+        width: root.width;
+        height: root.height;
+        live: root.enabled;
+        hovered: area.has-hover;
+        pressed: area.pressed;
+        radius: root.compact ? Theme.small-radius : Theme.button-radius;
+        rest-lift: root.compact ? Theme.shadow-offset-small : Theme.shadow-offset-card;
+        fill: root.face-fill;
+        if root.icon.width > 0 : Image {
+            x: root.content-start;
+            y: (parent.height - self.height) / 2;
+            width: Theme.button-icon-size;
+            height: Theme.button-icon-size;
+            source: root.icon;
+            image-fit: contain;
+            colorize: root.caption;
+            opacity: root.enabled ? 1 : Theme.disabled-opacity;
+        }
+        // Held to the button's own width and elided there. `min-width` asks
+        // for room for the whole caption, but a layout that has none gives
+        // less, and a Rectangle does not clip what overflows it. The full text
+        // stays in `accessible-name`.
+        label := Text {
+            x: root.icon.width > 0 ? root.content-start + root.icon-extent : 14px;
+            width: root.icon.width > 0 ? root.label-used : root.width - 28px;
+            overflow: elide;
+            text: root.text;
+            color: root.caption;
+            font-size: root.compact ? Theme.label-size : Theme.body-size;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            opacity: root.enabled ? 1 : Theme.disabled-opacity;
+        }
     }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.button-radius; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
@@ -171,7 +294,7 @@ export component AppButton inherits Rectangle {
 
 // A star that says whether one Minecraft release is pinned, and toggles it.
 //
-// Colored rather than swapped for a second glyph when it is on: an outline
+// Filled rather than swapped for a second glyph when it is on: an outline
 // and a fill of the same shape read as one control in two states, where two
 // shapes read as two controls.
 export component FavoriteToggle inherits Rectangle {
@@ -182,6 +305,8 @@ export component FavoriteToggle inherits Rectangle {
     in property <string> host-name;
     in property <length> size: Theme.control-height;
     in property <bool> enabled: true;
+    // Drawn without a plate behind it, as on a list card.
+    in property <bool> flat: false;
     // Why the star cannot be pressed, shown on hover while it is disabled.
     in property <string> hint;
     callback toggled();
@@ -193,10 +318,6 @@ export component FavoriteToggle inherits Rectangle {
     private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.accessible-label;
     width: root.size;
     height: root.size;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: !root.enabled ? Theme.border : root.favorite ? Theme.warning.with-alpha(0.7) : area.has-hover ? Theme.accent : Theme.border;
-    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: root.host-name != "" ? (root.favorite ? GuiI18n.value("gui-unfavorite-host", root.host-name) : GuiI18n.value("gui-favorite-host", root.host-name)) : root.favorite ? GuiI18n.value("gui-unfavorite-version", root.version) : GuiI18n.value("gui-favorite-version", root.version);
     accessible-enabled: root.enabled;
@@ -204,13 +325,24 @@ export component FavoriteToggle inherits Rectangle {
     accessible-checked: root.favorite;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-action-default => { if root.enabled { root.toggled(); } }
+    // The star that is on is `warning`, darker than a pale gold so it stays
+    // readable on the note fill. A flat star is the glyph alone.
+    if !root.flat : Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.small-radius;
+        fill: root.favorite ? Theme.note-fill : Theme.surface;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    }
     Image {
         x: root.size * 2 / 9; y: root.size * 2 / 9; width: parent.width - root.size * 4 / 9; height: parent.height - root.size * 4 / 9;
         source: root.favorite ? @image-url("../../../../assets/icons/favorite-filled.svg") : @image-url("../../../../assets/icons/favorite.svg");
         image-fit: contain;
-        colorize: !root.enabled ? Theme.text-muted : root.favorite ? Theme.warning : Theme.text-secondary;
+        colorize: root.favorite ? Theme.warning : Theme.text-muted;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
     }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.toggled(); } }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.toggled(); } }
     // Always enabled, so a disabled star still reports hover and can explain
     // itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
@@ -228,6 +360,16 @@ export component IconButton inherits Rectangle {
     // carry context the eye already has, such as which pane it belongs to.
     in property <string> tooltip: root.accessible-name;
     in property <bool> enabled: true;
+    // Drawn in the main action's color, for a button that stands for a state
+    // that is on.
+    in property <bool> active: false;
+    // A count over the button's top right corner, when it is above zero.
+    in property <int> badge: 0;
+    // The hard shadow under the button; flat unless the caller leaves room for it.
+    in property <length> lift: 0px;
+    // The glyph's size, centered in the button; zero fills the button less an
+    // 8px margin.
+    in property <length> glyph-size: 0px;
     // Why this button cannot be pressed, shown on hover while it is
     // disabled.
     in property <string> hint;
@@ -240,19 +382,40 @@ export component IconButton inherits Rectangle {
     private property <string> hover-note: !root.enabled && root.hint != "" ? root.hint : root.tooltip;
     width: Theme.control-height;
     height: Theme.control-height;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: area.has-hover && root.enabled ? Theme.accent : Theme.border;
-    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: accessible-name;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-enabled: enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
-    // A disabled button keeps its border and loses its click, so the glyph
-    // has to go quiet too or the control still reads as available.
-    Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.icon; image-fit: contain; colorize: root.enabled ? Theme.text-secondary : Theme.text-muted; }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { root.clicked(); } }
+    // Filled with the main action's color under the pointer.
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: root.lift;
+        radius: Theme.small-radius;
+        fill: (area.has-hover && root.enabled) || root.active ? Theme.accent-primary : Theme.surface;
+        opacity: root.enabled ? 1 : Theme.disabled-opacity;
+        Image { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: root.glyph-size > 0px ? root.glyph-size : parent.width - 16px; height: root.glyph-size > 0px ? root.glyph-size : parent.height - 16px; source: root.icon; image-fit: contain; colorize: (area.has-hover && root.enabled) || root.active ? Theme.on-accent : Theme.text; }
+    }
+    if root.badge > 0 : Rectangle {
+        x: root.width - self.width + Theme.corner-badge-overhang;
+        y: -Theme.corner-badge-overhang;
+        width: max(Theme.corner-badge-size, count-text.preferred-width + 10px);
+        height: Theme.corner-badge-size;
+        border-radius: self.height / 2;
+        border-width: Theme.chip-border-width;
+        border-color: Theme.border-strong;
+        background: Theme.border-strong;
+        count-text := Text {
+            text: "\{root.badge}";
+            color: Theme.surface;
+            font-family: Theme.heading-family;
+            font-size: Theme.label-size;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
@@ -270,48 +433,87 @@ export component TextField inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> invalid: false;
     in property <InputType> input-type: InputType.text;
+    // A glyph before the text, such as the magnifier of a search field.
+    in property <image> icon;
+    // The hard shadow the field keeps while it is not focused.
+    in property <length> rest-lift: 0px;
+    // Takes the keyboard focus when the field appears, for one that opens
+    // on a press to be typed in.
+    in property <bool> focus-when-shown: false;
+    // What the field is for, shown on hover where the label is not drawn.
+    in property <string> note;
     callback accepted();
     callback edited(string);
     callback focus-lost();
+    // Where the text starts, past the glyph when there is one.
+    private property <length> text-left: root.icon.width > 0 ? 11px + Theme.button-icon-size + 7px : 11px;
     height: Theme.control-height;
     min-width: 120px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: invalid ? Theme.danger : input.has-focus ? Theme.accent : Theme.border;
-    background: Theme.field;
     accessible-role: text-input;
     accessible-label: accessible-name;
     accessible-enabled: enabled;
+    accessible-value: input.text;
+    accessible-action-set-value(value) => {
+        input.text = value;
+        root.edited(value);
+    }
+    init => {
+        if root.focus-when-shown { input.focus(); }
+    }
+    // The shadow grows while the field has focus, which is how focus shows.
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: input.has-focus ? Theme.shadow-offset-small + (root.rest-lift > 0px ? 1px : 0px) : root.rest-lift;
+        outline: root.invalid ? Theme.danger : Theme.border-strong;
+        fill: root.enabled ? Theme.field : Theme.well;
+        animate lift { duration: 80ms; }
+    }
     // The input does not scroll itself, so a value longer than the field is
     // clipped here and the viewport follows the caret.
-    scroller := Flickable {
-        x: 11px; width: parent.width - 22px; height: parent.height;
-        interactive: false;
-        viewport-width: max(self.width, input.preferred-width + 2px);
-        input := TextInput {
-            x: 0; width: max(scroller.width, self.preferred-width + 2px); height: scroller.height;
-            color: root.enabled ? Theme.text : Theme.text-muted;
-            font-size: Theme.body-size;
-            enabled: root.enabled;
-            input-type: root.input-type;
-            single-line: true;
-            vertical-alignment: center;
-            accepted => { root.accepted(); }
-            edited => { root.edited(self.text); }
-            cursor-position-changed(position) => {
-                if (position.x + scroller.viewport-x < 0px) {
-                    scroller.viewport-x = -position.x;
-                } else if (position.x + scroller.viewport-x > scroller.width - 2px) {
-                    scroller.viewport-x = scroller.width - 2px - position.x;
+    if root.icon.width > 0 : Image {
+        x: 11px;
+        y: (parent.height - self.height) / 2;
+        width: Theme.button-icon-size;
+        height: Theme.button-icon-size;
+        source: root.icon;
+        image-fit: contain;
+        colorize: Theme.text-muted;
+    }
+    // Over the whole field, text included: the touch area is the input's
+    // ancestor, so it sees the pointer before the input takes it.
+    note-area := TouchArea {
+        scroller := Flickable {
+            x: root.text-left; width: parent.width - root.text-left - 11px; height: parent.height;
+            interactive: false;
+            viewport-width: max(self.width, input.preferred-width + 2px);
+            input := TextInput {
+                x: 0; width: max(scroller.width, self.preferred-width + 2px); height: scroller.height;
+                color: root.enabled ? Theme.text : Theme.text-muted;
+                font-size: Theme.body-size;
+                enabled: root.enabled;
+                input-type: root.input-type;
+                single-line: true;
+                vertical-alignment: center;
+                accepted => { root.accepted(); }
+                edited => { root.edited(self.text); }
+                cursor-position-changed(position) => {
+                    if (position.x + scroller.viewport-x < 0px) {
+                        scroller.viewport-x = -position.x;
+                    } else if (position.x + scroller.viewport-x > scroller.width - 2px) {
+                        scroller.viewport-x = scroller.width - 2px - position.x;
+                    }
                 }
+                // A field whose value is part of a larger draft has to be able to
+                // say "I am done" without the user pressing Enter.
+                changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
             }
-            // A field whose value is part of a larger draft has to be able to
-            // say "I am done" without the user pressing Enter.
-            changed has-focus => { if (!self.has-focus) { root.focus-lost(); } }
         }
     }
+    HoverNote { text: root.note; hovered: note-area.has-hover; pointer-x: note-area.mouse-x; pointer-y: note-area.mouse-y; }
     if root.text == "" : Text {
-        x: 11px; width: parent.width - 22px; height: parent.height;
+        x: root.text-left; width: parent.width - root.text-left - 11px; height: parent.height;
         text: root.placeholder;
         color: Theme.text-muted;
         font-size: Theme.body-size;
@@ -378,24 +580,28 @@ export component FilterChip inherits Rectangle {
     height: Theme.control-height;
     width: label.preferred-width + 24px;
     horizontal-stretch: 0;
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: selected ? Theme.accent : Theme.border;
-    background: selected ? Theme.selection-strong : area.has-hover ? Theme.elevated : transparent;
     accessible-role: checkbox;
     accessible-label: accessible-name;
     accessible-checked: selected;
     accessible-action-default => { root.clicked(); }
-    label := Text {
-        text: root.text;
-        color: root.selected ? Theme.accent : Theme.text-secondary;
-        font-size: Theme.caption-size;
-        font-weight: root.selected ? 600 : 400;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        fill: root.selected ? Theme.selection-strong : area.has-hover ? Theme.elevated : Theme.surface;
+        animate lift { duration: 80ms; }
+        label := Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.label-size;
+            font-weight: 700;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
     }
-    KeyboardFocus { width: root.width; height: root.height; ring-radius: 5px; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 export component Toggle inherits Rectangle {
@@ -415,29 +621,37 @@ export component Toggle inherits Rectangle {
     // from minutes ago no matter what the list said.
     in property <bool> sets-its-own-position: true;
     callback toggled(bool);
+    private property <float> visible-strength: root.enabled ? 1 : Theme.disabled-opacity;
     width: 42px;
-    height: 23px;
+    height: 24px;
     horizontal-stretch: 0;
-    border-radius: 12px;
-    border-width: 1px;
-    border-color: checked ? Theme.accent : Theme.border;
-    background: checked ? Theme.toggle-on : Theme.background;
     accessible-role: checkbox;
     accessible-checked: checked;
     accessible-enabled: enabled;
     accessible-label: accessible-name;
     accessible-action-default => { if root.enabled { root.request(); } }
-    Rectangle {
-        x: root.checked ? 21px : 3px;
-        y: 3px;
-        width: 17px; height: 17px;
-        border-radius: 9px;
-        background: root.enabled ? (root.checked ? Theme.toggle-knob : Theme.text-secondary) : Theme.text-muted;
-        animate x { duration: 100ms; }
+    // Disabled colors mix toward the card color, not `opacity`, which renderers
+    // apply per piece or per group.
+    Outlined {
+        radius: root.height / 2;
+        snap-size: true;
+        fill: (root.checked ? Theme.toggle-on : Theme.bar).mix(Theme.surface, root.visible-strength);
+        outline: Theme.border-strong.mix(Theme.surface, root.visible-strength);
+        Outlined {
+            x: root.checked ? root.width - self.width - 4px : 4px;
+            y: (root.height - self.height) / 2;
+            width: 16px; height: 16px;
+            radius: 8px;
+            snap-size: true;
+            fill: Theme.toggle-knob.mix(Theme.surface, root.visible-strength);
+            outline: Theme.border-strong.mix(Theme.surface, root.visible-strength);
+            animate x { duration: 100ms; }
+        }
     }
-    KeyboardFocus { width: root.width; height: root.height; ring-radius: 12px; enabled: root.enabled; activated => { root.request(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: root.height / 2; enabled: root.enabled; activated => { root.request(); } }
     TouchArea {
         enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
         clicked => { root.request(); }
     }
     function request() {
@@ -491,8 +705,9 @@ export component ValueSlider inherits Rectangle {
     in property <float> value;
     in property <bool> enabled: true;
     callback released(float);
-    private property <length> handle-size: 16px;
+    private property <length> handle-size: 20px;
     private property <length> travel: root.width - root.handle-size;
+    private property <float> visible-strength: root.enabled ? 1 : Theme.disabled-opacity;
     private property <bool> dragging;
     private property <float> drag-value;
     // Where on the handle a drag took hold, so grabbing it does not move it.
@@ -543,30 +758,27 @@ export component ValueSlider inherits Rectangle {
         root.released(root.nudged-value);
     }
 
-    Rectangle {
+    Outlined {
         x: root.handle-size / 2;
         width: root.width - root.handle-size;
         y: (root.height - self.height) / 2;
-        height: 4px;
-        border-radius: 2px;
-        background: Theme.border;
-        Rectangle {
-            x: 0px;
-            width: root.fraction * parent.width;
-            height: parent.height;
-            border-radius: parent.border-radius;
-            background: root.enabled ? Theme.accent : Theme.text-muted;
-        }
+        height: 10px;
+        radius: self.height / 2;
+        snap-size: true;
+        progress: root.fraction;
+        fill: Theme.surface;
+        progress-fill: Theme.accent-primary.mix(Theme.surface, root.visible-strength);
+        outline: Theme.border-strong.mix(Theme.surface, root.visible-strength);
     }
-    handle := Rectangle {
+    handle := Outlined {
         x: root.fraction * root.travel;
         y: (root.height - self.height) / 2;
         width: root.handle-size;
         height: root.handle-size;
-        border-radius: root.handle-size / 2;
-        border-width: 2px;
-        border-color: root.enabled ? Theme.accent : Theme.text-muted;
-        background: Theme.overlay;
+        radius: root.handle-size / 2;
+        snap-size: true;
+        fill: Theme.surface;
+        outline: Theme.border-strong.mix(Theme.surface, root.visible-strength);
         if keys.has-focus && root.enabled : FocusRing { target-width: handle.width; target-height: handle.height; ring-radius: root.handle-size / 2; }
     }
     keys := FocusScope {
@@ -658,7 +870,7 @@ export component AcknowledgementToggle inherits Rectangle {
             horizontal-stretch: 1;
             vertical-alignment: top;
             wrap: word-wrap;
-            TouchArea { clicked => { if root.enabled { root.toggled(!root.checked); } } }
+            TouchArea { mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed; clicked => { if root.enabled { root.toggled(!root.checked); } } }
         }
     }
 }
@@ -680,7 +892,7 @@ export component InlineToggle inherits Rectangle {
             text: root.label;
             color: root.enabled ? Theme.text : Theme.text-muted;
             vertical-alignment: center;
-            TouchArea { clicked => { if root.enabled { root.toggled(!root.checked); } } }
+            TouchArea { mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed; clicked => { if root.enabled { root.toggled(!root.checked); } } }
         }
     }
 }
@@ -707,12 +919,8 @@ export component LaunchAsButton inherits Rectangle {
     // Sized the way `AppButton` is, so a row that pairs the two splits
     // evenly instead of letting the other one absorb the slack.
     min-width: max(88px, content.preferred-width);
-    height: Theme.control-height;
+    height: Theme.button-height;
     horizontal-stretch: 0;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: area.has-hover && root.enabled ? Theme.accent : Theme.border;
-    background: area.has-hover && root.enabled ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: GuiI18n.text("gui-launch-as");
     accessible-enabled: enabled;
@@ -727,22 +935,32 @@ export component LaunchAsButton inherits Rectangle {
         chosen(id) => { root.launch-as(id, root.alongside); }
         activated => { root.add-account(); }
     }
-    content := HorizontalLayout {
-        padding-left: 14px; padding-right: 14px; spacing: 5px; alignment: center;
-        Text {
-            text: GuiI18n.text("gui-launch-as");
-            color: root.enabled ? Theme.text : Theme.text-muted;
-            font-size: Theme.label-size;
-            vertical-alignment: center;
-        }
-        Text {
-            text: "\u{25be}";
-            color: root.enabled ? Theme.text-secondary : Theme.text-muted;
-            font-size: Theme.label-size;
-            vertical-alignment: center;
+    ButtonPlate {
+        width: root.width;
+        height: root.height;
+        live: root.enabled;
+        hovered: area.has-hover;
+        pressed: area.pressed;
+        content := HorizontalLayout {
+            padding-left: 14px; padding-right: 14px; spacing: 5px; alignment: center;
+            Text {
+                text: GuiI18n.text("gui-launch-as");
+                color: Theme.text;
+                font-size: Theme.body-size;
+                font-weight: 700;
+                vertical-alignment: center;
+                opacity: root.enabled ? 1 : Theme.disabled-opacity;
+            }
+            Text {
+                text: "\u{25be}";
+                color: Theme.text;
+                font-size: Theme.label-size;
+                vertical-alignment: center;
+                opacity: root.enabled ? 1 : Theme.disabled-opacity;
+            }
         }
     }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; activated => { menu.show({ x: 0, y: root.height }); } }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.button-radius; activated => { menu.show({ x: 0, y: root.height }); } }
     // Declared after the menu area, so a press opens the menu rather than
     // being swallowed by the area that hosts it.
     area := TouchArea {
@@ -752,9 +970,14 @@ export component LaunchAsButton inherits Rectangle {
     HoverNote { text: !root.enabled ? root.hint : ""; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
+// A short label in a bordered tag. The tone colors its text, which is read on
+// `surface` unless `fill` is given.
 export component Pill inherits Rectangle {
     in property <string> text;
     in property <color> tone-color: Theme.text-secondary;
+    // The fill, when it is not the tone's own tint, and the text on it.
+    in property <brush> fill: Theme.surface;
+    in property <color> caption: root.tone-color;
     // A pill normally hugs its label. Where one stands in for a control it
     // takes that control's size instead, so a column of rows does not jump
     // between the two. An explicit width on the instance cannot do this:
@@ -762,22 +985,79 @@ export component Pill inherits Rectangle {
     // with a bound width is fixed at it.
     in property <length> min-content-width: 0px;
     in property <length> content-height: 24px;
+    // The widest a pill grows; a longer label is elided.
+    in property <length> max-content-width: 10000px;
     height: root.content-height;
-    width: max(root.min-content-width, label.preferred-width + 18px);
+    width: min(root.max-content-width, max(root.min-content-width, label.preferred-width + 18px));
     horizontal-stretch: 0;
     accessible-role: AccessibleRole.text;
     accessible-label: root.text;
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: root.tone-color.with-alpha(0.55);
-    background: root.tone-color.with-alpha(0.12);
+    border-radius: Theme.chip-radius;
+    border-width: Theme.chip-border-width;
+    border-color: Theme.border-strong;
+    background: root.fill;
     label := Text {
+        x: 9px;
+        width: root.width - 18px;
         text: root.text;
-        color: root.tone-color;
+        color: root.caption;
         font-size: Theme.caption-size;
-        font-weight: 600;
+        font-weight: 700;
+        overflow: elide;
         horizontal-alignment: center;
         vertical-alignment: center;
+    }
+}
+
+// A small tag in the fixed-width family, for versions and other values read
+// letter by letter. `tone` is neutral, primary, server, running, building,
+// attention, danger, or a loader: forge, neoforge, or vanilla.
+export component Chip inherits Rectangle {
+    in property <string> text;
+    in property <string> tone: "neutral";
+    // The width the whole text needs. A chip given less elides its text.
+    out property <length> natural-width: label.preferred-width + 14px;
+    // A press of the chip, passed on while it is cut short, because its hover
+    // area then sits over whatever the chip is drawn on.
+    callback pressed();
+    callback context-requested(x: length, y: length);
+    height: Theme.chip-height;
+    width: root.natural-width;
+    horizontal-stretch: 0;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    border-radius: Theme.chip-radius;
+    border-width: Theme.chip-border-width;
+    border-color: Theme.border-strong;
+    background: root.tone == "server" ? Theme.state-server
+        : root.tone == "running" ? Theme.state-running
+        : root.tone == "building" ? Theme.state-building
+        : root.tone == "attention" ? Theme.state-attention
+        : root.tone == "primary" ? Theme.accent-primary
+        : root.tone == "danger" ? Theme.danger-fill
+        : root.tone == "forge" ? Theme.chip-forge
+        : root.tone == "neoforge" ? Theme.chip-neoforge
+        : root.tone == "vanilla" ? Theme.chip-vanilla
+        : Theme.surface;
+    label := Text {
+        x: 7px;
+        width: root.width - 14px;
+        text: root.text;
+        color: root.tone == "server" || root.tone == "running" || root.tone == "building" || root.tone == "attention" || root.tone == "primary" ? Theme.on-accent : root.tone == "danger" ? Theme.on-danger : Theme.text;
+        font-family: Theme.mono-family;
+        font-size: Theme.caption-size;
+        font-weight: 600;
+        overflow: elide;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    // A chip that is cut says its whole text on hover.
+    if label.preferred-width > label.width : Rectangle {
+        area := ContextTouchArea {
+            clicked => { root.pressed(); }
+            context-requested(x, y) => { root.context-requested(x, y); }
+        }
+        HoverNote { text: root.text; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
     }
 }
 
@@ -800,6 +1080,20 @@ export global StateTone {
     pure public function of(state-kind: string) -> color {
         return of-or(state-kind, Theme.text-secondary);
     }
+    // The fill of the tag that names the state: running, in progress, needing
+    // attention, or settled.
+    pure public function fill-of(state-kind: string) -> color {
+        if (state-kind == "running") {
+            return Theme.state-running;
+        }
+        if (state-kind == "starting" || state-kind == "stopping" || state-kind == "restarting") {
+            return Theme.state-building;
+        }
+        if (state-kind == "failed" || state-kind == "orphaned" || state-kind == "unknown" || state-kind == "needs-recovery") {
+            return Theme.state-attention;
+        }
+        return Theme.surface;
+    }
 }
 
 // A host's lifecycle state. A restart under way reads as Restarting
@@ -810,6 +1104,8 @@ export component StatePill inherits Pill {
     in property <bool> restarting;
     text: root.restarting ? GuiI18n.text("gui-state-restarting") : root.state;
     tone-color: StateTone.of(root.restarting ? "restarting" : root.state-kind);
+    fill: StateTone.fill-of(root.restarting ? "restarting" : root.state-kind);
+    caption: StateTone.fill-of(root.restarting ? "restarting" : root.state-kind) == Theme.surface ? Theme.text-secondary : Theme.on-accent;
 }
 
 // A pill that can be pressed: a short status a person can act on. It reaches
@@ -825,10 +1121,10 @@ export component PillButton inherits Rectangle {
     height: 24px;
     width: label.preferred-width + 18px;
     horizontal-stretch: 0;
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: root.tone-color.with-alpha(area.has-hover ? 0.9 : 0.55);
-    background: root.tone-color.with-alpha(area.has-hover ? 0.2 : 0.12);
+    border-radius: Theme.chip-radius;
+    border-width: Theme.chip-border-width;
+    border-color: Theme.border-strong;
+    background: area.has-hover ? Theme.selection : Theme.surface;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-action-default => { root.clicked(); }
@@ -836,11 +1132,11 @@ export component PillButton inherits Rectangle {
         text: root.text;
         color: root.tone-color;
         font-size: Theme.caption-size;
-        font-weight: 600;
+        font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
-    KeyboardFocus { width: root.width; height: root.height; ring-radius: 5px; activated => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.chip-radius; activated => { root.clicked(); } }
     area := TouchArea {
         mouse-cursor: MouseCursor.pointer;
         clicked => { root.clicked(); }
@@ -848,58 +1144,45 @@ export component PillButton inherits Rectangle {
     HoverNote { text: root.note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
 }
 
-export component NavItem inherits Rectangle {
-    in property <image> icon;
-    in property <string> label;
-    in property <bool> selected;
-    callback clicked();
-    height: 46px;
-    border-radius: 6px;
-    background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
-    accessible-role: button;
-    accessible-label: label;
-    accessible-action-default => { root.clicked(); }
-    Rectangle { x: 0px; y: 8px; width: 3px; height: 30px; background: root.selected ? Theme.accent : transparent; border-radius: 2px; }
-    HorizontalLayout {
-        // `alignment` is the main axis only. Without the cross-axis rule a
-        // fixed-size image is pinned to the top of the row while the label,
-        // which has no fixed height, stretches and centers itself inside it.
-        cross-axis-alignment: center;
-        padding-left: 16px; padding-right: 12px; spacing: 13px;
-        // Colorized here rather than in the file, so the glyph follows the
-        // selected state along with the label and the marker beside it.
-        Image { source: root.icon; width: 22px; height: 22px; image-fit: contain; colorize: root.selected ? Theme.accent : Theme.text-secondary; }
-        Text { text: root.label; color: root.selected ? Theme.accent : Theme.text-secondary; font-size: Theme.row-heading-size; vertical-alignment: center; }
-    }
-    KeyboardFocus { width: root.width; height: root.height; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
-}
-
 export component SettingsNavItem inherits Rectangle {
     in property <string> label;
+    in property <image> icon;
     in property <bool> selected;
     callback clicked();
-    height: 42px;
-    border-radius: 6px;
-    background: selected ? Theme.selection : area.has-hover ? Theme.elevated : transparent;
+    height: 44px;
     accessible-role: button;
     accessible-label: label;
     accessible-action-default => { root.clicked(); }
-    Rectangle {
-        x: 0px; y: 7px; width: 3px; height: 28px;
-        border-radius: 2px;
-        background: root.selected ? Theme.accent : transparent;
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        outline: root.selected ? Theme.border-strong : transparent;
+        fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : transparent;
+    }
+    if root.icon.width > 0 : Image {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        source: root.icon;
+        image-fit: contain;
+        colorize: root.selected ? Theme.on-accent : Theme.text;
     }
     Text {
-        x: 16px; width: parent.width - 26px; height: parent.height;
+        x: root.icon.width > 0 ? 42px : 16px;
+        width: parent.width - self.x - 10px;
+        height: parent.height;
         text: root.label;
-        color: root.selected ? Theme.accent : Theme.text-secondary;
+        color: root.selected ? Theme.on-accent : Theme.text;
         font-size: Theme.body-size;
-        font-weight: root.selected ? 600 : 400;
+        font-weight: 700;
         vertical-alignment: center;
+        overflow: elide;
     }
-    KeyboardFocus { width: root.width; height: root.height; activated => { root.clicked(); } }
-    area := TouchArea { clicked => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // A layout at the root rather than a rectangle holding one.
@@ -921,6 +1204,8 @@ export component EmptyState inherits VerticalLayout {
     callback secondary();
     in property <string> primary-text;
     in property <string> secondary-text;
+    // One button over the other, for a column too narrow to hold both.
+    in property <bool> stack-buttons: false;
     alignment: center;
     spacing: 10px;
     padding: 32px;
@@ -932,13 +1217,18 @@ export component EmptyState inherits VerticalLayout {
         max-width: 560px;
         alignment: center; spacing: 10px;
         HorizontalLayout { alignment: center; Image { source: root.icon; width: 64px; height: 64px; image-fit: contain; colorize: Theme.text-muted; } }
-        Heading { text: root.title; horizontal-alignment: center; }
+        DisplayHeading { text: root.title; horizontal-alignment: center; }
         BodyText { text: root.message; horizontal-alignment: center; wrap: word-wrap; }
         Rectangle { height: 5px; }
-        HorizontalLayout {
+        if !root.stack-buttons : HorizontalLayout {
             alignment: center; spacing: 8px;
             if root.secondary-text != "" : AppButton { text: root.secondary-text; clicked => { root.secondary(); } }
             if root.primary-text != "" : AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } }
+        }
+        if root.stack-buttons : VerticalLayout {
+            spacing: 10px;
+            if root.primary-text != "" : HorizontalLayout { alignment: center; AppButton { text: root.primary-text; tone: "primary"; clicked => { root.primary(); } } }
+            if root.secondary-text != "" : HorizontalLayout { alignment: center; AppButton { text: root.secondary-text; clicked => { root.secondary(); } } }
         }
         }
     }
@@ -955,28 +1245,324 @@ export component LoadingState inherits VerticalLayout {
     BodyText { text: root.text; horizontal-alignment: center; }
 }
 
-export component ToastPanel inherits Rectangle {
+export component ToastPanel inherits Plate {
     in property <string> message;
     in property <bool> error;
     in property <int> repeats;
     callback dismiss();
-    width: 420px;
-    height: max(72px, toast-message.preferred-height + 38px);
+    // As wide as its line, up to a limit, and taller as the line wraps.
+    width: min(560px, max(280px, probe.preferred-width + 110px + (root.repeats > 1 ? 44px : 0px)));
+    height: max(48px, toast-message.preferred-height + 24px);
     horizontal-stretch: 0;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: error ? Theme.danger.with-alpha(0.75) : Theme.success.with-alpha(0.75);
-    background: Theme.elevated;
-    Rectangle { x: 0px; y: 0px; width: 4px; height: parent.height; background: root.error ? Theme.danger : Theme.success; border-radius: 3px; }
-    HorizontalLayout { padding-left: 16px; padding-right: 10px; padding-top: 10px; padding-bottom: 10px; spacing: 10px; cross-axis-alignment: center;
-        VerticalLayout { horizontal-stretch: 1; spacing: 3px;
-            HorizontalLayout { spacing: 6px; cross-axis-alignment: center;
-                Heading { text: root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete"); font-size: Theme.body-size; }
-                Rectangle { horizontal-stretch: 1; }
-                if root.repeats > 1 : Pill { text: GuiI18n.count("gui-notification-repeat", root.repeats); tone-color: root.error ? Theme.danger : Theme.success; content-height: 18px; }
-            }
-            toast-message := BodyText { text: root.message; color: Theme.text-secondary; wrap: word-wrap; }
+    radius: Theme.button-radius;
+    fill: root.error ? Theme.danger-fill : Theme.state-running;
+    accessible-role: text;
+    accessible-label: (root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete")) + ": " + root.message;
+    // Measures the message on one line; never drawn.
+    probe := Text { visible: false; text: root.message; font-size: Theme.body-size; font-weight: 600; }
+    HorizontalLayout { padding-left: 14px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; cross-axis-alignment: center;
+        Image {
+            source: root.error ? @image-url("../../../../assets/icons/alert.svg") : @image-url("../../../../assets/icons/check.svg");
+            width: 20px;
+            height: 20px;
+            image-fit: contain;
+            colorize: root.error ? Theme.on-danger : Theme.on-accent;
         }
-        IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 32px; height: 32px; clicked => { root.dismiss(); } }
+        toast-message := BodyText { horizontal-stretch: 1; text: root.message; color: root.error ? Theme.on-danger : Theme.on-accent; font-weight: 600; wrap: word-wrap; }
+        if root.repeats > 1 : Pill { text: GuiI18n.count("gui-notification-repeat", root.repeats); tone-color: Theme.text; fill: Theme.surface; content-height: 18px; }
+        IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 28px; height: 28px; clicked => { root.dismiss(); } }
     }
 }
+
+// Mutually exclusive choices drawn as one joined bar, the chosen one filled.
+export component SegmentedChoice inherits Rectangle {
+    in property <[string]> options;
+    in property <int> current;
+    // The chosen option by its text, for a list whose position the caller does
+    // not know; used when it is not empty.
+    in property <string> current-value;
+    in property <string> accessible-name;
+    // The width the bar needs.
+    out property <length> natural-width: bar.preferred-width;
+    callback selected(int);
+    // The text of the option pressed.
+    callback chosen(string);
+    // The bar pads itself by the outline, so its own width is the whole.
+    width: bar.preferred-width;
+    height: Theme.control-height;
+    horizontal-stretch: 0;
+    accessible-role: groupbox;
+    accessible-label: root.accessible-name;
+    Rectangle {
+        border-radius: Theme.small-radius;
+        border-width: Theme.strong-border-width;
+        border-color: Theme.border-strong;
+        background: Theme.surface;
+        clip: true;
+        bar := HorizontalLayout {
+            padding: Theme.strong-border-width;
+            for option[index] in root.options : Rectangle {
+                width: label.preferred-width + 32px;
+                property <bool> on: root.current-value != "" ? option == root.current-value : index == root.current;
+                background: self.on ? Theme.accent-primary : area.has-hover ? Theme.elevated : transparent;
+                accessible-role: button;
+                accessible-label: option;
+                accessible-checkable: true;
+                accessible-checked: self.on;
+                accessible-action-default => { root.selected(index); root.chosen(option); }
+                if index > 0 : Rectangle { x: 0px; width: Theme.strong-border-width; background: Theme.border-strong; }
+                label := Text {
+                    text: option;
+                    color: parent.on ? Theme.on-accent : Theme.text;
+                    font-size: Theme.label-size;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { root.selected(index); root.chosen(option); } }
+                area := TouchArea { mouse-cursor: pointer; clicked => { root.selected(index); root.chosen(option); } }
+            }
+        }
+    }
+}
+
+// One interface theme offered as a card, the chosen one filled.
+export component ThemeCard inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    // Why the card cannot be chosen, shown on hover while it is disabled.
+    in property <string> hint;
+    // The colors the theme paints a page with, so a card looks like its own
+    // theme and not like the one that is painted now.
+    in property <color> swatch-fill;
+    in property <color> swatch-outline;
+    callback clicked();
+    width: max(110px, name.preferred-width + 64px);
+    height: 52px;
+    horizontal-stretch: 0;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-checkable: true;
+    accessible-checked: selected;
+    accessible-enabled: root.enabled;
+    accessible-description: !root.enabled ? root.hint : "";
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    opacity: root.enabled ? 1 : Theme.disabled-opacity;
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : Theme.surface;
+    }
+    Rectangle {
+        x: 14px;
+        y: (parent.height - self.height) / 2;
+        width: 24px;
+        height: 24px;
+        border-radius: Theme.chip-radius;
+        border-width: Theme.chip-border-width;
+        border-color: root.swatch-outline;
+        background: root.swatch-fill;
+    }
+    name := Text {
+        x: 50px;
+        width: parent.width - 60px;
+        height: parent.height;
+        text: root.label;
+        color: root.selected ? Theme.on-accent : Theme.text;
+        font-size: Theme.body-size;
+        font-weight: 700;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea {
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
+        clicked => { if root.enabled { root.clicked(); } }
+    }
+    HoverNote { text: !root.enabled ? root.hint : ""; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
+}
+
+// A pinned Minecraft release, with the way to unpin it.
+export component FavoriteChip inherits Rectangle {
+    in property <string> version;
+    callback remove();
+    width: row.preferred-width;
+    height: 34px;
+    horizontal-stretch: 0;
+    border-radius: Theme.chip-radius;
+    border-width: Theme.chip-border-width;
+    border-color: Theme.border-strong;
+    background: Theme.note-fill;
+    row := HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 4px;
+        spacing: 8px;
+        VerticalLayout { alignment: center; Image { source: @image-url("../../../../assets/icons/favorite-filled.svg"); width: 15px; height: 15px; image-fit: contain; colorize: Theme.warning; } }
+        BodyText { text: root.version; color: Theme.text; font-family: Theme.mono-family; font-weight: 700; vertical-alignment: center; }
+        VerticalLayout { alignment: center; IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-unfavorite-version", root.version); width: 26px; height: 26px; clicked => { root.remove(); } } }
+    }
+}
+
+// The bar under a page of edits that are saved together: what is pending on
+// the left, Discard and Save on the right. It takes the primary fill while
+// something is unsaved.
+export component DraftBar inherits Rectangle {
+    in property <string> message;
+    in property <bool> dirty;
+    in property <bool> can-save;
+    in property <string> discard-hint;
+    in property <string> save-hint;
+    callback discard();
+    callback save();
+    min-height: bar.preferred-height;
+    preferred-height: bar.preferred-height;
+    vertical-stretch: 0;
+    border-radius: Theme.card-radius;
+    border-width: root.dirty ? Theme.strong-border-width : 0px;
+    border-color: Theme.border-strong;
+    background: root.dirty ? Theme.primary-fill : transparent;
+    if !root.dirty : Rectangle { y: 0px; height: 1px; background: Theme.border; }
+    bar := HorizontalLayout {
+        padding-left: root.dirty ? 18px : 0px;
+        // The buttons' shadows fall to the right, so the bar leaves them room.
+        padding-right: root.dirty ? 18px : Theme.shadow-room;
+        padding-top: 12px;
+        padding-bottom: 12px;
+        spacing: 10px;
+        Text {
+            text: root.message;
+            color: root.dirty ? Theme.on-primary : Theme.text-muted;
+            font-size: Theme.body-size;
+            font-weight: root.dirty ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            wrap: word-wrap;
+        }
+        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.dirty; hint: root.discard-hint; clicked => { root.discard(); } } }
+        VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-save-changes"); tone: root.dirty ? "secondary" : "primary"; enabled: root.can-save; hint: root.save-hint; clicked => { root.save(); } } }
+    }
+}
+
+// A setting in a group whose control is wide and sits under its description.
+export component SettingBlock inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    // A short state shown beside the title, such as whether a key is set.
+    in property <string> badge;
+    in property <color> badge-tone: Theme.accent;
+    min-height: card.preferred-height;
+    preferred-height: card.preferred-height;
+    if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
+    card := VerticalLayout {
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 14px;
+        padding-bottom: 14px;
+        spacing: 10px;
+        VerticalLayout {
+            spacing: 4px;
+            HorizontalLayout {
+                spacing: 10px;
+                alignment: start;
+                Heading { text: root.title; font-size: Theme.row-heading-size; horizontal-stretch: 0; }
+                if root.badge != "" : VerticalLayout { alignment: center; Pill { text: root.badge; tone-color: root.badge-tone; } }
+            }
+            if root.detail != "" : BodyText { text: root.detail; wrap: word-wrap; font-size: Theme.label-size; }
+        }
+        @children
+    }
+}
+
+// A box that is ticked or not, with its label, and a note at the right.
+export component CheckRow inherits Rectangle {
+    in property <string> label;
+    in property <string> note;
+    in property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled(bool);
+    height: Theme.control-height + 4px;
+    accessible-role: checkbox;
+    accessible-label: root.label;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.toggled(!root.checked); } }
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.small-radius;
+        fill: Theme.field;
+    }
+    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.toggled(!root.checked); } }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: root.checked ? Theme.text : Theme.field;
+                if root.checked : Image {
+                    width: 12px;
+                    height: 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    source: @image-url("../../../../assets/icons/check.svg");
+                    colorize: Theme.surface;
+                }
+            }
+        }
+        BodyText { text: root.label; color: Theme.text; font-weight: 700; vertical-alignment: center; overflow: elide; }
+        Rectangle { horizontal-stretch: 1; }
+        BodyText { text: root.note; color: Theme.text-muted; font-size: Theme.label-size; vertical-alignment: center; overflow: elide; }
+    }
+    TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: pointer;
+        clicked => { root.toggled(!root.checked); }
+    }
+}
+
+// What a field is, and a note about it at the right of the same line.
+export component FieldCaption inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> note;
+    spacing: 8px;
+    Text { text: root.label; color: Theme.text; font-size: Theme.label-size; font-weight: 700; vertical-alignment: bottom; }
+    Rectangle { horizontal-stretch: 1; }
+    Text { text: root.note; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: bottom; overflow: elide; }
+}
+
+// A line of context at the foot of a form: what the choices above come to.
+export component InfoBanner inherits Rectangle {
+    in property <string> text;
+    height: row.preferred-height;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: 0px;
+        radius: Theme.card-radius;
+        fill: Theme.selection-card;
+    }
+    row := HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: center;
+            Image { source: @image-url("../../../../assets/icons/settings-about.svg"); width: 16px; height: 16px; colorize: Theme.text-secondary; }
+        }
+        BodyText { text: root.text; color: Theme.text; wrap: word-wrap; horizontal-stretch: 1; vertical-alignment: center; }
+    }
+}
+

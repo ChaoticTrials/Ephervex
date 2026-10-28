@@ -55,7 +55,7 @@ fn the_client_workspace_opens_the_clients_own_folder() {
 #[test]
 fn server_overview_shortcuts_target_its_files_and_existing_surfaces() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(900, 900));
+    support::set_minimum_width(&ui, 900);
     let requests = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&requests);
     ui.on_open_server_location(move |id, location| {
@@ -325,6 +325,11 @@ fn instance() -> InstanceRow {
         group_index: 0,
         group_tone: 0,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
+        ..InstanceRow::default()
     }
 }
 

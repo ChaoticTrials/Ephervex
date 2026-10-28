@@ -1,0 +1,332 @@
+// The list down the left of the window: search, filters, instances, and servers.
+
+import { ScrollView } from "std-widgets.slint";
+import { AppButton, EmptyState, IconButton, LoadingState, TextField } from "../components/controls.slint";
+import { Plate } from "../components/surface.slint";
+import { BodyText, DisplayHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { InstanceRow, MenuRow, PendingEntityRow, ServerRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { ClientCard, PendingCard, ServerCard } from "host-card.slint";
+import { ListFilters } from "list-filters.slint";
+
+// The heading of one section of the list, with how many it holds and the
+// button that makes another.
+component SectionHeader inherits HorizontalLayout {
+    in property <string> text;
+    in property <int> count;
+    in property <string> add-label;
+    callback add();
+    spacing: 8px;
+    DisplayHeading { text: root.text.to-uppercase(); font-size: Theme.heading-size; }
+    VerticalLayout {
+        alignment: center;
+        Rectangle {
+            height: Theme.chip-height;
+            width: max(Theme.chip-height, count-text.preferred-width + 14px);
+            border-radius: Theme.chip-radius;
+            background: Theme.border-strong;
+            count-text := Text {
+                text: "\{root.count}";
+                color: Theme.surface;
+                font-family: Theme.heading-family;
+                font-size: Theme.label-size;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+    }
+    Rectangle { horizontal-stretch: 1; }
+    IconButton {
+        width: Theme.button-height-small;
+        height: Theme.button-height-small;
+        icon: @image-url("../../../../assets/icons/add.svg");
+        accessible-name: root.add-label;
+        clicked => { root.add(); }
+    }
+}
+
+// A scroll view that can bring a card into view. Its content is padded for
+// what is drawn outside the cards: the hard shadow, the selection ring, and
+// the problem badge.
+component HostScroll inherits Rectangle {
+    // The room above the first card and kept above a revealed one: the
+    // selection ring and the problem badge both stand outside a card.
+    out property <length> top-room: max(Theme.selection-outline-width, Theme.corner-badge-overhang);
+    // Scrolls just far enough to show a card whose top is at `top`, in window
+    // coordinates, and whose height is `card-height`.
+    public function reveal(top: length, card-height: length) {
+        let in-view = top - root.absolute-position.y;
+        let below = in-view + card-height + Theme.shadow-room - view.visible-height;
+        if in-view < root.top-room {
+            view.viewport-y = min(0px, view.viewport-y + root.top-room - in-view);
+        } else if below > 0px {
+            view.viewport-y = max(min(0px, view.visible-height - view.viewport-height), view.viewport-y - below);
+        }
+    }
+    view := ScrollView {
+        width: root.width;
+        height: root.height;
+        viewport-width: self.width;
+        @children
+    }
+}
+
+// Everything the list shows and every request it can make, as properties and
+// callbacks, so the window that hosts it decides what each one does.
+export component HostList inherits Rectangle {
+    // The clients the filters let through, and the servers the search lets through.
+    in property <[InstanceRow]> instances;
+    in property <[ServerRow]> servers;
+    in property <[PendingEntityRow]> pending-instances;
+    in property <[PendingEntityRow]> pending-servers;
+    // One row per group an instance can be put in, its id the group's.
+    in property <[MenuRow]> instance-group-entries;
+    in property <bool> loading;
+    in property <string> startup-error;
+    // How many instances exist, and how many conditions narrow the list.
+    in property <int> instance-total: 0;
+    in property <int> instance-filters-active: 0;
+    // The one search text that narrows instances and servers together.
+    in-out property <string> list-query;
+    in-out property <bool> instance-filters-open: false;
+    in-out property <string> instance-filter: "all";
+    in-out property <bool> instance-favorites-only: false;
+    in property <[string]> instance-minecraft-options;
+    in-out property <int> instance-minecraft-index: 0;
+    in property <[string]> instance-loader-options;
+    in-out property <int> instance-loader-index: 0;
+    in property <[string]> instance-run-options;
+    in-out property <int> instance-run-index: 0;
+    in property <[string]> instance-linking-options;
+    in-out property <int> instance-linking-index: 0;
+    in property <[string]> instance-group-options;
+    in-out property <int> instance-group-index: 0;
+    in property <[string]> instance-sort-options;
+    in-out property <int> instance-sort-index: 0;
+    // The host to bring into view when `reveal-token` changes. A counter
+    // rather than a flag, so asking for the same host again scrolls again.
+    in property <string> reveal-host-id;
+    in property <int> reveal-token: 0;
+    // Whether Home is the page, which the Home button then shows.
+    in property <bool> home-selected;
+
+    callback open-home();
+    callback list-query-changed();
+    callback instance-view-changed();
+    callback choose-instance-sort(int);
+    callback clear-instance-filters();
+    callback open-groups();
+    callback create-instance();
+    callback import-modpack();
+    callback create-server();
+
+    callback open-client(string);
+    callback quick-view-client(string);
+    callback toggle-client-favorite(string, bool);
+    callback set-client-group(string, string);
+    callback new-client-group(string);
+    callback pick-client-icon(string);
+    callback clear-client-icon(string);
+    callback launch-client(string);
+    callback kill-client(string);
+    callback open-client-folder(string);
+    callback create-linked-server(string, string);
+    callback duplicate-client(string);
+    callback make-client-persistent(string);
+    callback rename-client(string, string);
+    callback delete-client(InstanceRow);
+
+    callback open-server(string);
+    callback quick-view-server(string);
+    callback toggle-server-favorite(string, bool);
+    callback pick-server-icon(string);
+    callback clear-server-icon(string);
+    callback start-server(string);
+    callback stop-server(string);
+    callback restart-server(string);
+    callback kill-server(string, string);
+    callback open-server-folder(string);
+    callback rename-server(string, string);
+    callback delete-server(ServerRow);
+
+    // How many of the panel's own choices are set, for the Filters button.
+    private property <int> panel-filters: (root.instance-filter != "all" ? 1 : 0) + (root.instance-favorites-only ? 1 : 0)
+        + (root.instance-minecraft-index > 0 ? 1 : 0) + (root.instance-loader-index > 0 ? 1 : 0) + (root.instance-run-index > 0 ? 1 : 0)
+        + (root.instance-linking-index > 0 ? 1 : 0) + (root.instance-group-index > 0 ? 1 : 0) + (root.instance-sort-index > 0 ? 1 : 0);
+    // The reveal request that has been carried out. A card that appears after
+    // `reveal-token` changed still finds its request outstanding.
+    private property <int> handled-reveal: 0;
+    private property <bool> nothing-listed: root.instances.length == 0 && root.servers.length == 0 && root.pending-instances.length == 0 && root.pending-servers.length == 0;
+    VerticalLayout {
+        spacing: 12px;
+        // The search field and the button beside it raise a hard shadow, so
+        // the row leaves room for it at the right.
+        VerticalLayout {
+            padding-right: Theme.shadow-room;
+            spacing: 12px;
+            HorizontalLayout {
+                spacing: 8px;
+                AppButton {
+                    text: GuiI18n.text("gui-home");
+                    icon: @image-url("../../../../assets/icons/home.svg");
+                    tone: root.home-selected ? "primary" : "secondary";
+                    clicked => { root.open-home(); }
+                }
+                TextField {
+                    text <=> root.list-query;
+                    placeholder: GuiI18n.text("gui-search-hosts");
+                    accessible-name: GuiI18n.text("gui-filter-hosts");
+                    icon: @image-url("../../../../assets/icons/search.svg");
+                    input-type: InputType.search;
+                    rest-lift: Theme.shadow-offset-small;
+                    horizontal-stretch: 1;
+                    edited(text) => { root.list-query-changed(); }
+                    accepted => { root.list-query-changed(); }
+                }
+                IconButton {
+                    lift: Theme.shadow-offset-small;
+                    icon: @image-url("../../../../assets/icons/filter.svg");
+                    accessible-name: root.panel-filters > 0 ? GuiI18n.value("gui-more-filters-active", "\{root.panel-filters}") : GuiI18n.text("gui-more-filters");
+                    active: root.instance-filters-open || root.panel-filters > 0;
+                    badge: root.panel-filters;
+                    clicked => { root.instance-filters-open = !root.instance-filters-open; }
+                }
+            }
+        }
+        if root.loading && root.startup-error == "" : LoadingState { text: GuiI18n.text("gui-loading-instances"); }
+        // With the service down nothing else takes the list's height, and the
+        // search row would be spread down it.
+        if root.startup-error != "" && (root.loading || root.nothing-listed) : Rectangle { vertical-stretch: 1; }
+        if !root.loading && root.startup-error == "" && root.nothing-listed && !root.instance-filters-open && root.instance-total == 0 && root.list-query == "" : EmptyState {
+            title: GuiI18n.text("gui-no-client-instances");
+            message: GuiI18n.text("gui-no-client-instances-detail");
+            primary-text: GuiI18n.text("gui-modal-new-instance");
+            secondary-text: GuiI18n.text("gui-import-modpack");
+            // The column is too narrow for the two side by side.
+            stack-buttons: true;
+            primary => { root.create-instance(); }
+            secondary => { root.import-modpack(); }
+        }
+        if !root.loading && root.startup-error == "" && root.nothing-listed && !root.instance-filters-open && (root.instance-total > 0 || root.list-query != "") : EmptyState {
+            title: GuiI18n.text("gui-no-matching-instances");
+            message: GuiI18n.text("gui-no-matching-instances-detail");
+            primary-text: GuiI18n.text("gui-clear-filters");
+            primary => { root.clear-instance-filters(); }
+        }
+        // The panel scrolls with the list, and stays reachable while the
+        // filters it holds have emptied the list.
+        if !root.loading && (!root.nothing-listed || (root.instance-filters-open && root.startup-error == "")) : scroll := HostScroll {
+            vertical-stretch: 1;
+            VerticalLayout {
+                // What is left of the column's height stays under the last card
+                // instead of opening up between the sections.
+                alignment: start;
+                padding-left: Theme.selection-outline-width;
+                padding-top: scroll.top-room;
+                padding-right: max(Theme.shadow-room, Theme.corner-badge-overhang);
+                padding-bottom: Theme.shadow-room;
+                spacing: Theme.card-gap;
+                if root.instance-filters-open : Rectangle {
+                    height: filters.height + 24px;
+                    Plate {
+                        width: parent.width;
+                        height: parent.height;
+                    }
+                    filters := ListFilters {
+                        x: 12px;
+                        y: 12px;
+                        width: parent.width - 24px;
+                        instance-filter <=> root.instance-filter;
+                        instance-favorites-only <=> root.instance-favorites-only;
+                        instance-minecraft-options: root.instance-minecraft-options;
+                        instance-minecraft-index <=> root.instance-minecraft-index;
+                        instance-loader-options: root.instance-loader-options;
+                        instance-loader-index <=> root.instance-loader-index;
+                        instance-run-options: root.instance-run-options;
+                        instance-run-index <=> root.instance-run-index;
+                        instance-linking-options: root.instance-linking-options;
+                        instance-linking-index <=> root.instance-linking-index;
+                        instance-group-options: root.instance-group-options;
+                        instance-group-index <=> root.instance-group-index;
+                        instance-sort-options: root.instance-sort-options;
+                        instance-sort-index <=> root.instance-sort-index;
+                        instance-filters-active: root.instance-filters-active;
+                        instance-view-changed => { root.instance-view-changed(); }
+                        choose-instance-sort(index) => { root.choose-instance-sort(index); }
+                        clear-instance-filters => { root.clear-instance-filters(); }
+                        open-groups => { root.open-groups(); }
+                    }
+                }
+                SectionHeader {
+                    text: GuiI18n.text("gui-instances");
+                    count: root.instances.length;
+                    add-label: GuiI18n.text("gui-modal-new-instance");
+                    add => { root.create-instance(); }
+                }
+                for pending in root.pending-instances : PendingCard { item: pending; }
+                for item in root.instances : card := ClientCard {
+                    item: item;
+                    group-entries: root.instance-group-entries;
+                    // Runs once the card has been laid out, so a card created
+                    // together with its request can be found.
+                    Timer {
+                        interval: 1ms;
+                        running: root.reveal-token != root.handled-reveal && item.id == root.reveal-host-id;
+                        triggered => {
+                            scroll.reveal(card.absolute-position.y, card.height);
+                            root.handled-reveal = root.reveal-token;
+                        }
+                    }
+                    open-requested(id) => { root.open-client(id); }
+                    quick-view(id) => { root.quick-view-client(id); }
+                    toggle-favorite(id, favorite) => { root.toggle-client-favorite(id, favorite); }
+                    set-group(id, group) => { root.set-client-group(id, group); }
+                    new-group(id) => { root.new-client-group(id); }
+                    pick-icon(id) => { root.pick-client-icon(id); }
+                    clear-icon(id) => { root.clear-client-icon(id); }
+                    launch(id) => { root.launch-client(id); }
+                    kill(id) => { root.kill-client(id); }
+                    open-folder(id) => { root.open-client-folder(id); }
+                    create-server(id, name) => { root.create-linked-server(id, name); }
+                    duplicate(id) => { root.duplicate-client(id); }
+                    make-persistent(id) => { root.make-client-persistent(id); }
+                    rename(id, name) => { root.rename-client(id, name); }
+                    delete(row) => { root.delete-client(row); }
+                }
+                if root.instances.length == 0 && root.pending-instances.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-instances"); color: Theme.text-muted; }
+                SectionHeader {
+                    text: GuiI18n.text("gui-servers");
+                    count: root.servers.length;
+                    add-label: GuiI18n.text("gui-modal-new-server");
+                    add => { root.create-server(); }
+                }
+                for pending in root.pending-servers : PendingCard { item: pending; }
+                for item in root.servers : server-card := ServerCard {
+                    item: item;
+                    Timer {
+                        interval: 1ms;
+                        running: root.reveal-token != root.handled-reveal && item.id == root.reveal-host-id;
+                        triggered => {
+                            scroll.reveal(server-card.absolute-position.y, server-card.height);
+                            root.handled-reveal = root.reveal-token;
+                        }
+                    }
+                    open-requested(id) => { root.open-server(id); }
+                    quick-view(id) => { root.quick-view-server(id); }
+                    toggle-favorite(id, favorite) => { root.toggle-server-favorite(id, favorite); }
+                    pick-icon(id) => { root.pick-server-icon(id); }
+                    clear-icon(id) => { root.clear-server-icon(id); }
+                    start(id) => { root.start-server(id); }
+                    stop(id) => { root.stop-server(id); }
+                    restart(id) => { root.restart-server(id); }
+                    kill(id, name) => { root.kill-server(id, name); }
+                    open-folder(id) => { root.open-server-folder(id); }
+                    rename(id, name) => { root.rename-server(id, name); }
+                    delete(row) => { root.delete-server(row); }
+                }
+                if root.servers.length == 0 && root.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-servers"); color: Theme.text-muted; }
+            }
+        }
+    }
+}

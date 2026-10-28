@@ -9,7 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -151,25 +151,40 @@ fn the_filled_part_of_the_track_runs_from_its_start_to_the_handle() {
     let slider = slider(&ui);
     let (origin, size) = (slider.absolute_position(), slider.size());
     let snapshot = ui.window().take_snapshot().expect("render");
-    let handle_size = 16.0;
+    let handle_size = 20.0;
     let travel = size.width - handle_size;
-    let pixel_at = |fraction: f32| {
-        let x = origin.x + handle_size / 2.0 + travel * fraction;
+    let pixel_at = |x: f32| {
         let y = origin.y + size.height / 2.0;
         let width = snapshot.width() as usize;
         let index = y.round() as usize * width + x.round() as usize;
         snapshot.as_slice()[index]
     };
+    let along = |fraction: f32| origin.x + handle_size / 2.0 + travel * fraction;
 
-    // The value 70 of 30..110 puts the handle halfway along the track.
-    let near_start = pixel_at(0.02);
-    let before_handle = pixel_at(0.4);
-    let after_handle = pixel_at(0.75);
+    // The value 70 of 30..110 puts the handle halfway along the track. The
+    // fill starts inside the track's outline, a few pixels from its start.
+    let near_start = pixel_at(origin.x + handle_size / 2.0 + 4.0);
+    let before_handle = pixel_at(along(0.4));
+    let after_handle = pixel_at(along(0.75));
     assert_eq!(
         near_start, before_handle,
         "the fill starts at the track start"
     );
     assert_ne!(before_handle, after_handle, "the fill stops at the handle");
+
+    // The track's outline runs over the filled part too: the middle of the
+    // track's top edge is ink where the fill is, not fill.
+    let outline = ui.global::<Theme>().get_border_strong();
+    let top_edge = {
+        let x = along(0.4).round() as usize;
+        let y = (origin.y + size.height / 2.0).round() as usize - 5;
+        snapshot.as_slice()[y * snapshot.width() as usize + x]
+    };
+    assert_eq!(
+        (top_edge.r, top_edge.g, top_edge.b),
+        (outline.red(), outline.green(), outline.blue()),
+        "the outline stays whole over the fill"
+    );
 }
 
 fn slider(ui: &AppWindow) -> ElementHandle {
@@ -190,8 +205,7 @@ fn window_with_slider(value: f32) -> (AppWindow, Reports) {
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.show().expect("show");
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     let row = MinecraftPreferenceRow {
         id: "fov".into(),
         label: "Field of view".into(),

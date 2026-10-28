@@ -15,7 +15,9 @@ use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions, mock_elapsed_time,
 };
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, Image, LogicalPosition, ModelRc, PhysicalSize, VecModel};
+use slint::{
+    ComponentHandle, Image, LogicalPosition, ModelRc, PhysicalSize, SharedString, VecModel,
+};
 
 const WINDOW_WIDTH: u16 = 1480;
 const WINDOW_HEIGHT: u16 = 900;
@@ -44,6 +46,7 @@ fn blocked_install(ui: &AppWindow, reason: &str) -> ElementHandle {
             description: "Nice to have items, blocks, and other features.".into(),
             author: "MelanX".into(),
             note: "Compatible".into(),
+            downloads: SharedString::default(),
             icon: Image::default(),
             installed: false,
             queued: false,
@@ -51,6 +54,8 @@ fn blocked_install(ui: &AppWindow, reason: &str) -> ElementHandle {
             blocked_reason: reason.into(),
         }]));
     });
+    ui.set_add_mods_host(0);
+    ui.set_modal("add-mods".into());
     settle(ui);
     ElementHandle::find_by_accessible_label(ui, &lookup("gui-install"))
         .find(|element| {
@@ -76,12 +81,19 @@ fn note(ui: &AppWindow, text: &str) -> Option<ElementHandle> {
 
 #[test]
 fn a_note_for_a_control_at_the_trailing_edge_opens_inside_the_window() {
+    // Narrow enough that the dialog holding the button reaches the window's
+    // trailing edge.
+    const NARROW: u16 = 1000;
     let ui = window();
+    ui.window().set_size(slint::PhysicalSize::new(
+        u32::from(NARROW),
+        u32::from(WINDOW_HEIGHT),
+    ));
     let reason = lookup("gui-hint-mod-client-only");
     let button = blocked_install(&ui, &reason);
     let (at, size) = (button.absolute_position(), button.size());
     assert!(
-        at.x + size.width > f32::from(WINDOW_WIDTH) - 320.0,
+        at.x + size.width > f32::from(NARROW) - 320.0,
         "the button has to sit where a note opened to the right would not fit"
     );
 
@@ -90,8 +102,8 @@ fn a_note_for_a_control_at_the_trailing_edge_opens_inside_the_window() {
     let shown = note(&ui, &reason).expect("hovering a disabled button explains why");
     assert!(shown.absolute_position().x >= 0.0);
     assert!(
-        shown.absolute_position().x + shown.size().width <= f32::from(WINDOW_WIDTH),
-        "the note ends at {}px in a window {WINDOW_WIDTH}px wide",
+        shown.absolute_position().x + shown.size().width <= f32::from(NARROW),
+        "the note ends at {}px in a window {NARROW}px wide",
         shown.absolute_position().x + shown.size().width
     );
 }

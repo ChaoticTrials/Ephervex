@@ -169,6 +169,31 @@ fn the_slint_terms_the_desktop_application_is_built_under_are_reachable() {
 }
 
 #[test]
+fn the_bundled_fonts_are_listed_with_their_own_notices() {
+    // The desktop application embeds three fonts, and each one's copyright
+    // line, plus IBM Plex's Reserved Font Name statement, has to be readable.
+    let sandbox = Sandbox::new();
+    let listing = sandbox.succeeds(&["licenses", "--all"]);
+    for font in [
+        "IBM Plex Mono (font)",
+        "Pixelify Sans (font)",
+        "Space Grotesk (font)",
+    ] {
+        assert!(listing.contains(font), "--all does not list {font}");
+    }
+
+    let text = sandbox.succeeds(&["licenses", "--text", "OFL-1.1"]);
+    assert!(text.contains("SIL OPEN FONT LICENSE Version 1.1"), "{text}");
+    for notice in [
+        "Copyright 2021 The Pixelify Sans Project Authors",
+        "Copyright 2020 The Space Grotesk Project Authors",
+        "Reserved Font Name \"Plex\"",
+    ] {
+        assert!(text.contains(notice), "the OFL-1.1 texts omit {notice:?}");
+    }
+}
+
+#[test]
 fn nothing_is_written_outside_the_throwaway_roots() {
     // The command opens no storage at all, so a run that created a directory
     // would mean it reached something it has no reason to touch.

@@ -1,0 +1,105 @@
+// The panel that narrows and orders the instance list.
+
+import { AppButton, KeyboardFocus } from "../components/controls.slint";
+import { Plate } from "../components/surface.slint";
+import { LabeledChoice } from "../components/selection.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+// One of a row of equal choices, as wide as its share of the row.
+component PanelChip inherits Rectangle {
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> selected;
+    callback clicked();
+    height: Theme.button-height-small;
+    horizontal-stretch: 1;
+    preferred-width: 1px;
+    accessible-role: checkbox;
+    accessible-label: root.accessible-name;
+    accessible-checked: root.selected;
+    accessible-action-default => { root.clicked(); }
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        fill: root.selected ? Theme.selection-strong : area.has-hover ? Theme.elevated : Theme.surface;
+        Text {
+            x: 2px;
+            width: parent.width - 4px;
+            height: parent.height;
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.label-size;
+            font-weight: 700;
+            overflow: elide;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// The storage choice, favorites, groups, and the six choices, in the same
+// state the window keeps. A change is reported through `instance-view-changed`,
+// and the sort through `choose-instance-sort`, which also remembers it.
+export component ListFilters inherits Rectangle {
+    in-out property <string> instance-filter: "all";
+    in-out property <bool> instance-favorites-only: false;
+    in property <[string]> instance-minecraft-options;
+    in-out property <int> instance-minecraft-index: 0;
+    in property <[string]> instance-loader-options;
+    in-out property <int> instance-loader-index: 0;
+    in property <[string]> instance-run-options;
+    in-out property <int> instance-run-index: 0;
+    in property <[string]> instance-linking-options;
+    in-out property <int> instance-linking-index: 0;
+    in property <[string]> instance-group-options;
+    in-out property <int> instance-group-index: 0;
+    in property <[string]> instance-sort-options;
+    in-out property <int> instance-sort-index: 0;
+    // How many conditions, the search included, narrow the list.
+    in property <int> instance-filters-active: 0;
+    callback instance-view-changed();
+    callback choose-instance-sort(int);
+    callback clear-instance-filters();
+    callback open-groups();
+    // Leaves room for the hard shadow of a raised chip below the choices.
+    height: content.preferred-height;
+    content := VerticalLayout {
+        padding-bottom: Theme.shadow-offset-small;
+        spacing: 10px;
+        HorizontalLayout {
+            spacing: 6px;
+            PanelChip { text: GuiI18n.text("gui-all"); selected: root.instance-filter == "all"; clicked => { root.instance-filter = "all"; root.instance-view-changed(); } }
+            PanelChip { text: GuiI18n.text("gui-temporary"); selected: root.instance-filter == "temporary"; clicked => { root.instance-filter = "temporary"; root.instance-view-changed(); } }
+            PanelChip { text: GuiI18n.text("gui-persistent"); selected: root.instance-filter == "persistent"; clicked => { root.instance-filter = "persistent"; root.instance-view-changed(); } }
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            // Favorites narrows whichever storage choice is made.
+            PanelChip { text: GuiI18n.text("gui-favorites"); accessible-name: GuiI18n.text("gui-favorites-only"); selected: root.instance-favorites-only; clicked => { root.instance-favorites-only = !root.instance-favorites-only; root.instance-view-changed(); } }
+            // A button, not a choice: it opens the dialog that manages groups.
+            AppButton { compact: true; text: GuiI18n.text("gui-groups"); clicked => { root.open-groups(); } }
+        }
+        // One column, each choice named above it, so what narrows the list
+        // and what orders it read as separate settings. A dropdown is at
+        // least 160px wide, so two of them do not fit beside each other in
+        // the list's column.
+        VerticalLayout {
+            spacing: 8px;
+            LabeledChoice { caption: GuiI18n.text("gui-minecraft-version"); label: GuiI18n.text("gui-filter-minecraft-version"); model: root.instance-minecraft-options; index: root.instance-minecraft-index; selected(index) => { root.instance-minecraft-index = index; root.instance-view-changed(); } }
+            LabeledChoice { caption: GuiI18n.text("gui-loader"); label: GuiI18n.text("gui-filter-loader"); model: root.instance-loader-options; index: root.instance-loader-index; selected(index) => { root.instance-loader-index = index; root.instance-view-changed(); } }
+            LabeledChoice { caption: GuiI18n.text("gui-running-state"); label: GuiI18n.text("gui-filter-run-state"); model: root.instance-run-options; index: root.instance-run-index; selected(index) => { root.instance-run-index = index; root.instance-view-changed(); } }
+            LabeledChoice { caption: GuiI18n.text("gui-linked-servers"); label: GuiI18n.text("gui-filter-linking"); model: root.instance-linking-options; index: root.instance-linking-index; selected(index) => { root.instance-linking-index = index; root.instance-view-changed(); } }
+            LabeledChoice { caption: GuiI18n.text("gui-group"); label: GuiI18n.text("gui-filter-group"); model: root.instance-group-options; index: root.instance-group-index; selected(index) => { root.instance-group-index = index; root.instance-view-changed(); } }
+            LabeledChoice { caption: GuiI18n.text("gui-sort-caption"); label: GuiI18n.text("gui-sort-by"); model: root.instance-sort-options; index: root.instance-sort-index; selected(index) => { root.instance-sort-index = index; root.choose-instance-sort(index); } }
+        }
+        if root.instance-filters-active > 0 : AppButton { text: GuiI18n.text("gui-clear-filters"); clicked => { root.clear-instance-filters(); } }
+    }
+}

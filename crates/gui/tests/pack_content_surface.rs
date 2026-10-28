@@ -58,7 +58,7 @@ fn row(kind: &str, name: &str, path: &str, owner: &str, missing: bool) -> PackCo
 fn show(ui: &AppWindow, rows: Vec<PackContentRow>) {
     let mut view = support::client_view(instance());
     view.pack_content = ModelRc::new(VecModel::from(rows));
-    support::show(ui, 0, vec![view], vec![support::pane(1, 0, "Packs")]);
+    support::show(ui, vec![view], vec![support::pane(1, 0, "Packs")]);
     slint::platform::update_timers_and_animations();
     ui.window().take_snapshot().expect("render");
 }

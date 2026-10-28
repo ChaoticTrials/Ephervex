@@ -11,7 +11,8 @@
 // set where it is placed applies.
 
 import { ListView } from "std-widgets.slint";
-import { FocusRing } from "controls.slint";
+import { FocusRing, SegmentedChoice } from "controls.slint";
+import { Plate } from "surface.slint";
 import { HoverNote, TooltipCard } from "text.slint";
 import { Theme } from "../theme.slint";
 
@@ -36,7 +37,8 @@ export component ChoiceBox inherits Rectangle {
     callback selected(value: string);
     // The entry the open list would pick.
     private property <int> highlight;
-    private property <length> popup-padding: 4px;
+    // The room inside the outline around the entries.
+    private property <length> popup-padding: Theme.strong-border-width + 4px;
     private property <int> visible-items: min(6, root.model.length);
     // The open list is placed when it opens, so a dropdown that moves or
     // resizes afterwards would leave it behind. Opening can itself scroll the
@@ -58,10 +60,6 @@ export component ChoiceBox inherits Rectangle {
     horizontal-stretch: 1;
     vertical-stretch: 0;
     forward-focus: keys;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: root.open || keys.has-focus ? Theme.accent : area.has-hover && root.enabled ? Theme.text-muted : Theme.border;
-    background: Theme.field;
     accessible-role: combobox;
     accessible-enabled: root.enabled;
     accessible-expandable: true;
@@ -100,6 +98,13 @@ export component ChoiceBox inherits Rectangle {
         }
     }
 
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: root.open ? Theme.shadow-offset-small : 0px;
+        fill: root.enabled ? Theme.field : Theme.well;
+    }
     shown := Text {
         x: 11px;
         width: parent.width - 36px;
@@ -107,6 +112,7 @@ export component ChoiceBox inherits Rectangle {
         text: root.current-value != "" ? root.current-value : root.placeholder;
         color: root.enabled && root.current-value != "" ? Theme.text : Theme.text-muted;
         font-size: Theme.body-size;
+        font-weight: 600;
         overflow: elide;
         vertical-alignment: center;
     }
@@ -118,7 +124,7 @@ export component ChoiceBox inherits Rectangle {
         font-size: Theme.label-size;
         vertical-alignment: center;
     }
-    if keys.has-focus && !root.open && root.enabled : FocusRing { target-width: root.width; target-height: root.height; }
+    if keys.has-focus && !root.open && root.enabled : FocusRing { target-width: root.width; target-height: root.height; ring-radius: Theme.small-radius; }
     keys := FocusScope {
         enabled: root.enabled;
         key-pressed(event) => {
@@ -152,8 +158,8 @@ export component ChoiceBox inherits Rectangle {
     popup := PopupWindow {
         x: 0;
         y: root.height + 4px;
-        width: root.width;
-        height: root.visible-items * Theme.control-height + 2 * root.popup-padding;
+        width: root.width + Theme.shadow-offset-card;
+        height: root.visible-items * Theme.control-height + 2 * root.popup-padding + Theme.shadow-offset-card;
         close-policy: close-on-click-outside;
         forward-focus: list-keys;
 
@@ -192,14 +198,12 @@ export component ChoiceBox inherits Rectangle {
                 return accept;
             }
 
-            Rectangle {
-                border-radius: 6px;
-                border-width: 1px;
-                border-color: Theme.border;
-                background: Theme.overlay;
-                drop-shadow-blur: 16px;
-                drop-shadow-offset-y: 6px;
-                drop-shadow-color: Theme.shadow;
+            Plate {
+                width: parent.width - Theme.shadow-offset-card;
+                height: parent.height - Theme.shadow-offset-card;
+                lift: Theme.shadow-offset-card;
+                radius: Theme.button-radius;
+                fill: Theme.overlay;
                 list := ListView {
                     x: root.popup-padding;
                     y: root.popup-padding;
@@ -207,7 +211,7 @@ export component ChoiceBox inherits Rectangle {
                     height: parent.height - 2 * root.popup-padding;
                     for entry[index] in root.model : Rectangle {
                         height: Theme.control-height;
-                        border-radius: 4px;
+                        border-radius: Theme.chip-radius;
                         background: index == root.highlight ? Theme.selection : transparent;
                         accessible-role: list-item;
                         accessible-label: entry;
@@ -400,5 +404,39 @@ export component LabeledChoice inherits Rectangle {
             }
             @children
         }
+    }
+}
+
+// The options as a joined bar when it fits in `available-width`, and as a
+// dropdown when it does not.
+export component ChoiceBar inherits Rectangle {
+    in property <[string]> options;
+    in property <int> current;
+    in property <string> accessible-name;
+    // The width the caller can give the choice.
+    in property <length> available-width: 100000px;
+    callback selected(int);
+    private property <bool> as-menu: bar.natural-width > root.available-width;
+    width: root.as-menu ? min(240px * Theme.text-scale, root.available-width) : bar.width;
+    height: root.as-menu ? Theme.control-height : bar.height;
+    horizontal-stretch: 0;
+    bar := SegmentedChoice {
+        x: 0px;
+        y: 0px;
+        visible: !root.as-menu;
+        options: root.options;
+        current: root.current;
+        accessible-name: root.accessible-name;
+        selected(index) => { root.selected(index); }
+    }
+    menu := IndexComboBox {
+        x: 0px;
+        y: 0px;
+        width: root.as-menu ? root.width : 0px;
+        visible: root.as-menu;
+        label: root.accessible-name;
+        model: root.options;
+        index: root.current;
+        selected(index, value) => { root.selected(index); }
     }
 }

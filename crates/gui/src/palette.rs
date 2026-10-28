@@ -13,9 +13,12 @@ use slint::{Color, ComponentHandle};
 use crate::theme_files::UserTheme;
 use crate::ui::{AppWindow, BuiltInPalettes, Theme, ThemePalette};
 
-/// The built-in schemes in the order the theme list offers them.
-const BUILT_IN: [ApplicationColorScheme; 2] =
-    [ApplicationColorScheme::Dark, ApplicationColorScheme::Light];
+/// The built-in schemes in the order the theme list offers them. `Dark` and
+/// `Light` are accepted names that paint as Workbench, so they are not offered.
+const BUILT_IN: [ApplicationColorScheme; 2] = [
+    ApplicationColorScheme::Workbench,
+    ApplicationColorScheme::Dark,
+];
 
 /// Every color token a theme file may set, by its `Theme` name.
 pub(crate) const PALETTE_COLORS: &[&str] = &[
@@ -68,6 +71,26 @@ pub(crate) const PALETTE_COLORS: &[&str] = &[
     "group-tone-6",
     "shadow",
     "scrim",
+    "shadow-hard",
+    "border-strong",
+    "accent-primary",
+    "on-accent",
+    "state-running",
+    "state-building",
+    "state-attention",
+    "state-stopped",
+    "state-server",
+    "note-fill",
+    "danger-soft",
+    "ok-soft",
+    "grid-line",
+    "terminal",
+    "on-terminal",
+    "on-terminal-muted",
+    "terminal-error",
+    "chip-forge",
+    "chip-neoforge",
+    "chip-vanilla",
 ];
 
 /// Tokens that were once the color of another token. A theme file written
@@ -131,6 +154,26 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
         "group-tone-6" => &mut palette.group_tone_6,
         "shadow" => &mut palette.shadow,
         "scrim" => &mut palette.scrim,
+        "shadow-hard" => &mut palette.shadow_hard,
+        "border-strong" => &mut palette.border_strong,
+        "accent-primary" => &mut palette.accent_primary,
+        "on-accent" => &mut palette.on_accent,
+        "state-running" => &mut palette.state_running,
+        "state-building" => &mut palette.state_building,
+        "state-attention" => &mut palette.state_attention,
+        "state-stopped" => &mut palette.state_stopped,
+        "state-server" => &mut palette.state_server,
+        "note-fill" => &mut palette.note_fill,
+        "danger-soft" => &mut palette.danger_soft,
+        "ok-soft" => &mut palette.ok_soft,
+        "grid-line" => &mut palette.grid_line,
+        "terminal" => &mut palette.terminal,
+        "on-terminal" => &mut palette.on_terminal,
+        "on-terminal-muted" => &mut palette.on_terminal_muted,
+        "terminal-error" => &mut palette.terminal_error,
+        "chip-forge" => &mut palette.chip_forge,
+        "chip-neoforge" => &mut palette.chip_neoforge,
+        "chip-vanilla" => &mut palette.chip_vanilla,
         _ => return None,
     })
 }
@@ -139,8 +182,10 @@ fn color_mut<'a>(palette: &'a mut ThemePalette, token: &str) -> Option<&'a mut C
 fn built_in_palette(ui: &AppWindow, scheme: ApplicationColorScheme) -> ThemePalette {
     let palettes = ui.global::<BuiltInPalettes>();
     match scheme {
-        ApplicationColorScheme::Dark => palettes.get_dark(),
-        ApplicationColorScheme::Light => palettes.get_light(),
+        ApplicationColorScheme::Workbench | ApplicationColorScheme::Light => {
+            palettes.get_workbench()
+        }
+        ApplicationColorScheme::Dark => palettes.get_workbench_dark(),
     }
 }
 
@@ -158,8 +203,10 @@ fn seasonal_palette(ui: &AppWindow, theme: SeasonalTheme) -> ThemePalette {
 
 fn built_in_label(scheme: ApplicationColorScheme) -> String {
     lookup(match scheme {
+        ApplicationColorScheme::Workbench | ApplicationColorScheme::Light => {
+            "gui-color-scheme-light"
+        }
         ApplicationColorScheme::Dark => "gui-color-scheme-dark",
-        ApplicationColorScheme::Light => "gui-color-scheme-light",
     })
 }
 
@@ -213,6 +260,15 @@ fn resolve(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) -> The
     }
 }
 
+/// The palette a theme in the list paints in, for the card that offers it.
+pub(crate) fn choice_palette(
+    ui: &AppWindow,
+    theme: &ApplicationTheme,
+    user_themes: &[UserTheme],
+) -> ThemePalette {
+    resolve(ui, &ShownTheme::Recorded(theme.clone()), user_themes)
+}
+
 /// Repaints the interface in the palette the shown theme resolves to.
 pub(crate) fn apply_theme(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) {
     ui.global::<Theme>()
@@ -252,6 +308,159 @@ pub(crate) fn choice_index(choices: &[ThemeChoice], theme: &ApplicationTheme) ->
         .unwrap_or_default()
 }
 
+/// The pairs of foreground and fill the interface draws, checked against any
+/// complete palette, built in or from a theme file.
+#[cfg(test)]
+pub(crate) mod drawn_pairs {
+    use slint::Color;
+
+    use crate::ui::ThemePalette;
+
+    /// The WCAG contrast ratio of two opaque colors.
+    pub(crate) fn contrast(a: Color, b: Color) -> f64 {
+        fn luminance(color: Color) -> f64 {
+            let linear = |channel: u8| {
+                let value = f64::from(channel) / 255.0;
+                if value <= 0.039_28 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.red())
+                + 0.7152 * linear(color.green())
+                + 0.0722 * linear(color.blue())
+        }
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// The tones a pill draws its caption in.
+    fn pill_tones(palette: &ThemePalette) -> [(&'static str, Color); 17] {
+        [
+            ("text", palette.text),
+            ("text-secondary", palette.text_secondary),
+            ("text-muted", palette.text_muted),
+            ("accent", palette.accent),
+            ("accent-secondary", palette.accent_secondary),
+            ("success", palette.success),
+            ("warning", palette.warning),
+            ("danger", palette.danger),
+            ("server", palette.server),
+            ("modrinth", palette.modrinth),
+            ("curseforge", palette.curseforge),
+            ("group-tone-1", palette.group_tone_1),
+            ("group-tone-2", palette.group_tone_2),
+            ("group-tone-3", palette.group_tone_3),
+            ("group-tone-4", palette.group_tone_4),
+            ("group-tone-5", palette.group_tone_5),
+            ("group-tone-6", palette.group_tone_6),
+        ]
+    }
+
+    /// Each pair drawn, named, with the ratio it has to reach. A caption is
+    /// read at 4.5:1, a glyph at 3:1.
+    pub(crate) fn shortfalls(palette: &ThemePalette) -> Vec<String> {
+        let mut pairs: Vec<(String, Color, Color, f64)> = Vec::new();
+        let mut pair = |name: &str, front: Color, back: Color, minimum: f64| {
+            pairs.push((name.to_owned(), front, back, minimum));
+        };
+        for (name, fill) in [
+            ("surface", palette.surface),
+            ("selection", palette.selection),
+            ("selection-strong", palette.selection_strong),
+            ("note-fill", palette.note_fill),
+            ("chip-forge", palette.chip_forge),
+            ("chip-neoforge", palette.chip_neoforge),
+            ("chip-vanilla", palette.chip_vanilla),
+        ] {
+            pair(&format!("text on {name}"), palette.text, fill, 4.5);
+        }
+        for (name, fill) in [
+            ("accent-primary", palette.accent_primary),
+            ("state-running", palette.state_running),
+            ("state-building", palette.state_building),
+            ("state-attention", palette.state_attention),
+            ("state-stopped", palette.state_stopped),
+            ("state-server", palette.state_server),
+        ] {
+            pair(
+                &format!("on-accent on {name}"),
+                palette.on_accent,
+                fill,
+                4.5,
+            );
+        }
+        for (name, fill) in [
+            ("primary-fill", palette.primary_fill),
+            ("primary-fill-hover", palette.primary_fill_hover),
+        ] {
+            pair(
+                &format!("on-primary on {name}"),
+                palette.on_primary,
+                fill,
+                4.5,
+            );
+        }
+        for (name, fill) in [
+            ("danger-fill", palette.danger_fill),
+            ("danger-fill-hover", palette.danger_fill_hover),
+        ] {
+            pair(
+                &format!("on-danger on {name}"),
+                palette.on_danger,
+                fill,
+                4.5,
+            );
+        }
+        // The count on a card's problem badge, and on a section's count badge.
+        for (name, fill) in [
+            ("danger", palette.danger),
+            ("border-strong", palette.border_strong),
+        ] {
+            pair(&format!("surface on {name}"), palette.surface, fill, 4.5);
+        }
+        // The glyph of a favorite star that is on.
+        pair(
+            "warning on note-fill",
+            palette.warning,
+            palette.note_fill,
+            3.0,
+        );
+        // A pill's caption is its tone, drawn on `surface`, or on `selection`
+        // while a pill button is under the pointer.
+        let tones = pill_tones(palette);
+        for (name, tone) in tones {
+            for (fill_name, fill) in [
+                ("surface", palette.surface),
+                ("selection", palette.selection),
+            ] {
+                pair(&format!("{name} on {fill_name}"), tone, fill, 4.5);
+            }
+        }
+        let mut found: Vec<String> = pairs
+            .into_iter()
+            .filter_map(|(name, front, back, minimum)| {
+                let ratio = contrast(front, back);
+                (ratio < minimum).then(|| format!("{name} is {ratio:.2}:1, under {minimum}:1"))
+            })
+            .collect();
+        // The knob sits on the track inside an outline. It stands apart from
+        // the track by its own fill, or by the outline when the fills are close.
+        for (track_name, track) in [("toggle-on", palette.toggle_on), ("bar", palette.bar)] {
+            let by_fill = contrast(palette.toggle_knob, track) >= 3.0;
+            let by_outline = contrast(palette.border_strong, track) >= 3.0
+                && contrast(palette.border_strong, palette.toggle_knob) >= 3.0;
+            if !by_fill && !by_outline {
+                found.push(format!(
+                    "the knob of a switch is not apart from its {track_name} track"
+                ));
+            }
+        }
+        found
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
@@ -262,6 +471,13 @@ mod tests {
     use crate::test_support::{ui_declaration, ui_markup};
 
     const SCHEMES: [ApplicationColorScheme; 2] = BUILT_IN;
+
+    /// Every name a theme can record or name as its parent.
+    const NAMES: [ApplicationColorScheme; 3] = [
+        ApplicationColorScheme::Workbench,
+        ApplicationColorScheme::Dark,
+        ApplicationColorScheme::Light,
+    ];
 
     fn recorded(theme: ApplicationTheme) -> ShownTheme {
         ShownTheme::Recorded(theme)
@@ -317,9 +533,25 @@ mod tests {
             assert_eq!(resolved(&theme), named(&palette), "{scheme:?}");
             assert_eq!(theme.get_widget_scheme(), palette.widget_scheme);
         }
-        let dark = built_in_palette(&ui, ApplicationColorScheme::Dark);
-        let light = built_in_palette(&ui, ApplicationColorScheme::Light);
-        assert_ne!(dark, light, "two schemes that paint the same");
+    }
+
+    /// Light is a recorded name that stays valid and paints as Workbench; dark
+    /// paints in Workbench Dark.
+    #[test]
+    fn the_light_name_paints_as_workbench_and_dark_in_its_own_palette() {
+        let ui = window();
+        let palettes = ui.global::<BuiltInPalettes>();
+        let (workbench, dark) = (palettes.get_workbench(), palettes.get_workbench_dark());
+        assert_ne!(workbench, dark);
+        for scheme in NAMES {
+            apply_theme(&ui, &recorded(ApplicationTheme::BuiltIn(scheme)), &[]);
+            let expected = if scheme == ApplicationColorScheme::Dark {
+                &dark
+            } else {
+                &workbench
+            };
+            assert_eq!(&ui.global::<Theme>().get_palette(), expected, "{scheme:?}");
+        }
     }
 
     /// One Halloween palette stands in for Dark and Light alike.
@@ -450,6 +682,32 @@ mod tests {
         );
     }
 
+    /// A theme file leaves most tokens out, and a token added after it was
+    /// written is one of them: it comes from the parent, never from nothing.
+    #[test]
+    fn a_user_theme_inherits_the_tokens_it_leaves_unset_from_workbench() {
+        let ui = window();
+        let marker = Color::from_argb_u8(255, 1, 2, 3);
+        let themes = NAMES.map(|parent| user(parent.as_str(), parent, &[("border", marker)]));
+        for parent in NAMES {
+            apply_theme(
+                &ui,
+                &recorded(ApplicationTheme::User(parent.as_str().to_owned())),
+                &themes,
+            );
+            let palette = ui.global::<Theme>().get_palette();
+            let mut expected = built_in_palette(&ui, parent);
+            expected.border = marker;
+            assert_eq!(palette, expected, "parent {parent:?}");
+            assert_ne!(palette.shadow_hard.alpha(), 0);
+            assert_ne!(palette.terminal.alpha(), 0);
+            assert_ne!(palette.state_running.alpha(), 0);
+            assert_ne!(palette.chip_forge.alpha(), 0);
+            assert_ne!(palette.chip_neoforge.alpha(), 0);
+            assert_ne!(palette.chip_vanilla.alpha(), 0);
+        }
+    }
+
     #[test]
     fn a_user_theme_whose_file_is_gone_paints_in_the_default_scheme() {
         let ui = window();
@@ -470,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn the_theme_list_offers_the_built_ins_then_the_users_themes() {
+    fn the_theme_list_offers_workbench_and_dark_then_the_users_themes() {
         let themes = [user("mine", ApplicationColorScheme::Dark, &[])];
         let choices = theme_choices(&themes);
         let offered: Vec<ApplicationTheme> =
@@ -478,11 +736,13 @@ mod tests {
         assert_eq!(
             offered,
             [
+                ApplicationTheme::BuiltIn(ApplicationColorScheme::Workbench),
                 ApplicationTheme::BuiltIn(ApplicationColorScheme::Dark),
-                ApplicationTheme::BuiltIn(ApplicationColorScheme::Light),
                 ApplicationTheme::User("mine".to_owned()),
             ]
         );
+        assert_eq!(choices[0].label, lookup("gui-color-scheme-light"));
+        assert_eq!(choices[1].label, lookup("gui-color-scheme-dark"));
         assert_eq!(choices[2].label, "MINE");
         assert_eq!(
             choice_index(&choices, &ApplicationTheme::User("mine".to_owned())),
@@ -492,6 +752,24 @@ mod tests {
             choice_index(&choices, &ApplicationTheme::User("gone".to_owned())),
             choice_index(&choices, &ApplicationTheme::default())
         );
+    }
+
+    /// A recorded light shows Workbench as the chosen entry, since that is
+    /// what it paints and the list has no entry of its own for it. A recorded
+    /// dark has its own.
+    #[test]
+    fn a_recorded_light_shows_workbench_selected_and_dark_its_own_entry() {
+        let choices = theme_choices(&[]);
+        for (scheme, shown) in [
+            (
+                ApplicationColorScheme::Light,
+                ApplicationColorScheme::Workbench,
+            ),
+            (ApplicationColorScheme::Dark, ApplicationColorScheme::Dark),
+        ] {
+            let chosen = choice_index(&choices, &ApplicationTheme::BuiltIn(scheme));
+            assert_eq!(choices[chosen].theme, ApplicationTheme::BuiltIn(shown));
+        }
     }
 
     /// A theme file names tokens the way `Theme` does, so the list a file is
@@ -632,24 +910,7 @@ mod tests {
         }
     }
 
-    /// The WCAG contrast ratio of two opaque colors.
-    fn contrast(a: Color, b: Color) -> f64 {
-        fn luminance(color: Color) -> f64 {
-            let linear = |channel: u8| {
-                let value = f64::from(channel) / 255.0;
-                if value <= 0.039_28 {
-                    value / 12.92
-                } else {
-                    ((value + 0.055) / 1.055).powf(2.4)
-                }
-            };
-            0.2126 * linear(color.red())
-                + 0.7152 * linear(color.green())
-                + 0.0722 * linear(color.blue())
-        }
-        let (a, b) = (luminance(a), luminance(b));
-        (a.max(b) + 0.05) / (a.min(b) + 0.05)
-    }
+    use super::drawn_pairs::{contrast, shortfalls};
 
     /// Every palette Ephervex ships, selectable or seasonal.
     fn built_ins() -> Vec<(String, ThemePalette)> {
@@ -670,13 +931,13 @@ mod tests {
             .collect()
     }
 
-    /// A switch that is on is its knob over its track. A palette that paints
-    /// both in one color leaves a flat pill with nothing to say where it is set.
+    /// Every foreground the interface draws on a fill is readable on it, and a
+    /// switch's knob is told apart from its track.
     #[test]
-    fn the_knob_of_a_switch_that_is_on_stands_apart_from_its_track() {
+    fn every_drawn_pair_is_readable_in_the_built_in_palettes() {
         for (scheme, palette) in built_ins() {
-            let ratio = contrast(palette.toggle_knob, palette.toggle_on);
-            assert!(ratio >= 3.0, "{scheme}: knob over track is {ratio:.2}:1");
+            let found = shortfalls(&palette);
+            assert!(found.is_empty(), "{scheme}: {found:?}");
         }
     }
 
@@ -768,6 +1029,171 @@ mod tests {
                 "{scheme}: scrim alpha {}",
                 palette.scrim.alpha()
             );
+        }
+    }
+
+    /// Every opaque fill text is read on.
+    fn text_surfaces(palette: &ThemePalette) -> [(&'static str, Color); 13] {
+        [
+            ("background", palette.background),
+            ("surface", palette.surface),
+            ("field", palette.field),
+            ("elevated", palette.elevated),
+            ("overlay", palette.overlay),
+            ("bar", palette.bar),
+            ("well", palette.well),
+            ("selection", palette.selection),
+            ("selection-card", palette.selection_card),
+            ("selection-strong", palette.selection_strong),
+            ("note-fill", palette.note_fill),
+            ("danger-soft", palette.danger_soft),
+            ("ok-soft", palette.ok_soft),
+        ]
+    }
+
+    #[test]
+    fn text_is_readable_on_every_surface() {
+        for (scheme, palette) in built_ins() {
+            for (surface, fill) in text_surfaces(&palette) {
+                for (name, color, minimum) in [
+                    ("text", palette.text, 7.0),
+                    ("text-secondary", palette.text_secondary, 4.5),
+                    ("text-muted", palette.text_muted, 4.5),
+                ] {
+                    let ratio = contrast(color, fill);
+                    assert!(
+                        ratio >= minimum,
+                        "{scheme}: {name} on {surface} is {ratio:.2}:1, under {minimum}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Accent, state, and mark tones are drawn as text in pills and links.
+    #[test]
+    fn tones_drawn_as_text_are_readable_on_every_surface() {
+        for (scheme, palette) in built_ins() {
+            for (name, tone) in [
+                ("accent", palette.accent),
+                ("accent-secondary", palette.accent_secondary),
+                ("success", palette.success),
+                ("warning", palette.warning),
+                ("danger", palette.danger),
+                ("log-error", palette.log_error),
+                ("server", palette.server),
+                ("modrinth", palette.modrinth),
+                ("curseforge", palette.curseforge),
+                ("vanilla", palette.vanilla),
+                ("forge", palette.forge),
+                ("neoforge", palette.neoforge),
+                ("group-tone-1", palette.group_tone_1),
+                ("group-tone-2", palette.group_tone_2),
+                ("group-tone-3", palette.group_tone_3),
+                ("group-tone-4", palette.group_tone_4),
+                ("group-tone-5", palette.group_tone_5),
+                ("group-tone-6", palette.group_tone_6),
+            ] {
+                for (surface, fill) in text_surfaces(&palette) {
+                    // A problem box carries `danger` and the text colors only.
+                    if surface == "danger-soft" {
+                        continue;
+                    }
+                    let ratio = contrast(tone, fill);
+                    assert!(
+                        ratio >= 4.5,
+                        "{scheme}: {name} on {surface} is {ratio:.2}:1"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn danger_text_is_readable_on_a_problem_box() {
+        for (scheme, palette) in built_ins() {
+            for (name, color) in [("danger", palette.danger), ("log-error", palette.log_error)] {
+                let ratio = contrast(color, palette.danger_soft);
+                assert!(
+                    ratio >= 4.5,
+                    "{scheme}: {name} on a problem box is {ratio:.2}:1"
+                );
+            }
+        }
+    }
+
+    /// The pastel fills carry meaning and take a dark caption.
+    #[test]
+    fn a_caption_is_readable_on_every_accent_and_state_fill() {
+        for (scheme, palette) in built_ins() {
+            for (name, fill) in [
+                ("accent-primary", palette.accent_primary),
+                ("state-running", palette.state_running),
+                ("state-building", palette.state_building),
+                ("state-attention", palette.state_attention),
+                ("state-stopped", palette.state_stopped),
+                ("state-server", palette.state_server),
+                ("primary-fill", palette.primary_fill),
+                ("danger-fill", palette.danger_fill),
+            ] {
+                let ratio = contrast(palette.on_accent, fill);
+                assert!(ratio >= 7.0, "{scheme}: caption on {name} is {ratio:.2}:1");
+            }
+        }
+    }
+
+    /// A loader chip draws `text` on its fill.
+    #[test]
+    fn text_is_readable_on_every_loader_chip_fill() {
+        for (scheme, palette) in built_ins() {
+            for (name, fill) in [
+                ("chip-forge", palette.chip_forge),
+                ("chip-neoforge", palette.chip_neoforge),
+                ("chip-vanilla", palette.chip_vanilla),
+            ] {
+                let ratio = contrast(palette.text, fill);
+                assert!(ratio >= 4.5, "{scheme}: text on {name} is {ratio:.2}:1");
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_text_is_readable_on_the_terminal() {
+        for (scheme, palette) in built_ins() {
+            for (name, color, minimum) in [
+                ("on-terminal", palette.on_terminal, 7.0),
+                ("on-terminal-muted", palette.on_terminal_muted, 4.5),
+                ("terminal-error", palette.terminal_error, 4.5),
+                ("accent-primary", palette.accent_primary, 4.5),
+                ("state-running", palette.state_running, 4.5),
+                ("state-server", palette.state_server, 4.5),
+            ] {
+                let ratio = contrast(color, palette.terminal);
+                assert!(
+                    ratio >= minimum,
+                    "{scheme}: {name} on the terminal is {ratio:.2}:1, under {minimum}:1"
+                );
+            }
+        }
+    }
+
+    /// Only the header ribbon is meant to be absent. Any other token painted
+    /// fully transparent is one a palette forgot.
+    #[test]
+    fn no_built_in_token_but_the_header_ribbon_is_transparent() {
+        for (scheme, palette) in built_ins() {
+            for field in palette_fields(ui_markup())
+                .into_iter()
+                .filter(|field| *field != "widget-scheme")
+            {
+                let color = *color_mut(&mut palette.clone(), field).expect("a known token");
+                assert_eq!(
+                    color.alpha() == 0,
+                    field.starts_with("header-ribbon-"),
+                    "{scheme}: `{field}` has alpha {}",
+                    color.alpha()
+                );
+            }
         }
     }
 }

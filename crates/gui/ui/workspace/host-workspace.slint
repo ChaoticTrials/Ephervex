@@ -1,8 +1,8 @@
 // A host workspace's chrome: pane header, surface tabs, workflow banner, and the pane host picker.
 
 import { HostIcon, LoaderGlyph } from "../components/artwork.slint";
-import { AppButton, BusySpinner, IconButton, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
-import { BodyText, Divider, Heading } from "../components/text.slint";
+import { AppButton, BusySpinner, Chip, IconButton, KeyboardFocus, LaunchAsButton, Pill, PillButton, StatePill, StateTone } from "../components/controls.slint";
+import { BodyText, Divider, DisplayHeading, Heading } from "../components/text.slint";
 import { GuiI18n, HostIcons } from "../globals.slint";
 import {
     MenuRow,
@@ -10,6 +10,8 @@ import {
     WorkspaceHostChoice,
     WorkspaceSurfaceRow
 } from "../models.slint";
+import { Panel, Plate, Scrim } from "../components/surface.slint";
+import { IssueLinkRow } from "issue-link.slint";
 import { Theme } from "../theme.slint";
 
 // A host's Java at a glance: the runtime it would run with, in a tone that
@@ -35,26 +37,32 @@ export component WorkspaceTab inherits Rectangle {
     min-width: max(112px, label.preferred-width + 30px);
     height: 38px;
     horizontal-stretch: 0;
-    border-radius: 5px;
-    background: area.has-hover ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: text;
     accessible-action-default => { root.clicked(); }
+    // Tabs abut, so the face leaves room on every side for the outline and
+    // the shadow of the selected one.
+    Plate {
+        x: 2px;
+        y: 1px;
+        width: root.width - 2px - Theme.shadow-offset-small - 1px;
+        height: root.height - 2px - Theme.shadow-offset-small;
+        radius: Theme.small-radius;
+        lift: root.selected ? Theme.shadow-offset-small : 0px;
+        outline: root.selected ? Theme.border-strong : transparent;
+        fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : transparent;
+    }
     label := Text {
         text: root.text;
-        color: root.selected ? Theme.text : Theme.text-secondary;
+        color: root.selected ? Theme.on-accent : Theme.text;
         font-size: Theme.body-size;
-        font-weight: root.selected ? 600 : 400;
+        font-weight: 700;
         horizontal-alignment: center;
         vertical-alignment: center;
         overflow: elide;
     }
-    Rectangle {
-        x: 12px; y: parent.height - 2px; width: parent.width - 24px; height: 2px;
-        border-radius: 1px;
-        background: root.selected ? Theme.accent : transparent;
-    }
-    area := TouchArea { clicked => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // What a pane of a split shows, as a button that opens the host picker.
@@ -66,20 +74,24 @@ export component PaneHostButton inherits Rectangle {
     height: Theme.control-height;
     horizontal-stretch: 1;
     min-width: 80px;
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: area.has-hover ? Theme.accent : Theme.border;
-    background: area.has-hover ? Theme.elevated : transparent;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-action-default => { root.clicked(); }
+    Plate {
+        width: root.width;
+        height: root.height;
+        radius: Theme.small-radius;
+        lift: area.has-hover ? Theme.shadow-offset-small : 0px;
+        fill: Theme.surface;
+    }
     HorizontalLayout {
         padding-left: 10px; padding-right: 10px; spacing: 8px;
         Text { text: root.kind; color: Theme.text-muted; font-size: Theme.caption-size; vertical-alignment: center; }
         Text { text: root.name; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
         Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
     }
-    area := TouchArea { clicked => { root.clicked(); } }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    area := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
 }
 
 // A host's surfaces as tabs: as many as fit, then More, which lists the
@@ -89,8 +101,10 @@ export component SurfaceTabs inherits Rectangle {
     in property <[WorkspaceSurfaceRow]> surfaces;
     in property <string> selected;
     in property <int> selected-index;
+    // How wide each tab is, for labels longer than a surface name.
+    in property <length> tab-size: Theme.workspace-tab-width;
     callback chosen(string);
-    property <length> tab-width: min(Theme.workspace-tab-width, root.width / 2);
+    property <length> tab-width: min(root.tab-size, root.width / 2);
     property <bool> all-fit: root.surfaces.length * root.tab-width <= root.width;
     // Tabs shown besides More, never fewer than the selected one.
     property <int> fitting: root.all-fit ? root.surfaces.length : max(1, floor((root.width - root.tab-width) / root.tab-width));
@@ -101,6 +115,24 @@ export component SurfaceTabs inherits Rectangle {
     // Placed by hand rather than laid out: how many tabs fit depends on
     // this bar's width, which a layout would in turn take from the tabs.
     property <int> leading: root.fitting - (root.selected-hidden ? 1 : 0);
+    // The entry the keyboard is on in the More list, or -1.
+    property <int> highlight: -1;
+    // An entry of the More list: a surface without a tab of its own.
+    function usable(index: int) -> bool {
+        return index >= root.leading && index < root.surfaces.length && index != root.selected-index;
+    }
+    function first-usable() -> int {
+        return root.usable(root.leading) ? root.leading : root.leading + 1;
+    }
+    function last-usable() -> int {
+        let last = root.surfaces.length - 1;
+        return root.usable(last) ? last : last - 1;
+    }
+    function step(from: int, direction: int) -> int {
+        let next = from + direction;
+        let skipped = next == root.selected-index ? next + direction : next;
+        return root.usable(skipped) ? skipped : from;
+    }
     for surface[index] in root.surfaces : WorkspaceTab {
         property <bool> shown: index == root.selected-index || index < root.leading;
         x: (index < root.leading ? index : root.leading) * root.tab-width;
@@ -112,10 +144,14 @@ export component SurfaceTabs inherits Rectangle {
         selected: root.selected == surface.id;
         clicked => { root.chosen(surface.id); }
     }
-    if !root.all-fit : Rectangle {
+    if !root.all-fit : more-host := Rectangle {
         // The list is placed when it opens, so More moving or resizing would
         // leave it behind.
         property <Point> anchor: self.absolute-position;
+        function open-more() {
+            root.highlight = root.first-usable();
+            menu.show();
+        }
         changed anchor => { menu.close(); }
         changed width => { menu.close(); }
         x: root.fitting * root.tab-width;
@@ -123,44 +159,127 @@ export component SurfaceTabs inherits Rectangle {
         width: root.tab-width;
         height: root.height;
         more := Rectangle {
-            border-radius: 5px;
-            background: more-area.has-hover ? Theme.elevated : transparent;
             accessible-role: button;
             accessible-label: GuiI18n.text("gui-workspace-more-surfaces");
             accessible-expandable: true;
-            accessible-action-default => { menu.show(); }
-            accessible-action-expand => { menu.show(); }
-            Rectangle { x: 0px; y: (parent.height - 18px) / 2; width: 1px; height: 18px; background: Theme.border; }
+            accessible-action-default => { more-host.open-more(); }
+            accessible-action-expand => { more-host.open-more(); }
+            Plate {
+                x: 2px;
+                y: 1px;
+                width: parent.width - 2px - Theme.shadow-offset-small - 1px;
+                height: parent.height - 2px - Theme.shadow-offset-small;
+                radius: Theme.small-radius;
+                lift: 0px;
+                outline: transparent;
+                fill: more-area.has-hover ? Theme.elevated : transparent;
+            }
             HorizontalLayout {
                 alignment: center; spacing: 6px;
-                Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text-secondary; font-size: Theme.body-size; vertical-alignment: center; }
+                Text { text: GuiI18n.text("gui-workspace-more-surfaces"); color: Theme.text; font-size: Theme.body-size; font-weight: 700; vertical-alignment: center; }
                 Path { width: 8px; height: 5px; y: (parent.height - self.height) / 2; commands: "M 0 0 L 4 4 L 8 0"; stroke: Theme.text-secondary; stroke-width: 1.5px; fill: transparent; }
             }
-            more-area := TouchArea { clicked => { menu.show(); } }
+            KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { more-host.open-more(); } }
+            more-area := TouchArea { mouse-cursor: pointer; clicked => { more-host.open-more(); } }
     }
     menu := PopupWindow {
         x: 0px;
         y: parent.height + 4px;
-        width: max(root.tab-width * 1.5, 180px);
-        Rectangle {
-            border-radius: 7px; border-width: 1px; border-color: Theme.border; background: Theme.elevated;
-            VerticalLayout {
-                padding: 4px;
-                for surface[index] in root.surfaces : Rectangle {
-                    property <bool> hidden: !(index == root.selected-index || index < root.leading);
-                    height: self.hidden ? 34px : 0px;
-                    visible: self.hidden;
-                    border-radius: 5px;
-                    background: entry-area.has-hover ? Theme.surface : transparent;
-                    accessible-role: button;
-                    accessible-label: surface.label;
-                    accessible-action-default => { root.chosen(surface.id); }
-                    Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; vertical-alignment: center; height: parent.height; }
-                    entry-area := TouchArea { clicked => { root.chosen(surface.id); } }
+        // The hard shadow falls outside the list.
+        width: max(root.tab-width * 1.5, 180px) + Theme.shadow-offset-card;
+        height: menu-list.preferred-height + Theme.shadow-offset-card;
+        close-policy: close-on-click-outside;
+        forward-focus: keys;
+        keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.DownArrow) {
+                    root.highlight = root.step(root.highlight, 1);
+                } else if (event.text == Key.UpArrow) {
+                    root.highlight = root.step(root.highlight, -1);
+                } else if (event.text == Key.Home) {
+                    root.highlight = root.first-usable();
+                } else if (event.text == Key.End) {
+                    root.highlight = root.last-usable();
+                } else if (event.text == Key.Return || event.text == " ") {
+                    if (root.usable(root.highlight)) {
+                        menu.close();
+                        root.chosen(root.surfaces[root.highlight].id);
+                    }
+                } else if (event.text == Key.Escape) {
+                    menu.close();
+                } else {
+                    return reject;
+                }
+                return accept;
+            }
+            Plate {
+                width: parent.width - Theme.shadow-offset-card;
+                height: parent.height - Theme.shadow-offset-card;
+                lift: Theme.shadow-offset-card;
+                radius: Theme.button-radius;
+                fill: Theme.overlay;
+                menu-list := VerticalLayout {
+                    padding: 4px;
+                    for surface[index] in root.surfaces : Rectangle {
+                        property <bool> listed: root.usable(index);
+                        height: self.listed ? 34px : 0px;
+                        visible: self.listed;
+                        border-radius: Theme.chip-radius;
+                        background: entry-area.has-hover || index == root.highlight ? Theme.selection : transparent;
+                        accessible-role: button;
+                        accessible-label: surface.label;
+                        accessible-action-default => { root.chosen(surface.id); }
+                        Text { x: 10px; text: surface.label; color: Theme.text; font-size: Theme.body-size; font-weight: 600; vertical-alignment: center; height: parent.height; }
+                        entry-area := TouchArea { mouse-cursor: pointer; clicked => { root.chosen(surface.id); } }
+                    }
                 }
             }
         }
     }
+    }
+}
+
+// The host's state as a stamp: what it is doing or what it needs, and one
+// line more, on a fill that says which kind of state it is.
+component HostStamp inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <color> tone;
+    width: max(caption.preferred-width, detail-text.preferred-width) / 2 + 36px;
+    height: (caption.preferred-height + detail-text.preferred-height) / 2 + 14px;
+    horizontal-stretch: 0;
+    accessible-role: text;
+    accessible-label: root.detail == "" ? root.label : root.label + ". " + root.detail;
+    // Stamped on slightly crooked, like a rubber stamp. The stamp is drawn at
+    // twice its size into a layer, and the layer is shrunk and turned, so the
+    // turned edges and letters are sampled down instead of stretched.
+    Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        transform-rotation: -6deg;
+        Rectangle {
+            x: -root.width / 2;
+            y: -root.height / 2;
+            width: 2 * root.width;
+            height: 2 * root.height;
+            transform-scale: 50%;
+            cache-rendering-hint: true;
+            Plate {
+                width: parent.width;
+                height: parent.height;
+                radius: 2 * Theme.small-radius;
+                outline-width: 2 * Theme.strong-border-width;
+                lift: 2 * Theme.shadow-offset-card;
+                fill: root.tone;
+            }
+            VerticalLayout {
+                alignment: center;
+                caption := DisplayHeading { text: root.label.to-uppercase(); font-size: Theme.item-title-size * 2; letter-spacing: 2px; color: Theme.on-accent; horizontal-alignment: center; }
+                detail-text := Text { text: root.detail; color: Theme.on-accent; font-family: Theme.mono-family; font-size: Theme.caption-size * 2; font-weight: 600; horizontal-alignment: center; }
+            }
+        }
     }
 }
 
@@ -220,8 +339,8 @@ export component HostWorkspace inherits Rectangle {
         : GuiI18n.text("gui-restart-stage-starting");
     // What the primary action waits for. A side that is already running can
     // still be stopped during a pair start, which is how one is ended.
-    property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
-    property <string> primary-reason: root.primary-waits ? root.occupied-text : root.primary-hint;
+    out property <bool> primary-waits: root.busy || root.restart-stage != "" || (root.pair-starting && !root.host-running);
+    out property <string> primary-reason: root.primary-waits ? root.occupied-text : root.primary-hint;
     property <string> restart-reason: root.occupied ? root.occupied-text : root.restart-hint;
     callback back();
     callback open-folder();
@@ -235,6 +354,15 @@ export component HostWorkspace inherits Rectangle {
     // One of several panes: the header shrinks to what tells the panes
     // apart and the host's own actions, and the pane gets a frame.
     in property <bool> compact;
+    // The pane is the quick view over the window: its own header says where
+    // it can go, and its body keeps the page's surfaces.
+    in property <bool> quick;
+    in property <bool> quick-fullscreen;
+    // Another host's quick view is over this pane.
+    in property <bool> dimmed;
+    callback close-dimmed();
+    callback open-quick-as-page();
+    callback toggle-quick-fullscreen();
     in property <string> pane-label;
     // "Client" or "Server", beside the host's name in a compact header.
     in property <string> host-kind-label;
@@ -257,149 +385,323 @@ export component HostWorkspace inherits Rectangle {
     callback open-java();
     // A server's address and port, beside its name; empty for a client.
     in property <string> address;
+    // What the page header's chips say about the host; an empty text or a
+    // negative count hides its chip.
+    in property <string> minecraft;
+    in property <string> loader;
+    in property <string> loader-kind;
+    in property <string> storage;
+    in property <int> mods: -1;
+    // The other side of a linked pair, by name, and the chip tone of that side.
+    in property <string> linked-name;
+    in property <string> linked-tone: "server";
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
+    // What the stamp says: whether this is a client, how many recorded
+    // reasons say it needs attention, and how often its bug showed up again.
+    in property <bool> stamp-client;
+    in property <int> stamp-problems;
+    in property <int> stamp-reproduced;
+    property <bool> stamp-busy: root.restart-stage != "" || root.status-kind == "starting" || root.status-kind == "stopping" || root.status-kind == "restarting";
+    // A process that may still run, or files that need recovery: the state
+    // text says it, in the stamp's own place.
+    property <bool> stamp-unsettled: root.status-kind == "orphaned" || root.status-kind == "unknown" || root.status-kind == "needs-recovery" || root.status-kind == "failed";
+    property <string> stamp-label: root.restart-stage == "stopping" || root.status-kind == "stopping" ? GuiI18n.text("gui-stamp-stopping")
+        : root.stamp-busy ? GuiI18n.text("gui-stamp-starting")
+        : root.status-kind == "running" ? GuiI18n.text("gui-stamp-running")
+        : root.stamp-unsettled ? root.status
+        : root.stamp-problems > 0 ? GuiI18n.text("gui-stamp-needs-fix")
+        : !root.stamp-client ? GuiI18n.text("gui-stamp-stopped")
+        : root.stamp-reproduced > 0 ? GuiI18n.count("gui-stamp-reproduced", root.stamp-reproduced)
+        : GuiI18n.text("gui-stamp-not-yet");
+    property <string> stamp-detail: root.stamp-busy ? "..."
+        : root.status-kind == "running" ? (root.stamp-client ? GuiI18n.text("gui-stamp-in-game") : root.address)
+        : root.stamp-unsettled ? root.address
+        : root.stamp-problems > 0 ? GuiI18n.count("gui-stamp-problems", root.stamp-problems)
+        : !root.stamp-client ? root.address
+        : root.stamp-reproduced > 0 ? GuiI18n.text("gui-stamp-reproduced-detail")
+        : GuiI18n.text("gui-stamp-not-yet-detail");
+    property <color> stamp-tone: root.status-kind == "running" ? Theme.state-running
+        : root.stamp-busy ? (root.stamp-client ? Theme.state-running : Theme.primary-fill)
+        : root.stamp-unsettled || root.stamp-problems > 0 ? Theme.state-attention
+        : !root.stamp-client ? Theme.well
+        : root.stamp-reproduced > 0 ? Theme.primary-fill
+        : Theme.state-stopped;
     property <color> pair-tone: StateTone.of-or(root.pair-state-kind, Theme.accent);
+    // Which host the pane shows, so state kept for one does not carry over to
+    // another when the pane is pointed elsewhere.
+    in property <string> host-id;
+    // The instance's issue link and whether this host has one to show: only
+    // instances do.
+    in property <string> issue-link;
+    in property <bool> has-issue-link;
+    callback set-issue-link(string);
+    callback open-issue-link();
+    // The column beside the page is on screen and carries the Run card, so
+    // the header leaves the run actions to it.
+    in property <bool> actions-in-column;
+    // Whether a button opens the column of cards that does not fit beside the
+    // page, which it offers on a page that has one.
+    in property <bool> show-column-button;
+    in property <string> column-button-label;
+    callback show-column();
     callback choose-host();
     callback split-beside();
     callback split-below();
     callback close-pane();
-    background: Theme.background;
-    border-width: root.compact ? 1px : 0px;
-    border-color: Theme.border;
-    border-radius: root.compact ? 8px : 0px;
-    clip: true;
     accessible-role: groupbox;
     accessible-label: root.pane-label;
-    VerticalLayout {
-        padding: root.compact ? 12px : 22px;
-        spacing: root.compact ? 10px : 14px;
-        // The host on one row: which it is, its state, and its actions.
-        // The view below: which surface, and the layout controls.
-        if root.compact : VerticalLayout {
-            spacing: 8px;
-            // Placed by hand rather than laid out: the actions move under
-            // the host when one row cannot hold both, and a layout would
-            // take that row's width from the actions it decides about.
-            Rectangle {
-                property <length> gap: 8px;
-                property <bool> one-row: host-row.min-width + self.gap + actions.min-width <= self.width;
-                height: self.one-row ? Theme.control-height : 2 * Theme.control-height + self.gap;
-                host-row := HorizontalLayout {
-                    x: 0px;
-                    y: 0px;
-                    width: parent.one-row ? parent.width - actions.width - parent.gap : parent.width;
-                    height: Theme.control-height;
-                    spacing: parent.gap;
-                    PaneHostButton {
-                        name: root.title;
-                        kind: root.host-kind-label;
-                        accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
-                        clicked => { root.choose-host(); }
-                    }
-                    VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
-                    if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-                    if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-                    if root.address != "" && root.width >= 760px : VerticalLayout { alignment: center; Pill { text: root.address; } }
-                    if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+    Panel {
+        radius: root.compact ? Theme.card-radius : Theme.dialog-radius;
+        // The drawer casts its shadow toward the page it covers, and the
+        // fullscreen quick view, which has no page beside it, casts it down and right.
+        lift: root.quick ? Theme.shadow-offset-dialog : Theme.shadow-offset-card;
+        shadow-left: root.quick && !root.quick-fullscreen;
+        VerticalLayout {
+            // The header runs edge to edge over the page color; the
+            // body under it keeps its own padding.
+            if root.quick : Rectangle {
+                height: quick-head.preferred-height;
+                background: Theme.background;
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: Theme.strong-border-width;
+                    background: Theme.border-strong;
                 }
-                actions := HorizontalLayout {
-                    x: parent.width - self.width;
-                    y: parent.one-row ? 0px : Theme.control-height + parent.gap;
-                    width: self.min-width;
-                    height: Theme.control-height;
-                    spacing: parent.gap;
-                    if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-                    if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-                    AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                quick-head := VerticalLayout {
+                    padding-top: 16px; padding-bottom: 16px; padding-left: 22px; padding-right: 22px;
+                    spacing: 10px;
+                    HorizontalLayout {
+                        spacing: 14px;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 8px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                VerticalLayout { alignment: center; Rectangle { width: 12px; height: 12px; border-width: Theme.chip-border-width; border-color: Theme.border-strong; background: StateTone.of(root.restart-stage != "" ? "restarting" : root.status-kind); } }
+                                VerticalLayout { alignment: center; BodyText { text: root.restart-stage != "" ? GuiI18n.text("gui-state-restarting") : root.status; overflow: elide; } }
+                                if root.address != "" : VerticalLayout { alignment: center; Chip { text: root.address; } }
+                            }
+                            DisplayHeading { text: root.title; font-size: Theme.item-title-size; overflow: elide; }
+                        }
+                        VerticalLayout {
+                            alignment: start;
+                            horizontal-stretch: 0;
+                            HorizontalLayout {
+                                spacing: 10px;
+                                alignment: end;
+                                padding-right: Theme.shadow-room;
+                                padding-bottom: Theme.shadow-room;
+                                AppButton { text: GuiI18n.text("gui-quick-view-open-as-page"); icon: @image-url("../../../../assets/icons/external-link.svg"); clicked => { root.open-quick-as-page(); } }
+                                AppButton {
+                                    text: root.quick-fullscreen ? GuiI18n.text("gui-quick-view-exit-fullscreen") : GuiI18n.text("gui-quick-view-fullscreen");
+                                    icon: root.quick-fullscreen ? @image-url("../../../../assets/icons/collapse.svg") : @image-url("../../../../assets/icons/expand.svg");
+                                    tone: "info";
+                                    clicked => { root.toggle-quick-fullscreen(); }
+                                }
+                                IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-quick-view-close"); lift: Theme.shadow-offset-card; clicked => { root.close-pane(); } }
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        min-height: Theme.chip-height;
+                        spacing: 8px;
+                        alignment: start;
+                        if root.minecraft != "" : VerticalLayout { alignment: center; Chip { text: root.minecraft; } }
+                        if root.loader != "" : VerticalLayout { alignment: center; Chip { text: root.loader; tone: root.loader-kind; } }
+                        if root.mods >= 0 : VerticalLayout { alignment: center; Chip { text: GuiI18n.count("gui-host-chip-mods", root.mods); } }
+                        if root.storage != "" : VerticalLayout { alignment: center; Chip { text: root.storage; } }
+                    }
                 }
             }
-            HorizontalLayout {
-                spacing: 8px;
-                SurfaceTabs {
+            if !root.compact && !root.quick : header-band := Rectangle {
+                // Whether the actions sit on a row under what identifies the host.
+                property <bool> actions-below: self.width - 44px < identity.min-width + 8px + header-actions.preferred-width;
+                height: head.preferred-height;
+                background: Theme.background;
+                Rectangle {
+                    y: parent.height - self.height;
+                    height: Theme.strong-border-width;
+                    background: Theme.border-strong;
+                }
+                head := VerticalLayout {
+                    padding-top: 18px; padding-bottom: 18px; padding-left: 22px; padding-right: 22px;
+                    spacing: 10px;
+                    GridLayout {
+                        spacing-horizontal: 8px;
+                        spacing-vertical: 10px;
+                        identity := HorizontalLayout {
+                            col: 0;
+                            row: 0;
+                            horizontal-stretch: 1;
+                            alignment: start;
+                            spacing: 8px;
+                            if root.back-label != "" : AppButton { text: root.back-label; clicked => { root.back(); } }
+                            VerticalLayout { alignment: center; Text { text: root.host-kind-label; color: Theme.text-muted; font-size: Theme.caption-size; font-weight: 700; } }
+                            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+                            if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                            if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+                        }
+                        header-actions := HorizontalLayout {
+                            col: header-band.actions-below ? 0 : 1;
+                            row: header-band.actions-below ? 1 : 0;
+                            spacing: 12px;
+                            alignment: end;
+                            if root.show-column-button : IconButton { icon: @image-url("../../../../assets/icons/server.svg"); accessible-name: root.column-button-label; lift: Theme.shadow-offset-card; clicked => { root.show-column(); } }
+                            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); lift: Theme.shadow-offset-card; clicked => { root.split-beside(); } }
+                            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
+                            if root.show-launch-as && !root.actions-in-column : LaunchAsButton {
+                                account-entries: root.account-entries;
+                                enabled: root.primary-enabled && !root.occupied;
+                                hint: root.occupied ? root.occupied-text : root.primary-hint;
+                                alongside: root.launch-alongside;
+                                launch-as(account, alongside) => { root.launch-as(account, alongside); }
+                                add-account => { root.add-account(); }
+                            }
+                            if root.kill-visible && !root.actions-in-column : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                            if root.restart-visible && !root.actions-in-column : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                            if !root.actions-in-column : AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                        }
+                    }
+                    if root.has-issue-link : IssueLinkRow {
+                        host-id: root.host-id;
+                        link: root.issue-link;
+                        save(link) => { root.set-issue-link(link); }
+                        open => { root.open-issue-link(); }
+                    }
+                    HorizontalLayout {
+                        spacing: 16px;
+                        DisplayHeading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; horizontal-stretch: 1; vertical-alignment: center; }
+                        VerticalLayout { alignment: center; HostStamp { label: root.stamp-label; detail: root.stamp-detail; tone: root.stamp-tone; } }
+                    }
+                    HorizontalLayout {
+                        // The header keeps its height whichever chips a host has.
+                        min-height: Theme.chip-height;
+                        spacing: 8px;
+                        alignment: start;
+                        if root.minecraft != "" : VerticalLayout { alignment: center; Chip { text: root.minecraft; } }
+                        if root.loader != "" : VerticalLayout { alignment: center; Chip { text: root.loader; tone: root.loader-kind; } }
+                        if root.mods >= 0 : VerticalLayout { alignment: center; Chip { text: GuiI18n.count("gui-host-chip-mods", root.mods); } }
+                        if root.storage != "" : VerticalLayout { alignment: center; Chip { text: root.storage; } }
+                        if root.linked-name != "" : VerticalLayout { alignment: center; Chip { text: root.linked-name; tone: root.linked-tone; width: min(self.natural-width, 200px); } }
+                        if root.address != "" : VerticalLayout { alignment: center; Chip { text: root.address; } }
+                    }
+                }
+            }
+            VerticalLayout {
+                padding: root.compact ? 12px : root.quick ? 16px : 22px;
+                // The quick view's surfaces scroll to its bottom edge rather than stopping short of it.
+                padding-bottom: root.compact ? 12px : root.quick ? 0px : 22px;
+                spacing: root.compact ? 10px : 14px;
+                // The host on one row: which it is, its state, and its actions.
+                // The view below: which surface, and the layout controls.
+                if root.compact : VerticalLayout {
+                    spacing: 8px;
+                    // Placed by hand rather than laid out: the actions move under
+                    // the host when one row cannot hold both, and a layout would
+                    // take that row's width from the actions it decides about.
+                    Rectangle {
+                        property <length> gap: 8px;
+                        property <bool> one-row: host-row.min-width + self.gap + actions.min-width <= self.width;
+                        height: self.one-row ? Theme.control-height : 2 * Theme.control-height + self.gap;
+                        host-row := HorizontalLayout {
+                            x: 0px;
+                            y: 0px;
+                            width: parent.one-row ? parent.width - actions.width - parent.gap : parent.width;
+                            height: Theme.control-height;
+                            spacing: parent.gap;
+                            PaneHostButton {
+                                name: root.title;
+                                kind: root.host-kind-label;
+                                accessible-name: GuiI18n.value("gui-pane-host", root.pane-label);
+                                clicked => { root.choose-host(); }
+                            }
+                            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
+                            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
+                            if root.paired && root.width >= 520px : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
+                            if root.address != "" && root.width >= 760px : VerticalLayout { alignment: center; Pill { text: root.address; } }
+                            if root.java-summary != "" && root.width >= 640px : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
+                        }
+                        actions := HorizontalLayout {
+                            x: parent.width - self.width;
+                            y: parent.one-row ? 0px : Theme.control-height + parent.gap;
+                            width: self.min-width;
+                            height: Theme.control-height;
+                            spacing: parent.gap;
+                            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-kill"), root.pane-label); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
+                            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); accessible-name: GuiI18n.values("gui-pane-action", GuiI18n.text("gui-restart"), root.pane-label); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
+                            AppButton { text: root.primary-label; accessible-name: GuiI18n.values("gui-pane-action", root.primary-label, root.pane-label); tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
+                        }
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        SurfaceTabs {
+                            surfaces: root.surfaces;
+                            selected: root.selected-surface;
+                            selected-index: root.surface-choice;
+                            chosen(surface) => { root.surface-selected(surface); }
+                        }
+                        IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
+                        if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
+                        if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
+                    }
+                }
+                if root.workflow-id != "" && root.workflow-here : Rectangle {
+                    height: max(64px, workflow-copy.preferred-height + 24px);
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.note-fill;
+                    HorizontalLayout {
+                        padding: 12px; spacing: 9px; cross-axis-alignment: center;
+                        workflow-copy := VerticalLayout {
+                            horizontal-stretch: 1;
+                            Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
+                            BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
+                            if root.occupied : HorizontalLayout {
+                                spacing: 6px;
+                                BusySpinner { width: 14px; height: 14px; }
+                                BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
+                            }
+                        }
+                        for action in root.workflow-actions : AppButton {
+                            text: action.label;
+                            tone: action.tone;
+                            enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
+                            hint: root.occupied ? root.occupied-text : GuiI18n.text("gui-hint-stop-host-first");
+                            clicked => { root.workflow-action(root.workflow-id, action.id); }
+                        }
+                    }
+                }
+                // Before a workflow is active, such as while one starts, its
+                // progress still belongs above the surface that asked for it.
+                if root.occupied && root.workflow-id == "" : Rectangle {
+                    border-radius: Theme.small-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
+                    background: Theme.surface;
+                    HorizontalLayout {
+                        padding: 10px; spacing: 9px; cross-axis-alignment: center;
+                        BusySpinner { width: 18px; height: 18px; }
+                        BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
+                    }
+                }
+                if !root.compact : SurfaceTabs {
                     surfaces: root.surfaces;
                     selected: root.selected-surface;
                     selected-index: root.surface-choice;
                     chosen(surface) => { root.surface-selected(surface); }
                 }
-                IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
-                if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
-                if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
+
+                Divider { }
+                @children
             }
         }
-        if !root.compact : HorizontalLayout {
-            spacing: 12px;
-            AppButton { text: root.back-label; clicked => { root.back(); } }
-            Heading { text: root.title; font-size: Theme.workspace-title-size; overflow: elide; }
-            VerticalLayout { alignment: center; StatePill { state: root.status; state-kind: root.status-kind; restarting: root.restart-stage != ""; } }
-            if root.restart-required : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
-            if root.paired : VerticalLayout { alignment: center; Pill { text: root.pair-label; tone-color: root.pair-tone; } }
-            if root.address != "" && root.width >= 980px : VerticalLayout { alignment: center; Pill { text: root.address; } }
-            if root.java-summary != "" : VerticalLayout { alignment: center; JavaRuntimePill { summary: root.java-summary; origin: root.java-origin; tone: root.java-tone; tone-label: root.java-tone-label; clicked => { root.open-java(); } } }
-            Rectangle { horizontal-stretch: 1; }
-            if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); clicked => { root.split-beside(); } }
-            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
-            if root.show-launch-as : LaunchAsButton {
-                account-entries: root.account-entries;
-                enabled: root.primary-enabled && !root.occupied;
-                hint: root.occupied ? root.occupied-text : root.primary-hint;
-                alongside: root.launch-alongside;
-                launch-as(account, alongside) => { root.launch-as(account, alongside); }
-                add-account => { root.add-account(); }
-            }
-            if root.kill-visible : AppButton { text: GuiI18n.text("gui-kill"); tone: "danger"; enabled: root.kill-enabled; hint: root.kill-hint; clicked => { root.kill(); } }
-            if root.restart-visible : AppButton { text: GuiI18n.text("gui-restart"); enabled: root.restart-enabled && !root.occupied; hint: root.restart-reason; clicked => { root.restart(); } }
-            AppButton { text: root.primary-label; tone: root.primary-tone; enabled: root.primary-enabled && !root.primary-waits; hint: root.primary-reason; clicked => { root.primary(); } }
-        }
-        if root.workflow-id != "" && root.workflow-here : Rectangle {
-            height: max(64px, workflow-copy.preferred-height + 24px);
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.warning;
-            background: Theme.warning.with-alpha(0.08);
-            HorizontalLayout {
-                padding: 12px; spacing: 9px; cross-axis-alignment: center;
-                workflow-copy := VerticalLayout {
-                    horizontal-stretch: 1;
-                    Heading { text: root.workflow-title; font-size: Theme.row-heading-size; }
-                    BodyText { text: root.workflow-summary; color: Theme.text-secondary; wrap: word-wrap; }
-                    if root.occupied : HorizontalLayout {
-                        spacing: 6px;
-                        BusySpinner { width: 14px; height: 14px; }
-                        BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
-                    }
-                }
-                for action in root.workflow-actions : AppButton {
-                    text: action.label;
-                    tone: action.tone;
-                    enabled: action.enabled && (!action.requires-stopped || (!root.host-running && !root.occupied));
-                    hint: root.occupied ? root.occupied-text : GuiI18n.text("gui-hint-stop-host-first");
-                    clicked => { root.workflow-action(root.workflow-id, action.id); }
-                }
-            }
-        }
-        // Before a workflow is active, such as while one starts, its
-        // progress still belongs above the surface that asked for it.
-        if root.occupied && root.workflow-id == "" : Rectangle {
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.accent;
-            background: Theme.surface;
-            HorizontalLayout {
-                padding: 10px; spacing: 9px; cross-axis-alignment: center;
-                BusySpinner { width: 18px; height: 18px; }
-                BodyText { text: root.occupied-text; horizontal-stretch: 1; wrap: word-wrap; }
-            }
-        }
-        if !root.compact : SurfaceTabs {
-            surfaces: root.surfaces;
-            selected: root.selected-surface;
-            selected-index: root.surface-choice;
-            chosen(surface) => { root.surface-selected(surface); }
-        }
-        Divider { }
-        @children
     }
+    // Over everything the pane shows while another host's quick view is open.
+    if root.dimmed : Scrim { x: 0px; y: 0px; width: root.width; height: root.height; border-radius: root.compact ? Theme.card-radius : Theme.dialog-radius; pressed => { root.close-dimmed(); } }
 }
 
 // One host in the host picker. A client's card also offers its linked
@@ -410,14 +712,29 @@ export component HostPickerCard inherits Rectangle {
     in property <string> current-id;
     callback picked(string, string);
     property <bool> current: root.item.kind == root.current-kind && root.item.id == root.current-id;
-    border-radius: 8px;
-    border-width: root.current ? 2px : 1px;
-    border-color: root.current ? Theme.accent : Theme.border;
-    background: card-area.has-hover ? Theme.elevated : Theme.surface;
     accessible-role: button;
+    accessible-checkable: true;
+    accessible-checked: root.current;
     accessible-label: root.item.kind == "server" ? GuiI18n.value("gui-host-choice-server", root.item.name) : GuiI18n.value("gui-host-choice-client", root.item.name);
     accessible-action-default => { root.picked(root.item.kind, root.item.id); }
-    card-area := TouchArea { clicked => { root.picked(root.item.kind, root.item.id); } }
+    // The selected card keeps its outline and gains a ring outside it, so
+    // the container leaves `Theme.shadow-room` around the cards.
+    if root.current : Rectangle {
+        x: -Theme.selection-outline-width;
+        y: -Theme.selection-outline-width;
+        width: root.width + 2 * Theme.selection-outline-width;
+        height: root.height + 2 * Theme.selection-outline-width;
+        border-radius: Theme.card-radius + Theme.selection-outline-width;
+        background: Theme.accent-primary;
+    }
+    Plate {
+        width: root.width;
+        height: root.height;
+        lift: Theme.shadow-offset-card;
+        fill: root.current ? Theme.selection-card : card-area.has-hover ? Theme.elevated : Theme.surface;
+    }
+    KeyboardFocus { width: root.width; height: root.height; ring-radius: Theme.card-radius; activated => { root.picked(root.item.kind, root.item.id); } }
+    card-area := TouchArea { mouse-cursor: pointer; clicked => { root.picked(root.item.kind, root.item.id); } }
     VerticalLayout {
         padding: 12px; spacing: 8px;
         HorizontalLayout {
@@ -437,14 +754,27 @@ export component HostPickerCard inherits Rectangle {
         for server in root.item.linked : Rectangle {
             property <bool> current: root.current-kind == "server" && root.current-id == server.id;
             height: Theme.control-height;
-            border-radius: 6px;
-            border-width: 1px;
-            border-color: self.current ? Theme.accent : Theme.border;
-            background: linked-area.has-hover ? Theme.elevated : Theme.background;
+            accessible-checkable: true;
+            accessible-checked: self.current;
+            if self.current : Rectangle {
+                x: -Theme.selection-outline-width;
+                y: -Theme.selection-outline-width;
+                width: parent.width + 2 * Theme.selection-outline-width;
+                height: parent.height + 2 * Theme.selection-outline-width;
+                border-radius: Theme.small-radius + Theme.selection-outline-width;
+                background: Theme.accent-primary;
+            }
+            Rectangle {
+                border-radius: Theme.small-radius;
+                border-width: Theme.strong-border-width;
+                border-color: Theme.border-strong;
+                background: parent.current ? Theme.selection-card : linked-area.has-hover ? Theme.elevated : Theme.background;
+            }
             accessible-role: button;
             accessible-label: GuiI18n.value("gui-host-choice-server", server.name);
             accessible-action-default => { root.picked("server", server.id); }
-            linked-area := TouchArea { clicked => { root.picked("server", server.id); } }
+            KeyboardFocus { width: parent.width; height: parent.height; ring-radius: Theme.small-radius; activated => { root.picked("server", server.id); } }
+            linked-area := TouchArea { mouse-cursor: pointer; clicked => { root.picked("server", server.id); } }
             HorizontalLayout {
                 padding-left: 10px; padding-right: 10px; spacing: 8px;
                 if server.icon-slot >= 0 : VerticalLayout { alignment: center; Image { width: 22px; height: 22px; source: HostIcons.images[server.icon-slot]; image-fit: contain; } }

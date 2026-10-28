@@ -6,10 +6,18 @@
 
 #![allow(clippy::expect_used)]
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use ephervex_gui::ui::{AppWindow, GuiI18n};
 use ephervex_i18n::{Arg, lookup, lookup_args};
-use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
-use slint::{ComponentHandle, PhysicalSize};
+use i_slint_backend_testing::{
+    AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
+};
+use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
+
+/// What a Java settings save sent: detection, download, minimum and maximum memory.
+type Saved = (bool, bool, String, String);
 
 /// Whether each button with this label is enabled, in layout order.
 fn enabled(ui: &AppWindow, message: &str) -> Vec<bool> {
@@ -31,7 +39,7 @@ fn enabled(ui: &AppWindow, message: &str) -> Vec<bool> {
 fn open(tab: &str) -> AppWindow {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_settings_tab(tab.into());
     // Tall enough that the whole page is on screen, since a control below the
     // fold is not part of what the window reports.
@@ -41,17 +49,30 @@ fn open(tab: &str) -> AppWindow {
 }
 
 #[test]
-fn the_java_save_is_disabled_while_the_java_settings_save_runs() {
+fn a_java_toggle_saves_the_java_settings_as_soon_as_it_is_changed() {
     let ui = open("Java");
-    assert_eq!(enabled(&ui, "gui-java-save"), [true]);
-
-    ui.set_java_saving(true);
+    ui.set_java_auto_detect(true);
+    ui.set_java_auto_download(true);
+    ui.set_java_memory_min("512".into());
+    ui.set_java_memory_max("4096".into());
+    let saved: Rc<RefCell<Vec<Saved>>> = Rc::default();
+    let sink = Rc::clone(&saved);
+    ui.on_save_java_settings(move |detect, download, minimum, maximum, _| {
+        sink.borrow_mut()
+            .push((detect, download, minimum.to_string(), maximum.to_string()));
+    });
     settle(&ui);
-    assert_eq!(enabled(&ui, "gui-java-save"), [false]);
 
-    ui.set_java_saving(false);
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-java-detect"))
+        .find(|element| element.accessible_checked().is_some())
+        .expect("the detection toggle")
+        .invoke_accessible_default_action();
     settle(&ui);
-    assert_eq!(enabled(&ui, "gui-java-save"), [true]);
+
+    assert_eq!(
+        saved.borrow().as_slice(),
+        [(false, true, "512".to_owned(), "4096".to_owned())]
+    );
 }
 
 #[test]
@@ -59,23 +80,77 @@ fn the_storage_buttons_are_disabled_while_the_storage_root_save_runs() {
     let ui = open("Storage");
     ui.set_persistent_root_is_custom(true);
     settle(&ui);
-    assert_eq!(enabled(&ui, "gui-save-storage-root"), [true]);
+    assert_eq!(enabled(&ui, "gui-choose-folder"), [true]);
     assert_eq!(enabled(&ui, "gui-reset-default"), [true]);
 
     ui.set_storage_root_saving(true);
     settle(&ui);
-    assert_eq!(enabled(&ui, "gui-save-storage-root"), [false]);
+    assert_eq!(enabled(&ui, "gui-choose-folder"), [false]);
     assert_eq!(enabled(&ui, "gui-reset-default"), [false]);
 }
 
 #[test]
-fn the_cache_limit_save_is_disabled_while_the_limit_save_runs() {
+fn picking_a_cache_limit_saves_it_without_a_save_button() {
     let ui = open("Storage");
-    assert_eq!(enabled(&ui, "gui-save-artifact-cache-limit"), [true]);
-
-    ui.set_artifact_cache_limit_saving(true);
+    ui.set_artifact_cache_limit_labels(ModelRc::new(VecModel::from(vec![
+        SharedString::from("1 GiB"),
+        SharedString::from("10 GiB"),
+        SharedString::from("Unlimited"),
+    ])));
+    ui.set_artifact_cache_limit_index(0);
+    let saved: Rc<RefCell<Vec<i32>>> = Rc::default();
+    let sink = Rc::clone(&saved);
+    ui.on_save_artifact_cache_limit(move |index, _, _| sink.borrow_mut().push(index));
     settle(&ui);
-    assert_eq!(enabled(&ui, "gui-save-artifact-cache-limit"), [false]);
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-artifact-cache-limit"))
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+        .expect("the limit dropdown")
+        .invoke_accessible_expand_action();
+    settle(&ui);
+    ElementHandle::find_by_accessible_label(&ui, "Unlimited")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
+        .expect("the entry")
+        .invoke_accessible_default_action();
+    settle(&ui);
+
+    assert_eq!(saved.borrow().as_slice(), [2]);
+}
+
+#[test]
+fn picking_a_custom_cache_limit_waits_for_its_size_and_stays_chosen() {
+    let ui = open("Storage");
+    ui.set_artifact_cache_limit_labels(ModelRc::new(VecModel::from(vec![
+        SharedString::from("1 GiB"),
+        SharedString::from("10 GiB"),
+        SharedString::from("Custom"),
+    ])));
+    ui.set_artifact_cache_custom_index(2);
+    ui.set_artifact_cache_limit_index(1);
+    // The size the field starts with is the preset's own, which saving would
+    // turn the choice back into.
+    ui.set_artifact_cache_custom_value("10".into());
+    let saved: Rc<RefCell<Vec<i32>>> = Rc::default();
+    let sink = Rc::clone(&saved);
+    ui.on_save_artifact_cache_limit(move |index, _, _| sink.borrow_mut().push(index));
+    settle(&ui);
+
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-artifact-cache-limit"))
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+        .expect("the limit dropdown")
+        .invoke_accessible_expand_action();
+    settle(&ui);
+    ElementHandle::find_by_accessible_label(&ui, "Custom")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::ListItem))
+        .expect("the entry")
+        .invoke_accessible_default_action();
+    settle(&ui);
+
+    assert!(
+        saved.borrow().is_empty(),
+        "nothing is saved until a size is typed"
+    );
+    assert_eq!(ui.get_artifact_cache_limit_index(), 2);
 }
 
 #[test]

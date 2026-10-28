@@ -42,6 +42,7 @@ mod disk_usage;
 pub mod download_watch;
 pub mod error;
 pub mod health;
+mod host_events;
 mod host_recipe_gate;
 mod hosted_launch;
 pub mod import;
@@ -49,6 +50,8 @@ pub mod instance;
 pub mod instance_listing;
 pub mod isolation;
 mod isolation_servers;
+pub mod issue_link;
+pub mod issue_summary;
 pub mod java_choices;
 pub mod java_failure;
 pub mod java_install;
@@ -159,6 +162,10 @@ pub use isolation_servers::{
     IsolationFollowedServer, IsolationLeader, IsolationServerConfiguration, IsolationServerMod,
     IsolationServerPlan, IsolationServerResult, IsolationUnreachedServer,
 };
+pub use issue_link::{
+    IssueLinkRefusal, MAX_ISSUE_LINK_BYTES, open_issue_link, validated_issue_link,
+};
+pub use issue_summary::{IssueSummaryFacts, issue_summary};
 pub use java_choices::{
     AutomaticJava, JavaChoice, JavaChoices, JavaPinIndex, JavaRuntimePins, LauncherJavaChoice,
     PinningHost,
@@ -266,6 +273,23 @@ pub fn open_in_browser(url: &str) -> bool {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(%error, "could not hand the address to a browser");
+            false
+        }
+    }
+}
+
+/// Where Ephervex's source is published.
+pub const SOURCE_REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// Opens a file in the desktop's default editor or viewer for its type.
+///
+/// For a file Ephervex itself lists, such as a log, so the user can read it
+/// without finding it first. Returns whether the desktop accepted it.
+pub fn open_file(path: &std::path::Path) -> bool {
+    match open::that_detached(path) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, file = %path.display(), "could not hand the file to the desktop");
             false
         }
     }
@@ -382,15 +406,17 @@ pub use ephervex_server::{
 };
 pub use ephervex_storage::{
     AccountConfig, ApiConfig, ApplicationColorScheme, ApplicationDisplayConfig,
-    ApplicationTextScale, ApplicationTheme, CONFIG_SCHEMA_VERSION, ClientCommit,
-    ClientCommitWarning, ClientFolder, ClientRecord, ClientRootConflict, CloneMethod, Config,
-    CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError, DiagnosticKind,
-    DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop, ImportSource,
-    JavaConfig, LaunchState, LockDisposition, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, MissingFolder,
-    NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting, ReconciledRecord,
-    ReconciliationReport, RecordRef, RunnerHost, RunningLaunch, SECRET_KEY_MARKERS, SearchMatch,
-    SearchOptions, SearchOutcome, ServerCommit, ServerCommitWarning, ServerDefaults, ServerFolder,
-    ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
-    ServerPortSelection, ServerRecord, ServerRootConflict, SetAsideNotice, StorageError,
-    TechnicalTextSize, TextAnchor, TextView, running_state,
+    ApplicationTextScale, ApplicationTheme, CONFIG_SCHEMA_VERSION, CaseNotes, CaseRefusal,
+    CaseStep, ClientCommit, ClientCommitWarning, ClientFolder, ClientRecord, ClientRootConflict,
+    CloneMethod, Config, CrashSummary, DUPLICATE_NAME_SUFFIX, DiagnosticEntry, DiagnosticError,
+    DiagnosticKind, DuplicateClient, DuplicatedClient, EulaConfig, FileDisposition, ForcedStop,
+    HostEvent, HostEventKind, ImportSource, JavaConfig, LaunchState, LockDisposition,
+    MAX_CASE_NOTE_CHARS, MAX_CASE_STEP_CHARS, MAX_CASE_STEPS, MAX_SEARCH_MATCHES, MAX_VIEW_BYTES,
+    MissingFolder, NetworkAccess, NewClient, NewServer, PathError, Paths, PreferenceSetting,
+    ReconciledRecord, ReconciliationReport, RecordRef, RunnerHost, RunningLaunch,
+    SECRET_KEY_MARKERS, SearchMatch, SearchOptions, SearchOutcome, ServerCommit,
+    ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings,
+    ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
+    ServerRecord, ServerRootConflict, SetAsideNotice, StorageError, TechnicalTextSize, TextAnchor,
+    TextView, running_state,
 };

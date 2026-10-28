@@ -249,8 +249,7 @@ fn settings_says_so_when_no_site_has_been_agreed_to() {
 
 fn general_settings(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
+    ui.invoke_open_settings("General".into());
     // Tall enough that the whole section is laid out. General settings is a
     // long page, and an assertion about what is on screen has to be given a
     // screen to be on.
@@ -261,7 +260,6 @@ fn general_settings(ui: &AppWindow) {
 /// The dialog as the backend opens it.
 fn consent_dialog(ui: &AppWindow) {
     ui.set_loading(false);
-    ui.set_page(0);
     ui.set_pack_link_url(ADDRESS.into());
     ui.set_pack_link_display(SHOWN.into());
     ui.set_pack_link_host(HOST.into());

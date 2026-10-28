@@ -1,0 +1,67 @@
+// One operation the launcher is doing or has done: what, to which host, how far along, and a way to cancel it.
+
+import { Outlined } from "../components/surface.slint";
+import { AppButton, Chip } from "../components/controls.slint";
+import { BodyText, Heading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ActivityRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { HomeCard } from "home-card.slint";
+
+export component ActivityCard inherits HomeCard {
+    in property <ActivityRow> item;
+    callback cancel(string);
+    private property <bool> has-bar: root.item.active && !root.item.indeterminate;
+    pressable: false;
+    strip: root.item.failed ? Theme.state-attention : root.item.active ? Theme.state-building : Theme.state-running;
+    content-height: 2 * (12px + Theme.strong-border-width) + head.preferred-height + 8px + entity.preferred-height + 8px
+        + (root.item.detail != "" ? detail.preferred-height : 0px) + 8px + meta.preferred-height + (root.has-bar ? 8px + Theme.progress-bar-height : 0px);
+    head := HorizontalLayout {
+        spacing: 8px;
+        Heading {
+            text: root.item.title;
+            font-size: Theme.row-heading-size;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            Chip {
+                text: root.item.status;
+                tone: root.item.failed ? "danger" : root.item.active ? "building" : "running";
+            }
+        }
+        if root.item.cancellable : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-cancel");
+            accessible-name: GuiI18n.value("gui-home-cancel-operation", root.item.title);
+            clicked => { root.cancel(root.item.id); }
+        }
+    }
+    entity := BodyText {
+        text: root.item.entity;
+        color: Theme.text;
+        overflow: elide;
+    }
+    detail := BodyText {
+        text: root.item.detail;
+        visible: root.item.detail != "";
+        height: root.item.detail != "" ? self.preferred-height : 0px;
+        wrap: word-wrap;
+    }
+    meta := BodyText {
+        text: root.item.id + " | " + root.item.time;
+        color: Theme.text-muted;
+        font-family: Theme.mono-family;
+        font-size: Theme.caption-size;
+        overflow: elide;
+    }
+    if root.has-bar : Outlined {
+        height: Theme.progress-bar-height;
+        radius: Theme.progress-bar-height / 2;
+        snap-size: true;
+        outline-width: Theme.chip-border-width;
+        fill: Theme.well;
+        progress: root.item.progress;
+    }
+}

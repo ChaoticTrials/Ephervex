@@ -1,21 +1,26 @@
 # Third-party licenses
 
 Ephervex is licensed under Apache-2.0; its own terms are in `LICENSE`. It is
-built on the open-source crates listed here, each under its own terms, and this
-document carries the full text of every one of them.
+built on the open-source crates listed here and bundles the fonts marked
+"(font)", each under its own terms, and this document carries the full text of
+every one of them.
 
-Generated from `Cargo.lock` by `tools/licenses/generate.sh`. It is not written
-or edited by hand: a dependency change that is not regenerated fails the build.
-The same data is compiled into the binaries, so `ephervex licenses` and the
-desktop application's "About & Licenses" screen answer from it too.
+Generated from `Cargo.lock` and the bundled font manifest by
+`tools/licenses/generate.sh`. It is not written or edited by hand: a dependency
+or font change that is not regenerated fails the build. The same data is
+compiled into the binaries, so `ephervex licenses` and the desktop
+application's "About & Licenses" screen answer from it too.
 
 
-523 crates, under 140 license texts.
+524 packages, under 142 license texts.
 
 ## Dependencies
 
-| Crate | Version | License |
+| Package | Version | License |
 | --- | --- | --- |
+| IBM Plex Mono (font) | 2.005 | OFL-1.1 |
+| Pixelify Sans (font) | 1.000 | OFL-1.1 |
+| Space Grotesk (font) | 2.000 | OFL-1.1 |
 | ab_glyph | 0.2.32 | Apache-2.0 |
 | ab_glyph_rasterizer | 0.1.10 | Apache-2.0 |
 | accesskit | 0.24.1 | MIT OR Apache-2.0 |
@@ -156,7 +161,6 @@ desktop application's "About & Licenses" screen answer from it too.
 | foldhash | 0.2.0 | Zlib |
 | font-types | 0.11.3 | MIT OR Apache-2.0 |
 | font-types | 0.12.1 | MIT OR Apache-2.0 |
-| fontconfig-parser | 0.5.8 | MIT |
 | fontdb | 0.23.0 | MIT |
 | fontique | 0.10.0 | Apache-2.0 OR MIT |
 | form_urlencoded | 1.2.2 | MIT OR Apache-2.0 |
@@ -344,7 +348,6 @@ desktop application's "About & Licenses" screen answer from it too.
 | rfd | 0.17.2 | MIT |
 | rgb | 0.8.53 | MIT |
 | rowan | 0.16.1 | MIT OR Apache-2.0 |
-| roxmltree | 0.20.0 | MIT OR Apache-2.0 |
 | roxmltree | 0.21.1 | MIT OR Apache-2.0 |
 | rusqlite | 0.40.1 | MIT |
 | rust-embed | 8.12.0 | MIT |
@@ -6940,7 +6943,7 @@ limitations under the License.
 
 ### Apache License 2.0 (Apache-2.0)
 
-Applies to: ahash 0.8.12, arc-swap 1.9.2, arrayvec 0.7.8, async-channel 2.5.0, async-compression 0.4.43, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, base64 0.22.1, base64 0.23.1, bitflags 2.13.1, blocking 1.6.2, bumpalo 3.20.3, by_address 1.2.1, bzip2 0.6.1, cfg-if 1.0.4, compression-codecs 0.4.38, compression-core 0.4.32, concurrent-queue 2.5.0, countme 3.0.1, critical-section 1.2.0, crossbeam-utils 0.8.22, data-url 0.3.2, displaydoc 0.2.7, either 1.17.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, filetime 0.2.29, flate2 1.1.9, fnv 1.0.7, fontique 0.10.0, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, getopts 0.2.24, hashbrown 0.14.5, hashbrown 0.16.1, hashbrown 0.17.1, heck 0.5.0, htmlparser 0.2.1, httparse 1.10.1, hyper-rustls 0.27.9, idna 1.1.0, idna_adapter 1.2.1, indexmap 2.14.0, itertools 0.14.0, lazy_static 1.5.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.33, mime 0.3.17, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, openssl-probe 0.2.1, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, parlance 0.1.0, parley 0.10.0, parley_data 0.10.0, percent-encoding 2.3.2, piper 0.2.5, png 0.18.1, polling 3.11.0, pollster 0.4.0, regex-automata 0.4.18, regex-syntax 0.8.11, rowan 0.16.1, roxmltree 0.20.0, roxmltree 0.21.1, rustc-hash 1.1.0, rustix 0.38.44, rustix 1.1.4, rustls 0.23.43, rustls-native-certs 0.8.4, scoped-tls 1.0.1, scoped-tls-hkt 0.1.5, scopeguard 1.2.0, secret-service 5.1.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.15.2, smol_str 0.2.2, smol_str 0.3.2, socket2 0.6.5, spin_on 0.1.1, stable_deref_trait 1.2.1, svgtypes 0.16.1, swash 0.2.10, tar 0.4.46, tempfile 3.27.0, thread_local 1.1.10, toml 0.5.11, ttf-parser 0.25.1, unic-langid 0.9.6, unic-langid-impl 0.9.6, unicase 2.9.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-properties 0.1.4, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.2, unicode-xid 0.2.6, url 2.5.8, uuid 1.24.0, xattr 1.6.1.
+Applies to: ahash 0.8.12, arc-swap 1.9.2, arrayvec 0.7.8, async-channel 2.5.0, async-compression 0.4.43, async-executor 1.14.0, async-io 2.6.0, async-lock 3.4.2, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, base64 0.22.1, base64 0.23.1, bitflags 2.13.1, blocking 1.6.2, bumpalo 3.20.3, by_address 1.2.1, bzip2 0.6.1, cfg-if 1.0.4, compression-codecs 0.4.38, compression-core 0.4.32, concurrent-queue 2.5.0, countme 3.0.1, critical-section 1.2.0, crossbeam-utils 0.8.22, data-url 0.3.2, displaydoc 0.2.7, either 1.17.0, equivalent 1.0.2, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, filetime 0.2.29, flate2 1.1.9, fnv 1.0.7, fontique 0.10.0, form_urlencoded 1.2.2, futures-lite 2.6.1, gethostname 1.1.0, getopts 0.2.24, hashbrown 0.14.5, hashbrown 0.16.1, hashbrown 0.17.1, heck 0.5.0, htmlparser 0.2.1, httparse 1.10.1, hyper-rustls 0.27.9, idna 1.1.0, idna_adapter 1.2.1, indexmap 2.14.0, itertools 0.14.0, lazy_static 1.5.0, linux-raw-sys 0.12.1, linux-raw-sys 0.4.15, lock_api 0.4.14, log 0.4.33, mime 0.3.17, num 0.4.3, num-bigint 0.4.8, num-complex 0.4.6, num-integer 0.1.46, num-iter 0.1.46, num-rational 0.4.2, num-traits 0.2.19, once_cell 1.21.4, openssl-probe 0.2.1, ordered-stream 0.2.0, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, parlance 0.1.0, parley 0.10.0, parley_data 0.10.0, percent-encoding 2.3.2, piper 0.2.5, png 0.18.1, polling 3.11.0, pollster 0.4.0, regex-automata 0.4.18, regex-syntax 0.8.11, rowan 0.16.1, roxmltree 0.21.1, rustc-hash 1.1.0, rustix 0.38.44, rustix 1.1.4, rustls 0.23.43, rustls-native-certs 0.8.4, scoped-tls 1.0.1, scoped-tls-hkt 0.1.5, scopeguard 1.2.0, secret-service 5.1.0, signal-hook-registry 1.4.8, simplecss 0.2.2, smallvec 1.15.2, smol_str 0.2.2, smol_str 0.3.2, socket2 0.6.5, spin_on 0.1.1, stable_deref_trait 1.2.1, svgtypes 0.16.1, swash 0.2.10, tar 0.4.46, tempfile 3.27.0, thread_local 1.1.10, toml 0.5.11, ttf-parser 0.25.1, unic-langid 0.9.6, unic-langid-impl 0.9.6, unicase 2.9.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-properties 0.1.4, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.2, unicode-xid 0.2.6, url 2.5.8, uuid 1.24.0, xattr 1.6.1.
 
 ```text
                               Apache License
@@ -10825,34 +10828,6 @@ SOFTWARE.
 
 ### MIT License (MIT)
 
-Applies to: fontconfig-parser 0.5.8.
-
-```text
-MIT License
-
-Copyright (c) 2021 Riey
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-### MIT License (MIT)
-
 Applies to: synstructure 0.13.2.
 
 ```text
@@ -12875,6 +12850,306 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
+```
+
+### SIL Open Font License 1.1 (OFL-1.1)
+
+Applies to: Space Grotesk (font) 2.000.
+
+```text
+Copyright 2020 The Space Grotesk Project Authors (https://github.com/floriankarsten/space-grotesk)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+http://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded, 
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+```
+
+### SIL Open Font License 1.1 (OFL-1.1)
+
+Applies to: IBM Plex Mono (font) 2.005.
+
+```text
+Copyright © 2017 IBM Corp. with Reserved Font Name "Plex"
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+
+This license is copied below, and is also available with a FAQ at: http://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded, 
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
+```
+
+### SIL Open Font License 1.1 (OFL-1.1)
+
+Applies to: Pixelify Sans (font) 1.000.
+
+```text
+Copyright 2021 The Pixelify Sans Project Authors (https://github.com/eifetx/Pixelify-Sans)
+
+This Font Software is licensed under the SIL Open Font License, Version 1.1.
+This license is copied below, and is also available with a FAQ at:
+https://scripts.sil.org/OFL
+
+
+-----------------------------------------------------------
+SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007
+-----------------------------------------------------------
+
+PREAMBLE
+The goals of the Open Font License (OFL) are to stimulate worldwide
+development of collaborative font projects, to support the font creation
+efforts of academic and linguistic communities, and to provide a free and
+open framework in which fonts may be shared and improved in partnership
+with others.
+
+The OFL allows the licensed fonts to be used, studied, modified and
+redistributed freely as long as they are not sold by themselves. The
+fonts, including any derivative works, can be bundled, embedded, 
+redistributed and/or sold with any software provided that any reserved
+names are not used by derivative works. The fonts and derivatives,
+however, cannot be released under any other type of license. The
+requirement for fonts to remain under this license does not apply
+to any document created using the fonts or their derivatives.
+
+DEFINITIONS
+"Font Software" refers to the set of files released by the Copyright
+Holder(s) under this license and clearly marked as such. This may
+include source files, build scripts and documentation.
+
+"Reserved Font Name" refers to any names specified as such after the
+copyright statement(s).
+
+"Original Version" refers to the collection of Font Software components as
+distributed by the Copyright Holder(s).
+
+"Modified Version" refers to any derivative made by adding to, deleting,
+or substituting -- in part or in whole -- any of the components of the
+Original Version, by changing formats or by porting the Font Software to a
+new environment.
+
+"Author" refers to any designer, engineer, programmer, technical
+writer or other person who contributed to the Font Software.
+
+PERMISSION & CONDITIONS
+Permission is hereby granted, free of charge, to any person obtaining
+a copy of the Font Software, to use, study, copy, merge, embed, modify,
+redistribute, and sell modified and unmodified copies of the Font
+Software, subject to the following conditions:
+
+1) Neither the Font Software nor any of its individual components,
+in Original or Modified Versions, may be sold by itself.
+
+2) Original or Modified Versions of the Font Software may be bundled,
+redistributed and/or sold with any software, provided that each copy
+contains the above copyright notice and this license. These can be
+included either as stand-alone text files, human-readable headers or
+in the appropriate machine-readable metadata fields within text or
+binary files as long as those fields can be easily viewed by the user.
+
+3) No Modified Version of the Font Software may use the Reserved Font
+Name(s) unless explicit written permission is granted by the corresponding
+Copyright Holder. This restriction only applies to the primary font name as
+presented to the users.
+
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
+Software shall not be used to promote, endorse or advertise any
+Modified Version, except to acknowledge the contribution(s) of the
+Copyright Holder(s) and the Author(s) or with their explicit written
+permission.
+
+5) The Font Software, modified or unmodified, in part or in whole,
+must be distributed entirely under this license, and must not be
+distributed under any other license. The requirement for fonts to
+remain under this license does not apply to any document created
+using the Font Software.
+
+TERMINATION
+This license becomes null and void if any of the above conditions are
+not met.
+
+DISCLAIMER
+THE FONT SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO ANY WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT
+OF COPYRIGHT, PATENT, TRADEMARK, OR OTHER RIGHT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+INCLUDING ANY GENERAL, SPECIAL, INDIRECT, INCIDENTAL, OR CONSEQUENTIAL
+DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
+OTHER DEALINGS IN THE FONT SOFTWARE.
 ```
 
 ### Unicode License v3 (Unicode-3.0)

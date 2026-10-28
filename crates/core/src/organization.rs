@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use ephervex_i18n::Arg;
 use ephervex_model::{GroupId, InstanceId, ServerId};
-use ephervex_storage::{IconId, Organization};
+use ephervex_storage::{CaseNotes, CaseRefusal, IconId, Organization};
 use image::{ImageFormat, imageops::FilterType};
 use sha2::{Digest as _, Sha256};
 use tracing::warn;
@@ -118,6 +118,12 @@ impl OrganizationView {
     #[must_use]
     pub fn is_favorite_server(&self, server: ServerId) -> bool {
         self.organization.favorite_servers.contains(&server)
+    }
+
+    /// The steps, note, and reproduced count written down for `client`.
+    #[must_use]
+    pub fn case_of(&self, client: InstanceId) -> CaseNotes {
+        self.organization.case_of(client)
     }
 
     /// The group `client` is in, or `None` when it is ungrouped.
@@ -322,6 +328,70 @@ impl App {
                 organization.favorite_clients.remove(&client);
             }
             Ok(())
+        })
+    }
+
+    /// Adds a reproduction step to the end of an instance's list.
+    pub fn add_case_step(&self, client: InstanceId, text: &str) -> CoreResult<()> {
+        self.change_case(client, |case| case.add_step(text).map(|_| ()))
+    }
+
+    /// Checks or unchecks a step of an instance.
+    pub fn set_case_step_done(&self, client: InstanceId, step: u32, done: bool) -> CoreResult<()> {
+        self.change_case(client, |case| {
+            case.set_step_done(step, done);
+            Ok(())
+        })
+    }
+
+    /// Removes a step of an instance.
+    pub fn remove_case_step(&self, client: InstanceId, step: u32) -> CoreResult<()> {
+        self.change_case(client, |case| {
+            case.remove_step(step);
+            Ok(())
+        })
+    }
+
+    /// Replaces an instance's note.
+    pub fn set_case_note(&self, client: InstanceId, note: &str) -> CoreResult<()> {
+        self.change_case(client, |case| case.set_note(note))
+    }
+
+    /// Counts one more time the bug was seen on an instance.
+    pub fn count_case_reproduced(&self, client: InstanceId) -> CoreResult<()> {
+        let mut count = 0;
+        self.change_case(client, |case| {
+            case.count_reproduced();
+            count = case.reproduced;
+            Ok(())
+        })?;
+        self.record_host_event(
+            crate::mods::InstalledHost::Instance(client),
+            ephervex_storage::HostEventKind::Reproduced,
+            &count.to_string(),
+            "",
+        );
+        Ok(())
+    }
+
+    /// Starts an instance's reproduced count again.
+    pub fn reset_case_reproduced(&self, client: InstanceId) -> CoreResult<()> {
+        self.change_case(client, |case| {
+            case.reset_reproduced();
+            Ok(())
+        })
+    }
+
+    fn change_case(
+        &self,
+        client: InstanceId,
+        change: impl FnOnce(&mut CaseNotes) -> Result<(), CaseRefusal>,
+    ) -> CoreResult<()> {
+        self.client(client)?;
+        self.change_organization(|organization| {
+            organization
+                .change_case(client, change)
+                .map_err(|reason| CoreError::CaseRefused { reason })
         })
     }
 
@@ -564,7 +634,7 @@ mod tests {
 
     use ephervex_download::OperationReporter;
     use ephervex_model::{LoaderSelection, StorageClass};
-    use ephervex_storage::{DuplicateClient, NewClient, NewServer, Paths};
+    use ephervex_storage::{DuplicateClient, MAX_CASE_NOTE_CHARS, NewClient, NewServer, Paths};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -672,6 +742,65 @@ mod tests {
             world
                 .app
                 .set_server_favorite(ServerId::new(), true)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_case_is_written_down_per_instance_and_survives_a_reload() {
+        let world = world();
+        let client = world.client("Repro");
+        let other = world.client("Other");
+
+        world.app.add_case_step(client, "Place a belt").unwrap();
+        world.app.add_case_step(client, "Fill it").unwrap();
+        world.app.set_case_note(client, "Only when full").unwrap();
+        world.app.count_case_reproduced(client).unwrap();
+        world.app.count_case_reproduced(client).unwrap();
+        let first = world.app.organization().unwrap().case_of(client).steps[0].id;
+        world.app.set_case_step_done(client, first, true).unwrap();
+
+        let case = world.app.organization().unwrap().case_of(client);
+        assert_eq!(case.steps.len(), 2);
+        assert!(case.steps[0].done && !case.steps[1].done);
+        assert_eq!(case.note, "Only when full");
+        assert_eq!(case.reproduced, 2);
+        assert!(world.app.organization().unwrap().case_of(other).is_empty());
+
+        world.app.remove_case_step(client, first).unwrap();
+        world.app.reset_case_reproduced(client).unwrap();
+        let case = world.app.organization().unwrap().case_of(client);
+        assert_eq!(case.steps.len(), 1);
+        assert_eq!(case.reproduced, 0);
+    }
+
+    #[test]
+    fn a_case_entry_the_user_can_fix_is_refused_with_its_reason() {
+        let world = world();
+        let client = world.client("Repro");
+        let error = world.app.add_case_step(client, "   ").unwrap_err();
+        assert!(matches!(
+            error,
+            CoreError::CaseRefused {
+                reason: CaseRefusal::StepEmpty
+            }
+        ));
+        assert_eq!(error.message_id(), "error-case-step-empty");
+        let error = world
+            .app
+            .set_case_note(client, &"x".repeat(MAX_CASE_NOTE_CHARS + 1))
+            .unwrap_err();
+        assert_eq!(error.message_id(), "error-case-note-too-long");
+        assert!(world.app.organization().unwrap().case_of(client).is_empty());
+    }
+
+    #[test]
+    fn a_case_is_refused_for_an_instance_that_does_not_exist() {
+        let world = world();
+        assert!(
+            world
+                .app
+                .add_case_step(InstanceId::new(), "Place a belt")
                 .is_err()
         );
     }

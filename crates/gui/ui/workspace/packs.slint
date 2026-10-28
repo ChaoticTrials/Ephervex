@@ -33,9 +33,9 @@ component PackLine inherits Rectangle {
 export component PackContentCard inherits Rectangle {
     in property <PackContentRow> item;
     height: content.preferred-height + 26px;
-    border-radius: 7px;
-    border-width: 1px;
-    border-color: root.item.missing ? Theme.warning : Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
+    border-color: root.item.missing ? Theme.warning : Theme.border-strong;
     background: Theme.surface;
     content := VerticalLayout {
         x: 13px;

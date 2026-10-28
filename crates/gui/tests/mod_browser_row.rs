@@ -149,18 +149,16 @@ fn a_managed_mod_names_the_catalog_it_came_from() {
     );
 }
 
-/// Where a row's badges and its bin sit relative to each other.
+/// Where a row's badges, its switch and its bin sit relative to each other.
 ///
 /// Layout rather than behavior, and asserted because reading the markup does
-/// not tell you: a badge placed in the title row rides on however long the
-/// title is, so it lands in a different column on every card, and the bin then
-/// has nothing above it. Both belong in the row's own trailing column.
+/// not tell you: a badge placed in the title column rides on however long the
+/// title is, so it lands in a different place on every row. The badges, the
+/// switch and the bin belong to the row's own trailing columns, in that order.
 #[test]
-fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
+fn a_rows_badge_trails_its_title_and_comes_before_the_switch_and_bin() {
     let ui = window();
-    mod_browser(&ui, Vec::new());
-    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
-    settle(&ui);
+    instance_mods_with(&ui, hand_placed_mod());
 
     let badge = ElementHandle::find_by_accessible_label(&ui, "Added by hand")
         .find(|element| element.size().width > 0.0)
@@ -172,18 +170,15 @@ fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
     .find(|element| element.size().width > 0.0)
     .expect("a hand-placed row offers the bin");
 
+    let badge_middle = badge.absolute_position().y + badge.size().height / 2.0;
+    let bin_middle = bin.absolute_position().y + bin.size().height / 2.0;
     assert!(
-        bin.absolute_position().y > badge.absolute_position().y,
-        "the bin belongs under the badge, not beside it"
+        (badge_middle - bin_middle).abs() < bin.size().height / 2.0,
+        "the badge and the bin are on one line"
     );
-    // Same column, within a badge's own width. This is what tells a stacked
-    // pair apart from a badge left in the title row, where it sits at a
-    // title-dependent offset and the bin is a column further right.
-    let badge_center = badge.absolute_position().x + badge.size().width / 2.0;
-    let bin_center = bin.absolute_position().x + bin.size().width / 2.0;
     assert!(
-        (badge_center - bin_center).abs() < badge.size().width,
-        "badge center {badge_center} and bin center {bin_center} are not one column"
+        badge.absolute_position().x + badge.size().width <= bin.absolute_position().x,
+        "the badge sits before the bin"
     );
 
     let title = ElementHandle::find_by_accessible_label(&ui, "UtilitiX")
@@ -194,6 +189,14 @@ fn a_rows_badges_sit_at_its_trailing_edge_above_the_bin() {
             "the badge trails the title rather than preceding it"
         );
     }
+}
+
+/// The Mods tab with one given mod and nothing else open.
+fn instance_mods_with(ui: &AppWindow, mod_row: ModRow) {
+    mod_browser(ui, Vec::new());
+    support::set_mods(ui, ModelRc::new(VecModel::from(vec![mod_row])));
+    ui.set_modal("".into());
+    settle(ui);
 }
 
 /// Turning a mod off to see whether the crash goes away is why this launcher
@@ -277,6 +280,7 @@ fn instance_mods(ui: &AppWindow, instance: InstanceRow) {
     mod_browser(ui, Vec::new());
     support::show_client(ui, instance, "Mods");
     support::set_mods(ui, ModelRc::new(VecModel::from(vec![managed_mod()])));
+    ui.set_modal("".into());
     settle(ui);
 }
 
@@ -322,6 +326,11 @@ fn idle_instance() -> InstanceRow {
         group_index: 0,
         group_tone: 0,
         icon_slot: -1,
+        problems: 0,
+        state_line: "".into(),
+        last_run: "".into(),
+        open: false,
+        ..InstanceRow::default()
     }
 }
 
@@ -331,9 +340,7 @@ fn idle_instance() -> InstanceRow {
 #[test]
 fn the_switch_and_the_bin_share_the_rows_trailing_column() {
     let ui = window();
-    mod_browser(&ui, Vec::new());
-    support::set_mods(&ui, ModelRc::new(VecModel::from(vec![hand_placed_mod()])));
-    settle(&ui);
+    instance_mods_with(&ui, hand_placed_mod());
 
     let switch = ElementHandle::find_by_accessible_label(
         &ui,
@@ -363,8 +370,8 @@ fn the_switch_and_the_bin_share_the_rows_trailing_column() {
         "the switch sits before the bin"
     );
     assert!(
-        switch.absolute_position().y > badge.absolute_position().y,
-        "both controls belong under the badges, not in the title row"
+        badge.absolute_position().x < switch.absolute_position().x,
+        "both controls trail the badges"
     );
 }
 
@@ -465,6 +472,8 @@ fn mod_browser(ui: &AppWindow, results: Vec<ModSearchRow>) {
         view.browser_provider = "modrinth".into();
         view.browser_results = ModelRc::new(VecModel::from(results));
     });
+    ui.set_add_mods_host(0);
+    ui.set_modal("add-mods".into());
 }
 
 fn result(project: &str, title: &str) -> ModSearchRow {
@@ -474,12 +483,30 @@ fn result(project: &str, title: &str) -> ModSearchRow {
         description: "Nice to have items, blocks, and other features.".into(),
         author: "MelanX".into(),
         note: "Compatible".into(),
+        downloads: SharedString::default(),
         icon: Image::default(),
         installed: false,
         queued: false,
         server_support: SharedString::default(),
         blocked_reason: SharedString::default(),
     }
+}
+
+/// What the catalog says about how often a project was downloaded sits in the
+/// result's meta line, and a project it says nothing about shows no figure.
+#[test]
+fn a_result_shows_the_download_count_the_catalog_reports() {
+    let ui = window();
+    let mut counted = result("utilitix", "UtilitiX");
+    counted.downloads = "1.2M downloads".into();
+    mod_browser(&ui, vec![counted, result("plain", "Plain")]);
+    settle(&ui);
+
+    let meta = |text: &str| {
+        ElementHandle::find_by_accessible_label(&ui, text).any(|element| element.size().width > 0.0)
+    };
+    assert!(meta("by MelanX | Compatible | 1.2M downloads"));
+    assert!(meta("by MelanX | Compatible"));
 }
 
 fn managed_mod() -> ModRow {
@@ -575,6 +602,8 @@ fn server_browser(ui: &AppWindow, row: ServerRow, results: Vec<ModSearchRow>) {
         view.browser_provider = "modrinth".into();
         view.browser_results = ModelRc::new(VecModel::from(results));
     });
+    ui.set_add_mods_host(0);
+    ui.set_modal("add-mods".into());
     settle(ui);
 }
 
@@ -595,35 +624,68 @@ fn a_servers_mods_surface_offers_the_catalog_browser() {
     assert_eq!(install_buttons(&ui).len(), 1);
 }
 
+/// Whether the Mods tab offers to add mods.
+fn offers_add_mods(ui: &AppWindow) -> bool {
+    ElementHandle::find_by_accessible_label(ui, &lookup("gui-add-mods"))
+        .any(|element| element.size().width > 0.0)
+}
+
 #[test]
-fn a_vanilla_server_has_no_catalog_browser() {
+fn a_vanilla_server_cannot_add_mods_from_a_catalog() {
     let ui = window();
-    server_browser(
+    support::show_server(
         &ui,
         ServerRow {
             loader_kind: "vanilla".into(),
             ..modded_server()
         },
-        vec![result("utilitix", "UtilitiX")],
+        "Mods",
     );
+    settle(&ui);
 
-    assert_eq!(search_buttons(&ui), 0);
-    assert!(install_buttons(&ui).is_empty());
+    assert!(!offers_add_mods(&ui));
 }
 
 #[test]
-fn a_server_that_is_not_installed_has_no_catalog_browser() {
+fn a_server_that_is_not_installed_cannot_add_mods_from_a_catalog() {
     let ui = window();
-    server_browser(
+    support::show_server(
         &ui,
         ServerRow {
             installed: false,
             ..modded_server()
         },
-        Vec::new(),
+        "Mods",
     );
+    settle(&ui);
 
-    assert_eq!(search_buttons(&ui), 0);
+    assert!(!offers_add_mods(&ui));
+}
+
+#[test]
+fn a_modded_server_offers_to_add_mods_and_that_opens_the_catalog_dialog() {
+    let ui = window();
+    support::show_server(&ui, modded_server(), "Mods");
+    settle(&ui);
+    assert!(offers_add_mods(&ui));
+    ElementHandle::find_by_accessible_label(&ui, &lookup("gui-add-mods"))
+        .find(|element| {
+            element.size().width > 0.0 && element.accessible_role() == Some(AccessibleRole::Button)
+        })
+        .expect("the Add mods button")
+        .invoke_accessible_default_action();
+    settle(&ui);
+    assert_eq!(ui.get_modal(), "add-mods");
+    assert_eq!(ui.get_add_mods_host(), 0);
+    assert_eq!(search_buttons(&ui), 1, "the dialog searches a catalog");
+}
+
+#[test]
+fn a_client_offers_to_add_mods() {
+    let ui = window();
+    support::show_client(&ui, idle_instance(), "Mods");
+    settle(&ui);
+    assert!(offers_add_mods(&ui));
 }
 
 #[test]
@@ -762,63 +824,6 @@ fn a_results_server_support_badge_sits_above_its_install_button() {
     }
 }
 
-/// The browser's heading row is as tall as the mod list's toolbar, so the two
-/// panels' descriptions start on one line.
-#[test]
-fn the_browsers_description_starts_level_with_the_mod_lists() {
-    let ui = window();
-    mod_browser(&ui, Vec::new());
-    settle(&ui);
-
-    let list = shown_text(&ui, "gui-managed-mods-detail")
-        .absolute_position()
-        .y;
-    let browser = shown_text(&ui, "gui-catalog-compatibility")
-        .absolute_position()
-        .y;
-    assert!(
-        (list - browser).abs() < 0.5,
-        "the descriptions start at {list} and {browser}"
-    );
-}
-
-/// A server's mod list is the panel a client's is: titled alike, its
-/// description under the toolbar at the panel's full width, level with the
-/// browser's.
-#[test]
-fn a_servers_mod_list_is_laid_out_like_a_clients() {
-    let ui = window();
-    mod_browser(&ui, Vec::new());
-    settle(&ui);
-    let client = shown_text(&ui, "gui-managed-mods-detail");
-    let (client_y, client_width) = (client.absolute_position().y, client.size().width);
-
-    server_browser(&ui, modded_server(), Vec::new());
-    shown_text(&ui, "gui-managed-mods");
-    let server = shown_text(&ui, "gui-server-mods-detail");
-    let filter = shown_text(&ui, "gui-filter-mods");
-    let browser = shown_text(&ui, "gui-server-catalog-compatibility");
-
-    let top = server.absolute_position().y;
-    assert!(
-        top >= filter.absolute_position().y + filter.size().height,
-        "the description sits under the toolbar"
-    );
-    assert!(
-        (top - client_y).abs() < 0.5,
-        "it starts at {top}, a client's at {client_y}"
-    );
-    assert!(
-        (server.size().width - client_width).abs() < 0.5,
-        "it is {} wide, a client's {client_width}",
-        server.size().width
-    );
-    assert!(
-        (top - browser.absolute_position().y).abs() < 0.5,
-        "it starts level with the browser's"
-    );
-}
-
 /// The missing-key notice takes the user to where the key is entered, from a
 /// client's browser and a server's alike, even though leaving the workspace
 /// takes the notice's own button away.
@@ -845,13 +850,16 @@ fn the_missing_key_notice_opens_the_provider_settings() {
         settle(&ui);
 
         let host = if server { "server" } else { "client" };
-        assert_eq!(ui.get_page(), 4, "a {host}'s notice opens Settings");
+        assert!(ui.get_settings_open(), "a {host}'s notice opens Settings");
         assert_eq!(
             ui.get_settings_tab(),
             "Providers & APIs",
             "a {host}'s notice opens the providers"
         );
-        assert!(!ui.get_workspace_open(), "a {host}'s workspace closes");
+        assert!(
+            ui.get_workspace_open(),
+            "a {host}'s workspace stays open behind the settings for Back"
+        );
     }
 }
 

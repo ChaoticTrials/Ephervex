@@ -65,15 +65,69 @@ release, because the headless tests find elements by it.
 
 | Module | Holds |
 |---|---|
-| `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the navigation shell, its pages, and its modals |
+| `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the three-column shell, the settings pages, and its modals |
 | `theme.slint` | The `Theme` global: the color tokens every surface reads, text sizes, and shared measurements |
 | `palettes.slint` | `ThemePalette` and the built-in palettes, the one place colors are written |
 | `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
-| `components/` | Text primitives, controls, and artwork shared by every surface |
+| `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
 | `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
-| `home/` | The client and server cards, the inspector, and the Running and Activity cards |
+| `shell/` | The window frame: the grid floor and three columns, the brand bar, the account chip, and the right column's container |
+| `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
+| `home/` | The Home page: its running, problem, resume, and activity cards and the face they share |
 | `settings/` | Application settings panels and the Minecraft defaults screen with its window size picker |
+
+The window has three columns: the host list, the page, and a right column that
+stands beside Home only; the settings and a host take its width and its gap. The
+list lists every instance and server; pressing a card opens that host in the
+workspace. `AppShell` exposes the geometry: a window narrower than
+`shell-list-inline-width` turns the list into a drawer, and one narrower than
+`shell-side-inline-width` does the same for the right column. A drawer leaves
+the row, a button on a rail beside the page opens it over a scrim, and choosing
+a host, pressing the scrim, or resizing the window past the width closes it.
+A host page that is not split has a column of its own beside it from
+`shell-host-side-inline-width`: the servers linked to an instance with their
+actions, and where the host keeps its files. Narrower, a button in the page's
+header opens the same column as a drawer. A split keeps each pane's own page and
+has no column.
+
+An instance's header shows its issue link: pressing it opens the address in the
+browser, and Add or Edit changes it in place (Enter saves, Escape leaves). The
+link is stored and validated by `ephervex-core` as host metadata, and a stored
+link that it would refuse is not shown.
+
+The page is the settings when `settings-open` is set, otherwise the host panes
+when Rust has opened a workspace, otherwise Home. `settings-open` and the
+workspace are independent, so Back from the settings returns to the host that
+was open. Home is what shows when neither is open (`shows-home`): it asks for
+what is running each time it appears and measures the artifact cache the first
+time. Any code that opens a settings page goes through `open-settings(tab)`,
+which also reads what the page shows. Errors that have no row to sit on reach
+the user as toasts.
+
+The left column is the brand bar (logo, wordmark, the application's version, and
+the refresh button), one row with the Home button, the search field, and the
+filter toggle (a funnel with the count of choices that are set, which opens the
+panel at the top of the list), the host list, and the account chip. The chip
+shows the default account's initial, name, and kind, and opens a menu to choose
+another default or to manage accounts; the gear opens the settings.
+
+Home lists what is running, each problem the launcher recorded or a run of this
+session reported (with a way to the host and the surface that explains it, never
+a fix: ADR 0043), the hosts that ran last, and the launcher's activity. The cards
+sit in as many columns as the page's own width allows, each at least
+`Theme.home-card-min-width` wide. Sections with nothing to say keep a muted line,
+except the hosts to continue with, which is left out.
+
+Beside Home, the right column holds a storage card and the tips. The card counts
+temporary instances, persistent instances, and servers from the same rows Home is
+built from, and shows the shared download cache as the settings measure it: the
+core's cache status (used bytes, the configured budget, whether the walk was
+complete) formatted once in the backend, so both screens print the same figures.
+The measurement walks the cache, so it runs the first time Home appears and again
+when the Storage settings ask. Until it arrives the card says it is measuring and
+shows no figures; when it fails it says so (the error is a toast); an unlimited
+budget has no meter; a cache over its budget fills the meter in the warning tone.
 
 Rust sees only what `app.slint` exports: the globals and windows by name and the
 row structs through `export * from "models.slint"`. A new type Rust needs is
@@ -81,7 +135,8 @@ exported there. Rust owns application and feature state; the markup renders it
 and reports what the user asked for.
 
 Tests that read the markup as text go through `test_support::UI_SOURCES`, which
-a test keeps in step with the files on disk.
+`build.rs` generates from every `.slint` file under `crates/gui/ui`, so a new
+module is covered without being registered.
 
 ### Theme and palettes
 
@@ -91,12 +146,13 @@ the colors (ADR 0041). Each token reads the field of the same name on
 the shipped widgets paint in. Components read tokens and never the palette, so
 none of them knows which palette is active.
 
-The Dark, Light, and seasonal palettes live in
-the `BuiltInPalettes` global.
-The theme preference is a separate value: `crates/gui/src/palette.rs` resolves
-it to one complete palette and writes it to `Theme`, and is the only place that
-chooses one. Adding a built-in palette is a `BuiltInPalettes` entry, a scheme
-that resolves to it, and its label in the theme list.
+The built-in palettes, Workbench and Workbench Dark, and the seasonal ones live
+in the `BuiltInPalettes` global (ADR 0057). The theme preference is a separate
+value: `crates/gui/src/palette.rs` resolves it to one complete palette and
+writes it to `Theme`, and is the only place that chooses one. The recorded name
+`light` stays valid and resolves to Workbench, and `dark` to Workbench Dark.
+Adding a built-in palette is a `BuiltInPalettes` entry, a scheme that resolves to
+it, and its label in the theme list.
 
 User themes are TOML files or theme folders in the `themes` folder under the
 configuration directory (ADR 0042, ADR 0047, format in `docs/themes.md`).
@@ -112,7 +168,7 @@ parent and replacing the colors the file sets, so a user theme is complete by
 construction. A chosen user theme whose file is gone or unusable paints in the
 default palette, and the recorded choice stays.
 
-A seasonal theme stands in for Dark or Light during its season (ADR 0049).
+A seasonal theme stands in for the chosen built-in theme during its season (ADR 0049).
 `ephervex_core::seasonal_theme` holds the seasons and resolves the recorded
 theme, the `seasonal_themes` setting and the local date to a `ShownTheme`:
 the recorded theme, or a `SeasonalTheme`, which is never recorded or offered
@@ -120,16 +176,44 @@ in the theme list. The settings snapshot carries both: the page shows and
 saves the recorded theme, and the palette and branding are the shown theme's.
 The controller checks the local date once a minute and asks for a new snapshot
 only when the date changes the theme that should be shown, at most once per
-date.
+date. The snapshot also says whether a season is on today, and the settings page
+offers the `seasonal_themes` switch only then.
 
-Text sizes, the resolved monospace family, and the shared measurements stay in
+Text sizes, the font families, and the shared measurements stay in
 `Theme` outside the palette. Several of them are layout invariants (fixed row
 heights that virtualized lists and scroll arithmetic depend on, pane and tab
-geometry), and a palette never changes them.
+geometry), and a palette never changes them. The shape of the look (outline
+width, corner radii, hard shadow offsets, grid size, button heights) is among
+them, as are the shell measurements (column widths, shell padding and gap, the
+minimum window size).
+
+Buttons, setting cards, selected navigation items, menus, and dialogs are
+`Plate` faces: a strong outline and a hard shadow that overflows the right and
+bottom edges, so a container that clips, such as a scroll view, pads those sides
+by `Theme.shadow-room` and the top and left by `Theme.lift-room`. A button rises
+on hover, sinks on press, and is flat and faded while disabled. `Chip` (in the
+fixed-width family) and `Pill` are small tags with the lighter chip outline. Short headings (`DisplayHeading`, used for page, section,
+and dialog titles) are the only text set in the heading family. The parts of a
+switch and a slider are placed on whole physical pixels, so a renderer that
+draws at fractional positions shows no soft edge.
 
 A theme can set colors, and a theme folder also its logo and window icon.
 Token names are part of its format, so a token can be added but never renamed
 or removed.
+
+The desktop frontend bundles its fonts instead of relying on what the system
+has installed: Pixelify Sans for headings (`Theme.heading-family`), Space
+Grotesk for interface text (`Theme.body-family`, also the window's
+`default-font-family`), and IBM Plex Mono for logs, versions, and paths
+(`Theme.mono-family`). They are static TTFs under `crates/gui/ui/fonts/`,
+imported by `app.slint` and embedded in the binary, so every package format
+ships them with no install step; the renderer ignores variable-font axes, so
+variable fonts are not used. IBM Plex Mono declares a Reserved Font Name and is
+therefore kept byte-identical to upstream; the other two are modified (a
+ligature feature removed, one weight instanced) and say how in
+`crates/gui/ui/fonts/SOURCES.md`, which also records upstream commits and
+hashes. All three are under the SIL Open Font License 1.1 and are listed with
+their full texts in the third-party license inventory.
 
 ## Instance and shared-storage model
 
@@ -207,7 +291,8 @@ metadata check, and interrupted-state report as one that never moved.
 
 ## Instance organization
 
-Favorites, groups and icons are presentation state (ADR 0048). They live in
+Favorites, groups, icons and an instance's case (its reproduction steps, note
+and how often the bug was seen again) are presentation state (ADR 0048). They live in
 `organization.json` in the data directory, beside the `icons/` store, and not in
 `instance.json` or the index, so no snapshot restore, promotion, storage move or
 reconciliation can roll them back and no diagnostic bundle carries them. The
@@ -229,13 +314,22 @@ to at most 256 pixels, re-encoded as PNG and stored under the hash of its bytes.
 The organization file keeps that hash. A host with no icon, or one whose file is
 missing or will not load, draws its loader symbol.
 
+A case is text the user typed, so its bounds are enforced where it is stored and
+again where the file is read: at most 100 steps of 300 characters and a note of
+8000 characters, control characters dropped, repeated step ids collapsed. A
+refused entry names the limit and keeps what the user typed in the field. An
+instance whose case is emptied leaves no entry, and the entry of a deleted
+instance is dropped with the other stale entries. The Case surface is offered
+by instances after Overview and by no server.
+
 Searching, filtering and ordering are pure functions over a small facts record
 per instance, in core. The desktop list, the split workspace's host picker and
-`ephervex instances list` all use them. The Instances page keeps its filters as
-positions in option lists it writes, and keeps its selection by id, so a re-sort
-or a filter that hides the selected instance never moves the selection to
-another one. The workspace and its picker are handed every host, whatever the
-page's filters hide.
+`ephervex instances list` all use them. The host list keeps its filters as
+positions in option lists it writes, and its one search box narrows instances
+and servers together. A card is marked open by the pane that shows its host, not
+selected: there is no selection to move, so a re-sort or a filter never changes
+what is open. The workspace and its picker are handed every host, whatever the
+list's filters hide.
 
 ## Mutation and interruption recovery
 
@@ -296,6 +390,17 @@ not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
 parent.
 
+A host's page is a framed plate like Home. Its header band runs edge to edge in
+the page color and holds the host's kind and state, its name, the actions it
+offers, and a strip of chips for its Minecraft version, loader, mod count,
+storage class, and linked server. The surface tabs sit below the band. Each
+pane of a split is the same plate in a smaller frame with a compact header. The
+page area never scrolls: the window's minimum size keeps every pane at or above
+its minimum size, so the plates' hard shadows fall into the gaps and the page
+margin. The surface tabs, a pane's host button, the More button, and the host
+picker are Tab stops with the shared focus ring and Enter or Space activation;
+the More list takes focus when it opens and is walked with the arrow keys.
+
 A server's Mods surface carries the same catalog browser as a client's, and it
 is absent for a Vanilla server and for one whose base installation is not
 complete. A result whose server side the catalog never stated is marked with a
@@ -327,17 +432,18 @@ Overview. Each pane of a split carries a compact header: the host, its state,
 its Restart and primary action on one row, and the surface tabs, the host's
 folder, and the layout controls on the next. A pane too narrow for the host and
 its actions on one row moves the actions to a row of their own under the host.
-The host opens a picker of cards like the home screen:
-every client, with its linked servers on its card, and the servers the Servers
-page lists, running hosts first. Clients rank by what runs on their card: the
+The host opens a picker of cards like the list's own:
+every client, with its linked servers on its card, and the servers the host
+list shows, running hosts first. Clients rank by what runs on their card: the
 client and a linked server, the client alone, a linked server alone, nothing. Surface tabs that do not fit wait under More,
 and the selected surface always keeps a tab. A workflow's banner is left to the
 pane showing the workflow's own surface, so a round shown in Isolation is not
 repeated above the host's other panes. A pane's accessible label names its
 position, host, and surface, so two panes on one host are never announced
-alike. The split has one Back, above the panes, which leaves for the page the
-split was opened from. The workspace is not persisted: opening a host from a
-list replaces the layout with a single pane.
+alike. The split has one Back, above the panes, which leaves for Home. A single pane
+has no Back unless it was followed from a client, in which case Back returns to
+that client. The workspace is not persisted: opening a host from the list
+replaces the layout with a single pane.
 
 The layout owns composition only (see ADR 0039). The controller renders one
 host view per shown host and one row per pane pointing at it, and every feature
@@ -1848,13 +1954,13 @@ cannot resolve, which a newer Ephervex may have written. The third is reported
 as itself and written back unchanged rather than read as one of the values this
 build does know, and it costs the user that one setting instead of the whole
 file. The preferred mod catalog under `[mods]` is stored this way. The
-interface theme under `[display]` (`color_scheme`, holding `dark`, `light`, or
-`user:<id>` for a theme file) is stored as text for the same reason, so a theme
-added later does not make an older build refuse the file. It
-always records a name older builds read, so nothing recorded and the default
-scheme are the same value there. A name this build cannot resolve paints in the
-default palette and is written back unchanged until the user picks another
-theme.
+interface theme under `[display]` (`color_scheme`, holding `workbench`, `dark`,
+`light`, or `user:<id>` for a theme file) is stored as text for the same reason,
+so a theme added later does not make an older build refuse the file. A recorded
+`dark` or `light` is a valid choice that paints as Workbench, and it is written
+back as read until the user picks another theme. A name this build cannot
+resolve paints in the default palette and is written back unchanged until the
+user picks another theme.
 
 Errors are typed by domain and composed through `CoreError`. User-visible text
 uses Fluent message IDs and typed arguments, while paths, versions, hashes, and

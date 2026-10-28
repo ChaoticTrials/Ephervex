@@ -46,18 +46,20 @@ so the reasoning trail survives.
 | [0038](0038-a-diagnostic-bundle-is-a-chosen-verbatim-local-copy.md) | A diagnostic bundle is a chosen, verbatim, local copy | Accepted |
 | [0039](0039-a-split-workspace-composes-host-views-and-owns-no-feature-state.md) | A split workspace composes host views and owns no feature state | Accepted |
 | [0040](0040-a-linked-pair-chooses-one-linked-server-and-starts-as-one-operation.md) | A linked pair chooses one linked server and starts as one operation | Accepted |
-| [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted |
-| [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted (amended by ADR 0047) |
+| [0041](0041-a-theme-is-a-complete-color-palette.md) | A theme is a complete color palette | Accepted (amended by ADR 0057) |
+| [0042](0042-user-themes-are-toml-files-over-a-built-in-parent.md) | User themes are TOML files over a built-in parent | Accepted (amended by ADR 0047 and ADR 0057) |
 | [0043](0043-diagnostics-explains-and-changes-nothing-until-a-previewed-fix-is-applied.md) | Diagnostics explains, and changes nothing until a previewed fix is applied | Accepted |
 | [0044](0044-rpm-packages-are-published-to-the-signed-package-repository.md) | RPM packages are published to the signed package repository | Accepted (amends ADR 0026) |
 | [0045](0045-a-server-installs-catalog-mods-into-its-own-recipe.md) | A server installs catalog mods into its own recipe | Accepted |
 | [0046](0046-a-hosts-java-runtime-is-changed-through-a-previewed-fix.md) | A host's Java runtime is changed through a previewed fix | Accepted |
 | [0047](0047-a-theme-folder-carries-branding-confined-to-its-own-branding-folder.md) | A theme folder carries branding confined to its own branding folder | Accepted (amends ADR 0042) |
 | [0048](0048-instance-organization-is-presentation-state-outside-host-metadata.md) | Instance organization is presentation state outside host metadata | Accepted |
-| [0049](0049-a-seasonal-theme-stands-in-for-a-built-in-theme-during-its-season.md) | A seasonal theme stands in for a built-in theme during its season | Accepted |
+| [0049](0049-a-seasonal-theme-stands-in-for-a-built-in-theme-during-its-season.md) | A seasonal theme stands in for a built-in theme during its season | Accepted (amended by ADR 0057) |
 | [0050](0050-server-properties-saved-while-running-wait-for-its-restart.md) | Server properties saved while running wait for its restart | Accepted |
 | [0051](0051-server-property-defaults-fill-a-new-servers-file.md) | Server property defaults fill a new server's file | Accepted |
 | [0052](0052-menus-are-drawn-by-the-application.md) | Menus are drawn by the application | Accepted |
 | [0053](0053-storage-cleanup-removes-only-unreferenced-regenerable-entries-after-a-confirmed-preview.md) | Storage cleanup removes only unreferenced, regenerable entries after a confirmed preview | Accepted |
 | [0054](0054-a-runner-process-hosts-a-client-or-server-past-the-launchers-exit.md) | A runner process hosts a client or server past the launcher's exit | Accepted (amends ADR 0014 and ADR 0015) |
 | [0055](0055-resource-shader-and-data-packs-are-recognized-by-location-and-kept-out-of-the-mod-list.md) | Resource packs, shader packs, and data packs are recognized by location and kept out of the mod list | Accepted |
+| [0057](0057-workbench-is-the-built-in-look-in-a-light-and-a-dark-palette.md) | Workbench is the built-in look, in a light and a dark palette | Accepted (amends ADR 0041, ADR 0042 and ADR 0049) |
+| [0058](0058-a-host-keeps-a-bounded-history-under-the-state-root.md) | A host keeps a bounded history under the state root | Accepted |

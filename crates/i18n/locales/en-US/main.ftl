@@ -877,7 +877,6 @@ launch-dry-run = Prepared the launch without starting Minecraft.
 launch-detached = Minecraft is running in the background as process { $pid }. End it with `ephervex instance stop`.
 
 # The command line is shown with the access token replaced, always
-#.
 launch-command-redacted = The access token is not shown.
 launch-connect-starting-server = Starting linked server { $server }...
 launch-connect-reusing-server = Reusing linked server { $server }.
@@ -1161,6 +1160,16 @@ error-change-isolation-active = This host's mods cannot be changed while an isol
 error-name-empty = A name cannot be blank.
 error-name-too-long = That name is too long. Use at most { $limit } characters.
 error-name-control-characters = A name cannot contain control characters.
+error-issue-link-too-long = That issue link is too long. Use at most { $limit } bytes.
+error-issue-link-invalid-characters = An issue link cannot contain spaces, control characters, or invisible characters.
+error-issue-link-not-an-address = An issue link must be a full web address starting with http:// or https://.
+error-issue-link-unsupported-scheme = An issue link must start with http:// or https://.
+error-issue-link-missing-host = That issue link names no website. Include a host such as github.com.
+error-issue-link-credentials = An issue link cannot contain a user name or password.
+error-case-step-empty = A step needs some text.
+error-case-step-too-long = That step is too long. Use at most { $limit } characters.
+error-case-too-many-steps = This instance already has { $limit } steps. Remove one before adding another.
+error-case-note-too-long = That note is too long. Use at most { $limit } characters.
 
 error-mod-catalog-preference-unrecognized = "{ $catalog }" is not a mod catalog this version of Ephervex knows.
 .action = Choose a catalog in Settings, or name one for this command. The stored value is left alone.
@@ -1525,8 +1534,6 @@ gui-host-change-wait = Another host's files are still being changed. Try again o
 
 operation-diagnosing-host = Diagnosing
 operation-applying-fix = Applying a fix
-gui-diagnosis-title = Diagnostics
-gui-diagnosis-detail = Checks whether this host is configured correctly for what it runs. Nothing changes unless you apply a fix.
 gui-diagnosis-diagnose = Diagnose
 gui-diagnosis-diagnose-again = Diagnose again
 gui-diagnosis-stop = Stop
@@ -1548,19 +1555,14 @@ gui-diagnosis-summary-quick = Checked at { $time } after the last run failed. Re
 gui-diagnosis-failed = Diagnosis could not finish
 gui-diagnosis-canceled = Diagnosis stopped before it finished. Nothing was changed.
 gui-diagnosis-stale = The host changed. The last result stays on screen until it is checked again.
-gui-diagnosis-likely-cause = Likely cause
 gui-diagnosis-customized-detail = Differs from what Ephervex would choose and still works. Not a problem.
 gui-diagnosis-other-findings = Other findings ({ $count })
 gui-diagnosis-show = Show
-gui-diagnosis-requires = requires { $value }
-gui-diagnosis-problems-heading = { $count ->
-    [one] Problem
-   *[other] Problems ({ $count })
-}
-gui-diagnosis-customized-heading = Valid, customized ({ $count })
 gui-diagnosis-copy-report-hint = Diagnose this host first. The report summarizes what a diagnosis found.
 gui-diagnosis-hide = Hide
 gui-diagnosis-badge-problem = Problem
+gui-diagnosis-badge-likely-cause = likely cause
+gui-diagnosis-customized-title = Valid, customized
 gui-diagnosis-badge-customized = Customized
 gui-diagnosis-checked-title = What was checked
 gui-diagnosis-check-ok = OK
@@ -1730,6 +1732,7 @@ gui-java-installing = Java is being installed for this host.
 gui-java-choices = Available runtimes
 gui-java-choices-detail = Automatic follows the best compatible runtime.
 gui-java-choice-current = In use
+gui-java-choice-wont-run = won't run
 gui-java-choice-requires = This host requires Java { $required }.
 gui-java-choice-use = Use
 gui-java-choice-use-named = Use { $value }
@@ -1954,8 +1957,6 @@ mod-install-completed = Installed { $name }.
 # from, which outranks one that was only inferred to be involved.
 crash-none = This server has no crash reports.
 running-nothing = Nothing is running.
-gui-running = Running
-gui-running-detail = Everything Ephervex is running right now. Client instances with a live launch, and servers this launcher is supervising.
 gui-nothing-running = Nothing is running.
 gui-nothing-running-detail = Launch an instance or start a server and it will appear here.
 gui-uptime-seconds = { $count ->
@@ -1967,6 +1968,80 @@ gui-uptime-minutes = { $count ->
        *[other] { $count }m
     }
 gui-uptime-hours = { $hours }h { $minutes }m
+# How long ago a host last ran, lowercase because it ends a sentence or a card line.
+gui-last-run-just-now = just now
+gui-last-run-minutes = { $count ->
+    [one] 1 minute ago
+   *[other] { $count } minutes ago
+}
+gui-last-run-hours = { $count ->
+    [one] 1 hour ago
+   *[other] { $count } hours ago
+}
+gui-last-run-days = { $count ->
+    [one] 1 day ago
+   *[other] { $count } days ago
+}
+gui-last-run-on = on { $date }
+# The single state line of a host card.
+gui-state-line-needs-fix = Needs fix
+gui-state-line-not-yet = Not yet
+gui-state-line-last-run = Last run { $when }
+gui-state-line-idle = Ready
+gui-state-line-server = { $state } | { $address }
+# Why a record says a host needs attention, one message per recorded reason.
+gui-attention-unsupported-loader = The source uses a loader Ephervex does not support: { $detail }
+gui-attention-unsupported-launch-customization = The source uses launch settings that cannot be reproduced: { $detail }
+gui-attention-ignored-unsafe-customization = A { $detail } from the source was not run
+gui-attention-missing-root = The instance folder is missing
+gui-attention-best-effort-server-conversion = This server was converted on a best-effort basis and may contain client-only mods
+gui-attention-manual-download-required = { $detail } must be downloaded manually
+gui-attention-unknown-server-applicability = { $detail } declares no server side and was left out
+gui-attention-interrupted-mutation = An interrupted change left files that need review
+gui-attention-unknown = A newer Ephervex recorded a problem this version cannot describe
+# The Home page's greeting by time of day, and the same without an account name.
+gui-home-greeting-morning = Good morning
+    .named = Good morning, { $name }
+gui-home-greeting-afternoon = Good afternoon
+    .named = Good afternoon, { $name }
+gui-home-greeting-evening = Good evening
+    .named = Good evening, { $name }
+# The Home page's sections and the names its buttons carry for assistive technology.
+gui-home-running-now = Running now
+gui-home-attention = Needs your attention
+gui-home-attention-empty = Nothing needs your attention.
+gui-home-attention-mark = Needs attention
+gui-home-attention-open = Open { $value }
+gui-home-continue = Continue where you left off
+gui-home-launch-host = Launch { $value }
+gui-home-open-host = Open { $value }
+gui-home-stop-host = Stop { $value }
+gui-home-more-host = More actions for { $value }
+gui-home-cancel-operation = Cancel { $value }
+
+# The Home page's right column: how many hosts there are, how full the shared download cache is, and two tips.
+gui-home-storage = Storage
+gui-home-storage-temporary = Temporary
+gui-home-storage-persistent = Persistent
+gui-home-storage-servers = Servers
+gui-home-cache-title = Shared download cache
+gui-home-cache-usage = { $first } / { $second }
+gui-home-cache-usage-approximate = at least { $first } / { $second }
+gui-home-cache-unlimited = { $value } used, no limit
+gui-home-cache-unlimited-approximate = at least { $value } used, no limit
+gui-home-cache-unreadable = Size could not be read.
+gui-home-cache-note = Temporary instances remain until the system clears its temporary storage. Removing cached downloads only costs a re-download.
+gui-home-tips = Tips
+gui-home-tip-open = Press a card in the list to open it.
+gui-home-tip-pair = Use { $value } on an instance with a linked server to see both side by side.
+
+gui-home-summary-running = { $count } running
+gui-home-summary-problems = { $count ->
+    [one] 1 problem
+   *[other] { $count } problems
+}
+gui-home-summary-building = { $count } building
+gui-home-summary-separator = { " | " }
 gui-process-usage = { $cpu }% CPU | { $memory }
 gui-stop-game = Stop Game
 gui-force-stop = Force Stop
@@ -2210,42 +2285,27 @@ error-connect-supervisor-lost = Supervision for server { $server } ended unexpec
 ## Desktop interface
 
 gui-import-modpack = Import Modpack
-gui-new-instance = + New Instance
-gui-new-server = + New Server
 gui-refresh = Refresh
 gui-instances = Instances
-gui-instances-detail = Exact client environments for focused reproduction work.
 gui-servers = Servers
-gui-servers-detail = Standalone and linked dedicated servers managed by Ephervex.
-gui-logs = Logs
 gui-activity = Activity
 gui-settings = Settings
-gui-settings-detail = Application, runtime, account, provider, and storage defaults.
 gui-creation-already-running = This creation request is already in progress.
-gui-creation-pending-detail = Validation and preparation are in progress. The finished environment will appear here automatically.
 gui-reset = Reset
 gui-state-creating = Creating
-# The badge an instance carries while a linked server is being built for it.
-gui-state-creating-server = Creating server
 # The row's own line before the work reports anything more specific. Kept
 # to one short line, because it stands where the instance's source line does.
 gui-creating-linked-server = Preparing the linked server
 gui-state-ready = Ready
 gui-state-starting = Starting
 gui-state-starting-detail = Preparing the runtime process
-gui-tagline = Spawn. Reproduce. Despawn.
+gui-tagline = Disposable Minecraft environments for reproducing bugs.
 gui-all = All
 gui-temporary = Temporary
 gui-persistent = Persistent
-gui-filter-instances = Filter instances...
 gui-loading-instances = Loading instances...
 gui-no-client-instances = No client instances yet
 gui-no-client-instances-detail = Create an exact Vanilla, Forge, or NeoForge environment, or import a supported modpack.
-gui-client-instances-count = { $count ->
-    [one] 1 client instance
-   *[other] { $count } client instances
-}
-gui-instances-shown-of-total = { $first } of { $second } instances
 gui-favorites = Favorites
 gui-favorites-only = Show only favorites
 gui-more-filters = Filters
@@ -2281,21 +2341,29 @@ gui-sort-name = Name
 gui-sort-minecraft = Minecraft version
 gui-sort-loader = Loader
 gui-filter-hosts = Filter instances and servers...
+gui-search-hosts = Search...
+# The chip on a client card that has linked servers.
+gui-host-card-servers = { $count ->
+    [one] server
+   *[other] { $count } servers
+}
+# The state line of a host that is still being created.
+gui-host-card-building = Building
+gui-host-card-building-percent = Building { $value }%
+# The empty section lines of the host list.
+gui-host-list-no-instances = No instances to show
+gui-host-list-no-servers = No servers to show
 gui-favorite-host = Mark { $value } as a favorite
 gui-unfavorite-host = Remove { $value } from favorites
 gui-add-favorite = Add to favorites
 gui-remove-favorite = Remove from favorites
-gui-organization = Organization
 gui-group = Group
 gui-remove-from-group = Remove from group
-gui-not-in-a-group = Not in a group
-gui-hint-not-in-a-group = This instance is not in a group.
 gui-set-group = Set group
 gui-new-group = New group
 gui-new-group-ellipsis = New group...
 gui-create-group = Create
 gui-delete-group = Delete
-gui-manage-groups-ellipsis = Manage groups...
 gui-groups = Groups
 gui-modal-groups = Groups
 gui-modal-new-group = New group
@@ -2314,16 +2382,6 @@ gui-choose-icon = Choose icon
 gui-choose-icon-ellipsis = Choose icon...
 gui-remove-icon = Remove icon
 gui-icon-images = PNG and JPEG images
-gui-attention = ATTENTION
-gui-managed-mods-count = { $count ->
-    [one] 1 managed mod
-   *[other] { $count } managed mods
-}
-gui-linked-servers-count = { $count ->
-    [one] 1 linked server
-   *[other] { $count } linked servers
-}
-gui-source-instance = { $value } instance
 gui-launch = Launch
 gui-launch-as = Launch as
 gui-add-account = Add account...
@@ -2331,23 +2389,12 @@ gui-launch-unavailable = Launch unavailable
 gui-start = Start
 gui-stop = Stop
 gui-unavailable = Unavailable
-gui-no-instance-selected = No instance selected
-gui-select-instance = Select an instance to inspect it.
 gui-open = Open
-gui-overview = OVERVIEW
-gui-status = Status
 gui-minecraft = Minecraft
 gui-loader = Loader
-gui-source = Source
-gui-mods = Mods
-gui-managed-count = { $count } managed
 gui-storage = Storage
-gui-actions = ACTIONS
-gui-needs-attention = Needs attention
-gui-ready = Ready
 gui-ready-to-launch = Ready to launch
 gui-busy = Busy
-gui-launch-connect = Launch & Connect to { $value }
 gui-open-workspace = Open Workspace
 gui-create-linked-server = Create Linked Server
 gui-open-folder = Open Folder
@@ -2393,7 +2440,10 @@ gui-delete-instance-while-running = Delete Instance (stop the game first)
 gui-delete-server = Delete Server...
 gui-delete-instance-detail = Remove "{ $value }" from Ephervex?
 gui-delete-server-detail = Remove "{ $value }" from Ephervex?
-gui-delete-choice-detail = Keeping files only removes the Ephervex record. Deleting files permanently removes the managed game or server directory.
+gui-delete-keep-title = Keep files
+gui-delete-keep-detail = Removes it from Ephervex. Its folder stays on disk.
+gui-delete-files-title = Delete files
+gui-delete-files-detail = Deletes its folder, including worlds, mods, and logs. This cannot be undone.
 gui-delete-host-snapshots =
     { $count ->
         [one] Deleting files also deletes 1 retained snapshot.
@@ -2433,9 +2483,14 @@ gui-notification-repeat = x{ $count }
 gui-fov-normal = Normal
 gui-fov-quake-pro = Quake Pro
 gui-select-all = Select All
-gui-diagnostics = DIAGNOSTICS
-gui-view-logs-crash-reports = View Logs & Crash Reports
-gui-back-instances = Back to Instances
+# Leaving a split of panes for the start page.
+gui-back-home = Back to Home
+gui-home = Home
+# Leaving the settings for the page they were opened over.
+gui-settings-back = Back
+gui-account-switch = Choose the default account
+gui-account-current = Default account { $value }. Choose another
+gui-account-manage = Manage accounts
 # A workspace pane whose client or server was deleted while it was shown.
 gui-workspace-host-gone = No longer installed
 gui-workspace-host-gone-detail = This client or server was removed. Choose another host for this pane or close it.
@@ -2450,6 +2505,13 @@ gui-host-choice-server = Server: { $value }
 # What assistive technology calls a pane: where it is, its host, and its view.
 gui-pane-label = { $position } pane: { $host }, { $surface }
 gui-pane-label-single = { $host }, { $surface }
+gui-pane-label-quick-view = Quick view: { $host }, { $surface }
+gui-quick-view = Quick view
+gui-quick-view-for = Quick view of { $value }
+gui-quick-view-open-as-page = Open as page
+gui-quick-view-fullscreen = Fullscreen
+gui-quick-view-exit-fullscreen = Exit fullscreen
+gui-quick-view-close = Close quick view
 gui-pane-left = Left
 gui-pane-right = Right
 gui-pane-top-left = Top left
@@ -2457,6 +2519,38 @@ gui-pane-bottom-left = Bottom left
 gui-pane-top-right = Top right
 gui-pane-bottom-right = Bottom right
 gui-pane-host = Host shown in { $value }
+
+# The Case tab of an instance: the steps that reproduce a bug, how often it
+# happened, and a note.
+gui-instance-tab-case = Case
+gui-case-steps = Steps
+gui-case-progress = { $first } of { $second } done
+gui-case-no-steps = No steps yet. Write down what it takes to make the bug happen.
+gui-case-add-step = Add a step
+gui-case-add-step-placeholder = Add a step...
+gui-case-add = Add
+gui-case-add-step-hint = Type what to do before adding a step.
+gui-case-remove-step = Remove the step "{ $value }"
+gui-case-remove-step-tooltip = Remove this step
+gui-case-reproduced = Reproduced
+gui-case-not-reproduced = Not seen again yet
+gui-case-reproduced-count = { $count ->
+    [one] Seen again once
+   *[other] Seen again { $count } times
+}
+gui-case-reproduced-it = Reproduced it
+gui-case-reset-count = Reset
+gui-case-note = Note
+gui-case-note-placeholder = What happens, what you expected, anything that helps to reproduce it...
+gui-case-save-note = Save note
+gui-case-note-saved = The note has no unsaved changes.
+
+# A host's mod count on its page header.
+gui-host-chip-mods = { $count ->
+    [one] 1 mod
+   *[other] { $count } mods
+}
+
 gui-workspace-more-surfaces = More
 gui-pane-split-below = Add a pane below { $value }
 gui-pane-close = Close { $value }
@@ -2464,19 +2558,14 @@ gui-pane-split-below-tooltip = Add a pane below
 gui-pane-close-tooltip = Close pane
 # A host action inside one pane, named with the pane: (action, pane).
 gui-pane-action = { $first } ({ $second })
-gui-instance = Instance
 gui-instance-tab-overview = Overview
 gui-instance-tab-mods = Mods
 gui-instance-tab-settings = Settings
 gui-instance-tab-logs = Logs
-gui-reproduction-environment = Reproduction Environment
-gui-reproduction-environment-detail = Exact target, retained source details, and safe actions for this client instance.
 gui-target-summary = Minecraft { $first } | { $second }
 gui-open-diagnostics = View Diagnostics
 gui-temporary-lifecycle = Temporary instances remain until the operating system clears its temporary storage. Make Persistent moves this one out of it, keeping its name, its mods and its linked servers.
 gui-persistent-lifecycle = This instance is stored under the persistent instance root.
-gui-managed-mods = Managed Mods
-gui-managed-mods-detail = Every mod in this instance: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 # Filters the list of mods an instance or server already has, by name.
 gui-filter-mods = Filter mods...
 gui-no-mods-match-title = No matches
@@ -2491,7 +2580,6 @@ gui-restore-mod = Restore
 gui-mod-restored = Put the mod back.
 gui-mod-loads = Load { $value }
 gui-server-mods = Server mods
-gui-server-mods-detail = Every mod on this server: the ones its pack brought, the ones you installed, and any jar you added yourself. Drop JARs here to add them.
 gui-no-server-mods-detail = This server was not built from a pack, so nothing here is recorded as belonging to it.
 # Shown when the mod's exact release cannot be proven from what Ephervex
 # recorded. The file is installed; only its version is unknown.
@@ -2557,6 +2645,11 @@ gui-mod-remove-no-dependencies = Nothing else was installed only for it.
 gui-mod-remove-dependencies-unprovable = Ephervex could not confirm which mods are still needed, so none will be collected.
 gui-mod-remove-action = Remove Mod
 gui-add-mods = Add Mods
+gui-modal-add-mods-for = Add mods for { $value }
+gui-mods-shown = { $count ->
+    [one] 1 mod shown | drop .jar files on the window to add your own
+   *[other] { $count } mods shown | drop .jar files on the window to add your own
+}
 gui-catalog-compatibility = Search results are constrained to this instance's exact Minecraft version and loader.
 gui-mod-catalog = Catalog
 gui-provider-modrinth = Modrinth
@@ -2601,11 +2694,7 @@ gui-allow-pack-mod-changes-server-toggle = Let me change and remove this server'
 gui-instance-settings-unavailable = Instance-owned Minecraft settings
 gui-instance-settings-unavailable-detail = The current core safely applies known Vanilla defaults when an instance is created, but does not expose a typed editor for an existing instance. Unknown and mod-added options remain untouched.
 gui-open-global-defaults = Open Global Defaults
-gui-filter-servers = Filter servers...
-gui-loading-servers = Loading servers...
-gui-no-servers = No servers yet
 gui-no-servers-detail = Create a standalone exact server or create one linked to a client reproduction environment.
-gui-no-standalone-servers-detail = No standalone servers are shown. Linked servers remain available from their client workspaces.
 gui-linked-server = Linked Server
 gui-paired = Paired
 gui-paired-with = Paired with
@@ -2635,21 +2724,14 @@ gui-repair-server = Repair
 gui-server-repaired = Cleared the stale runtime state. The server can be started again.
 gui-server-needs-attention = This server needs attention before it can be started reliably.
 gui-back-instance = Back to Instance
-gui-no-server-selected = No server selected
-gui-select-server = Select a server to inspect its runtime.
 gui-state = State
-gui-target = Target
-gui-relation = Relation
-gui-address = Address
 gui-open-server-workspace = Open Server Workspace
 gui-launch-client-connect = Launch Client & Connect
 gui-force-kill = Force Kill...
-gui-back-servers = Back to Servers
 gui-server = Server
 gui-restart = Restart
 gui-server-tab-console = Console
 gui-server-tab-properties = Properties
-gui-server-run = Server run
 gui-server-run-detail = Runtime state, exact target, network endpoint, and linked client relationship.
 gui-dedicated-server = Dedicated Server
 gui-exact-target = Exact target
@@ -2685,7 +2767,7 @@ gui-property-group-advanced = Advanced
 gui-server-settings = Server settings
 gui-server-settings-detail = Typed settings from server.properties. Other entries in the file are kept as they are. Open Server Folder to edit the rest.
 gui-server-settings-advanced = Show advanced
-gui-settings-server-properties = Server Properties
+gui-settings-server-properties = Server defaults
 gui-server-defaults-intro = Defaults for the server.properties of new servers.
 gui-server-defaults-detail = A value set here is written into every new server's server.properties that does not already have one, including servers built from a pack's server files. Servers that exist are not changed. Without a value, a new server uses Minecraft's own default.
 gui-server-defaults-saved = Saved the server.properties defaults.
@@ -2823,6 +2905,9 @@ gui-search-open-log = Search the open log...
 gui-find = Find
 gui-copy = Copy
 gui-folder = Folder
+gui-overview-issue = Issue
+gui-overview-java = Java
+gui-overview-memory = Memory
 gui-no-file-open = No file open
 gui-no-file-open-detail = Choose a log or crash report. Ephervex reads a bounded, safe text window through diagnostics services.
 gui-copy-path = Copy Path
@@ -2862,13 +2947,12 @@ gui-live-log-search-matches = { $count ->
 gui-live-latest-log = Live / Latest Log
 gui-crash-reports = Crash Reports
 gui-log-files = Log Files
-gui-activity-detail = Current and recent work while Ephervex is running. Activity is not persisted across application restarts.
-gui-no-recent-activity = No recent activity
 gui-no-recent-activity-detail = Creation, imports, installations, launches, and server work will appear here.
 gui-cancel = Cancel
 gui-open-in-browser = Open in Browser
 gui-skip = Skip
-gui-settings-heading = SETTINGS
+gui-settings-heading = Settings
+gui-settings-escape-hint = Esc to go back
 gui-settings-general = General
 gui-settings-minecraft = Minecraft
 gui-settings-java = Java
@@ -2878,15 +2962,11 @@ gui-settings-storage = Storage
 gui-settings-about = About & Licenses
 gui-application-behavior = Application behavior
 gui-application-display = Application display
-gui-application-display-detail = These settings affect Ephervex only. They do not change Minecraft's GUI scale.
+gui-application-display-detail = how Ephervex itself looks
 gui-application-text-size = Interface text size
-gui-application-text-size-detail = Adjust text across Ephervex while keeping the desktop layout and controls at their normal size.
+gui-application-text-size-detail = Scales the whole interface.
 gui-application-color-scheme = Interface theme
-gui-application-color-scheme-detail = The colors Ephervex paints itself in. Minecraft is unaffected.
-gui-theme-problems-summary = { $count ->
-    [one] 1 problem in the themes folder.
-   *[other] { $count } problems in the themes folder.
-}
+gui-application-color-scheme-detail = Themes are read from the themes folder.
 gui-show-theme-problems = Show problems
 gui-modal-theme-problems = Theme problems
 gui-theme-problems-detail = What could not be used in { $value }. A skipped theme is not offered in the theme menu, and anything else that was ignored falls back to its default. Fix the file and press Refresh to read the themes again.
@@ -2899,7 +2979,7 @@ gui-theme-problem-too-large = Skipped. The file is larger than a theme can be.
 gui-theme-problem-syntax = Skipped. Line { $line }: { $value }
 gui-theme-problem-newer-format = Skipped. The file uses theme format { $count }, which this version of Ephervex cannot read.
 gui-theme-problem-invalid-field = Skipped. "{ $value }" has the wrong type.
-gui-theme-problem-unknown-parent = Skipped. "{ $value }" is not a built-in theme. Use "dark" or "light".
+gui-theme-problem-unknown-parent = Skipped. "{ $value }" is not a built-in theme. Use "workbench", "dark", or "light".
 gui-theme-problem-invalid-color = Skipped. The color for "{ $value }" is not written as "#rrggbb" or "#rrggbbaa".
 gui-theme-problem-unknown-color = "{ $value }" is not a theme color and was ignored.
 gui-theme-problem-unknown-key = "{ $value }" is not a theme setting and was ignored.
@@ -2923,39 +3003,38 @@ gui-theme-branding-format-mismatch = The contents are not the image type the fil
 gui-theme-branding-malformed = Not a valid image. The default is shown instead.
 gui-theme-branding-decode-limit = Needs more memory to decode than a branding image may use. The default is shown instead.
 gui-theme-branding-unreadable = Could not be read. The default is shown instead.
-gui-color-scheme-dark = Dark
 gui-color-scheme-light = Light
+gui-color-scheme-dark = Dark
 gui-seasonal-themes = Seasonal themes
-gui-seasonal-themes-detail = Dress Ephervex up for special days in place of Dark or Light. Your own themes are never replaced, and your chosen theme comes back afterward.
+gui-seasonal-themes-detail = Dress Ephervex up for special days. Your own themes are never replaced, and your chosen theme comes back afterward.
 gui-seasonal-theme-shown = The { $season } theme is shown right now. Turn this off to see { $value } again.
 gui-seasonal-theme-halloween = Halloween
 gui-seasonal-theme-christmas = Christmas
 gui-seasonal-theme-pride = Pride Month
 gui-seasonal-theme-april-fools = April Fools
 gui-technical-text-size = Diagnostics and console text
-gui-technical-text-size-detail = Set the monospace size used for selectable logs, crash reports, and server console output.
+gui-technical-text-size-detail = Logs, consoles and crash reports.
 gui-text-scale-90 = 90%
-gui-text-scale-100 = 100% (Default)
+gui-text-scale-100 = 100% · Default
 gui-text-scale-110 = 110%
 gui-text-scale-125 = 125%
-gui-technical-size-11 = Compact (11 px)
-gui-technical-size-12 = Default (12 px)
-gui-technical-size-14 = Comfortable (14 px)
-gui-technical-size-16 = Large (16 px)
+gui-technical-size-11 = Compact · 11 px
+gui-technical-size-12 = Default · 12 px
+gui-technical-size-14 = Comfortable · 14 px
+gui-technical-size-16 = Large · 16 px
 # $value is a Minecraft release id and is never translated.
 gui-favorite-version = Offer Minecraft { $value } first
 gui-unfavorite-version = Stop offering Minecraft { $value } first
 gui-favorite-versions = Favorite Minecraft versions
-gui-favorite-versions-detail = Releases you reproduce against often. They are offered first everywhere a Minecraft version is chosen.
-gui-no-favorite-versions = No favorites yet. Star a release in the New Instance dialog to pin it here.
+gui-favorite-versions-detail = pinned first in every version list
+gui-no-favorite-versions = No favorites yet.
 gui-linked-server-defaults = Linked server defaults
-gui-linked-server-defaults-detail = Control where linked servers appear and how new development servers configure the selected account.
+gui-linked-server-defaults-detail = for servers created from an instance
 gui-show-linked-servers = Show linked servers in Servers
-gui-show-linked-servers-detail = List a server built from an instance on the Servers page as well, rather than only under the instance it belongs to.
+gui-show-linked-servers-detail = When off, linked servers only appear on their instance.
 gui-default-account-operator = Make the default account an operator
-gui-default-account-operator-detail = Applies to new servers, and only where the account's identity is compatible with the server.
+gui-default-account-operator-detail = Adds the account you launch with to the operator list.
 gui-default-operator-level = Default operator permission level
-gui-default-operator-level-detail = Applies to the individual ops.json entry on new servers.
 gui-operator-level-1 = 1 - Basic commands
 gui-operator-level-2 = 2 - Game management
 gui-operator-level-3 = 3 - Player management
@@ -2964,10 +3043,12 @@ gui-operator-level-invalid = Choose an operator permission level from 1 through 
 gui-port-automatic = Automatic port
 gui-port-automatic-detail = Starts at 25565 and uses the next locally available port when needed.
 gui-port-custom = Custom port
+gui-port-custom-detail = New servers are offered this port.
 gui-display-settings-invalid = Select one of the available display sizes.
 gui-minecraft-defaults-title = Minecraft defaults
-gui-minecraft-defaults-detail = These settings are applied to new client instances and imports. Existing instances are not changed.
+gui-minecraft-defaults-detail = Applied to new client instances and imports. Existing instances are unchanged. Only overridden settings are written to options.txt.
 gui-minecraft-forget = Reset
+gui-minecraft-forget-nothing = This setting is not overridden, so there is nothing to reset.
 gui-minecraft-advanced = Advanced
 gui-minecraft-unsaved = Unsaved
 gui-minecraft-unsaved-count = { $count ->
@@ -2982,7 +3063,6 @@ gui-minecraft-filter = Filter settings...
 gui-minecraft-show-advanced = Show advanced
 gui-minecraft-only-overridden = Only overridden
 gui-minecraft-preview = Compatibility preview
-gui-minecraft-preview-detail = Pick a Minecraft release to see what it would do with these defaults. Nothing configured here changes.
 gui-minecraft-no-matches = Nothing matches
 gui-minecraft-no-matches-detail = No setting in this category matches the filter. Clear it, turn on advanced settings, or try another category.
 gui-minecraft-category-gameplay = Gameplay
@@ -3002,8 +3082,12 @@ gui-minecraft-section-creative = Creative
 gui-minecraft-section-spectator = Spectator
 gui-minecraft-section-misc = Miscellaneous
 gui-minecraft-section-debug = Debug
-gui-minecraft-state-overridden = Override
+gui-minecraft-state-overridden = Overridden
 gui-minecraft-state-not-overridden = Not overridden
+gui-minecraft-state-default = { $state } · default { $value }
+gui-minecraft-value-on = On
+gui-minecraft-nothing-to-forget = Nothing is overridden for this setting.
+gui-minecraft-value-off = Off
 gui-minecraft-compat-supported = Supported
 gui-minecraft-compat-unavailable = Unavailable
 gui-minecraft-compat-unverified = Unverified
@@ -3075,23 +3159,21 @@ gui-minecraft-defaults-saved = Saved the Minecraft defaults.
 gui-minecraft-defaults-discarded = Discarded the unsaved Minecraft defaults.
 gui-discard-changes = Discard Changes
 gui-clear = Clear
-gui-java-detail = Runtime discovery and JVM defaults are owned by the application services.
 gui-java-detect = Detect installed Java runtimes
-gui-java-detect-detail = Look for runtimes on PATH, under JAVA_HOME, in the system JVM directories, and in SDKMAN.
+gui-java-detect-detail = Looks on PATH, in JAVA_HOME, in the system folders and in SDKMAN.
 gui-java-download = Download a managed runtime when needed
-gui-java-download-detail = Fetch a Temurin build when an instance needs a Java version this machine does not have.
+gui-java-download-detail = When no installed runtime fits, Ephervex downloads one and keeps it in its own folder.
 gui-java-memory = Memory per instance
-gui-java-memory-detail = What each instance's JVM is given, unless that instance sets its own.
+gui-java-memory-detail = Instances that set their own memory keep it.
 gui-java-memory-min = Minimum memory (MiB)
 gui-java-memory-max = Maximum memory (MiB)
+gui-java-memory-unit = MiB
 gui-java-preferred = Preferred Java executable
-gui-java-preferred-detail = Used wherever an instance has no runtime of its own. Leave it empty to let Ephervex choose one.
+gui-java-preferred-detail = Leave empty to let Ephervex choose.
 gui-java-runtimes = Installed runtimes
-gui-java-runtimes-detail = Every runtime this machine offers, and where each one was found.
 gui-java-no-runtimes = No runtimes found yet.
 gui-java-no-runtimes-detail = Refresh Runtimes scans PATH, JAVA_HOME, the system JVM directories, and SDKMAN again.
 gui-java-refresh = Refresh Runtimes
-gui-java-save = Save Java Settings
 gui-java-remove-runtime = Remove { $value }
 gui-java-remove-runtime-title = Remove Java Runtime
 gui-java-remove-runtime-detail = Delete the downloaded Java runtime { $value }?
@@ -3103,8 +3185,8 @@ gui-java-pinned-server = server { $name }
 gui-java-pinned-launcher = the launcher preference
 gui-java-pins-unknown = Could not check which settings pin this runtime
 gui-java-remove-runtime-pins-unknown = Ephervex could not read every instance and server, so it cannot say which of them pin this runtime. Any that do will name a runtime that is gone.
-gui-accounts-detail = Access tokens and refresh credentials are never displayed. Microsoft credentials use the desktop keyring when available.
-gui-offline-account-placeholder = Offline player name
+gui-accounts-detail = Tokens stay in the system keyring and are never shown.
+gui-offline-account-placeholder = Player name
 gui-add-offline-account = Add Offline Account
 gui-microsoft-sign-in = Sign in with Microsoft
 gui-no-accounts = No accounts
@@ -3266,7 +3348,6 @@ gui-hint-restart-server-stopped = Restart is available while the server is runni
 gui-hint-needs-attention = This instance needs attention before it can launch.
 gui-hint-stop-host-first = This is available only while the host is stopped. Stop it first.
 gui-hint-force-kill-server = Force kill is available while the server is running.
-gui-hint-restart-in-progress = A restart is already under way.
 gui-hint-restart-client-stopped = Restart is available while the game is running.
 gui-hint-restart-server-unavailable = Restart is available while the server is running and no start, stop, or command is under way.
 gui-hint-stop-server-uncontrolled = Ephervex has no live control channel to this server, so it cannot stop it from here.
@@ -3311,7 +3392,6 @@ gui-hint-nothing-to-apply = There are no changes to apply.
 gui-hint-enter-command = Type a command first.
 gui-hint-isolation-recovery = Restore the round's mod setup first with Try again.
 gui-hint-nothing-to-undo = There is nothing to undo.
-gui-curseforge = CurseForge
 # Shown where this build carries a key of its own, so CurseForge works
 # without the user doing anything.
 gui-curseforge-detail-default = Set your own CurseForge API key to override the existing Ephervex key.
@@ -3332,25 +3412,16 @@ gui-curseforge-key-saved = Stored the CurseForge API key in the system keyring.
 gui-curseforge-key-removed = Removed the CurseForge API key from the system keyring.
 gui-curseforge-key-help-opened = Opened the CurseForge API key page in your browser.
 gui-curseforge-key-help-failed = Could not open a browser. Visit the CurseForge support site to apply for an API key.
-gui-storage-detail = Temporary instances use the operating system's temporary directory. Ephervex does not delete them when Minecraft exits; the operating system owns cleanup.
-gui-storage-root = Persistent instance root (leave empty for the XDG default)
-gui-save-storage-root = Save Storage Root
-gui-persistent-storage = Persistent environments
-gui-persistent-storage-detail = Choose where new persistent instances and servers are stored. Existing environments are not moved.
 gui-choose-folder = Choose Folder
 gui-choose-persistent-root = Choose the persistent instance root
-gui-custom-location = CUSTOM
-gui-default-location = DEFAULT
-gui-effective-location = Current location: { $value }
 gui-default-location-path = Default location: { $value }
-gui-storage-change-future-only = Changing this location affects future persistent environments. Existing instance and server directories stay where they are.
 gui-watched-download-folders = Watched download folders
-gui-watched-download-folders-detail = When a mod author disables third-party downloads, Ephervex watches these folders for a manually downloaded copy and matches it by hash. Defaults to your Downloads folder until you add or remove one here.
+gui-watched-download-folders-detail = checked for mods you download by hand
 gui-watched-download-folders-empty = No folders configured. Ephervex watches your Downloads folder by default.
 gui-add-watched-folder = Add Folder
 gui-choose-watched-folder = Choose a folder to watch
-gui-artifact-cache = Reusable artifact cache
-gui-artifact-cache-detail = Downloaded mods, pack files, loader installers, and runtime archives are kept so importing the same pack twice costs no network. Instances and servers own their own copies, so removing an entry only costs a re-download.
+gui-artifact-cache = Shared download cache
+gui-artifact-cache-detail = downloaded packs, mods and installers kept so they are not fetched twice
 gui-artifact-cache-usage = { $first } of { $second } used
 gui-artifact-cache-usage-approximate = at least { $first } of { $second } used
 gui-artifact-cache-limit = Limit
@@ -3359,24 +3430,12 @@ gui-artifact-cache-unlimited = Unlimited
 gui-artifact-cache-custom = Custom
 gui-artifact-cache-custom-value = Size
 gui-artifact-cache-over-budget = OVER BUDGET
-gui-artifact-cache-cleanup-note = When usage passes the limit, the oldest downloads are removed until about four fifths of the limit is in use. Downloads in progress and artifacts an operation is still using are never removed.
 gui-artifact-cache-limit-saved = Saved the reusable artifact cache limit.
-gui-save-artifact-cache-limit = Save Limit
 gui-logo-accessible = Ephervex application logo
-gui-version = Version { $value }
-gui-apache-license = Licensed under the Apache License 2.0
-gui-view-ephervex-license = View Ephervex License
-gui-built-with-slint = Built with Slint
-gui-third-party-software = Third-Party Software
-gui-third-party-detail = Ephervex depends on open-source software with its own license terms.
-gui-third-party-licenses = Third-Party Licenses
+gui-view-ephervex-license = License
+gui-third-party-software = Open-source licenses
 # How far through a stage that counts in whole things rather than bytes.
 gui-operation-item-count = { $current } of { $total }
-gui-active-operations = { $count ->
-    [one] 1 active operation
-   *[other] { $count } active operations
-}
-gui-no-active-tasks = No active tasks
 gui-activity-minecraft-running = Minecraft is running
 gui-kill-instance = Kill Instance
 gui-kill-instance-requested = Stopping Minecraft.
@@ -3388,13 +3447,10 @@ gui-modal-new-server = New Server
 gui-modal-install-mod = Install Mod
 gui-modal-force-kill = Force Kill Server
 gui-modal-apache-license = Apache License 2.0
-gui-create-instance-detail = Create an exact client environment. Temporary storage is the default.
 gui-name = Name
 gui-minecraft-release = Minecraft release
 gui-loader-version-placeholder = Exact loader version
 gui-store-persistently = Store persistently
-gui-persistent-root = Persistent instance root
-gui-temporary-root = Operating system temporary directory
 gui-create-instance = Create Instance
 gui-import-detail = Supported archives are inspected and imported through Ephervex application services. Imported commands and unsafe paths are never executed.
 gui-modpack-archive = Modpack archive
@@ -3406,8 +3462,6 @@ gui-instance-name-optional = Instance name (optional)
 gui-import-create-server = Also create a linked server
 gui-import-create-server-detail = Built from the same pack once the instance is in place. It is not started.
 gui-detected-pack-name = Use the detected pack name
-gui-create-linked-server-detail = Create and materialize a server linked to the selected client's retained recipe.
-gui-create-standalone-server-detail = Create and install a standalone exact server.
 gui-eula-create-warning = EULA consent is not implied. Starting is blocked until you explicitly review and accept it.
 gui-create-server = Create Server
 gui-mod-plan-compatible = Ephervex core checked compatibility with the selected instance.
@@ -3452,8 +3506,8 @@ gui-force-kill-action = Force Kill
 # The list is generated from this build's own dependency graph, so it describes
 # exactly what this copy contains.
 gui-third-party-summary = { $crates ->
-    [one] 1 open-source package, under { $licenses } license texts
-   *[other] { $crates } open-source packages, under { $licenses } license texts
+    [one] 1 package
+   *[other] { $crates } packages
 }
 gui-third-party-note = Every license here also ships beside Ephervex in full, as THIRD-PARTY-LICENSES.md.
 gui-third-party-select = Select a package to read the license it is under.
@@ -3461,7 +3515,6 @@ gui-third-party-select = Select a package to read the license it is under.
 # damaged build rather than a missing report.
 gui-third-party-broken = This build's third-party license list could not be read. Reinstall Ephervex, or download the release again.
 gui-third-party-back = Back to the list
-gui-slint-attribution = Slint attribution is available directly in About & Licenses through Slint's official AboutSlint widget.
 gui-close = Close
 gui-clipboard-copied = Copied to the clipboard.
 gui-clipboard-unavailable = The desktop clipboard is unavailable.
@@ -3534,6 +3587,9 @@ gui-import-duplicate-matches-version = Matches this pack's Minecraft version; th
 gui-import-duplicate-newer = Neither file names this pack's Minecraft version, so the more recently published one was kept.
 gui-created-entity = Created "{ $value }".
 gui-imported-pack = Imported "{ $value }".
+gui-created-with-server = Created "{ $value }" and its linked server.
+gui-created-server-failed = Created "{ $first }", but its linked server could not be created: { $second }
+gui-created-server-canceled = Created "{ $value }". Creating its linked server was canceled.
 gui-imported-pack-server-failed = Imported "{ $first }", but its linked server could not be created: { $second }
 gui-imported-pack-server-canceled = Imported "{ $value }". Creating its linked server was canceled.
 gui-folder-unavailable = Folder unavailable.
@@ -3559,15 +3615,11 @@ gui-mod-stood-in = { $installed } is used in place of { $planned }.
 gui-stop-requested = Stop requested.
 gui-state-restarting = Restarting
 gui-settings-disk-usage = Disk usage
-gui-disk-usage-page-detail = How much space Ephervex's own directories hold, and what for.
 gui-settings-diagnostics = Diagnostics
-gui-launcher-diagnostics-detail = Ephervex's own logs, for a problem that starts in the launcher.
 gui-launcher-bundle-title = Launcher log
-gui-launcher-bundle-detail = Collects Ephervex's own log into one zip file. A problem with a client or server often starts here, so attach it beside that host's bundle.
+gui-launcher-bundle-detail = what Ephervex itself did: downloads, launches, errors
 gui-launcher-bundle-empty = Ephervex has not written a log yet.
-gui-disk-usage-title = Storage
-gui-disk-usage-detail = Measures Ephervex's instances, servers, caches, and records. Measuring never deletes or changes anything.
-gui-disk-usage-metric = Sizes are the files' own lengths. Copy-on-write snapshots and sparse files can take up less actual disk space than shown. A file with several hard links is counted once, and linked folders are not followed.
+gui-disk-usage-title = Disk usage
 gui-disk-usage-measure = Measure
 gui-disk-usage-refresh = Measure again
 gui-disk-usage-stop = Stop
@@ -3577,7 +3629,7 @@ gui-disk-usage-progress = { $count ->
     [one] One file counted so far
    *[other] { $count } files counted so far
 }
-gui-disk-usage-idle = Not measured yet. Measuring reads every file Ephervex keeps, which takes a while on a large installation.
+gui-disk-usage-idle = Not measured yet. Measuring reads every folder Ephervex manages; nothing is changed.
 gui-disk-usage-total = { $value } in total
 gui-disk-usage-measured-at = Measured at { $value }
 gui-disk-usage-incomplete = { $count ->
@@ -3622,8 +3674,7 @@ operation-verifying-storage = Checking shared files
 operation-recovering-storage = Fetching damaged files again
 operation-planning-storage-cleanup = Planning a storage cleanup
 operation-cleaning-storage = Cleaning up storage
-gui-storage-maintenance-title = Maintenance
-gui-storage-maintenance-detail = Looks at the files Ephervex downloaded and shares between instances and servers. Nothing is removed until you review a list and confirm it. Everything inside an instance or server, such as worlds, mods, configuration, snapshots, and recovery files, is never touched.
+gui-storage-maintenance-title = Storage cleanup
 gui-storage-inspect = Inspect
 gui-storage-inspect-again = Inspect Again
 gui-storage-verify = Check Integrity
@@ -3633,7 +3684,6 @@ gui-storage-stop = Stop
 gui-storage-working = Working...
 gui-storage-busy-hint = Another maintenance step is running. Wait for it to finish, or stop it.
 gui-storage-recover-hint = No damaged files that an instance needs were found. Check integrity first.
-gui-storage-idle = Not inspected yet. Inspecting reads the shared folders and what your instances and servers need from them.
 gui-storage-reclaimable = { $value } can be reclaimed
 gui-storage-nothing-reclaimable = Nothing can be reclaimed right now
 gui-storage-hosts = Based on { $clients ->
@@ -3758,7 +3808,6 @@ gui-storage-cleanup-not-reached = { $count ->
 }
 gui-storage-cleanup-retry = Reviewing the cleanup again is safe: it plans from what is on disk and in use at that moment.
 gui-storage-cleanup-outdated = That review is out of date. Review the cleanup again.
-gui-review-storage-cleanup = Review Storage Cleanup...
 gui-activity-restarting = Restarting
 gui-restart-stage-stopping = Stopping, to start it again once it has stopped
 gui-restart-stage-starting = Stopped. Starting it again
@@ -3940,3 +3989,142 @@ gui-operator-level = Level { $level }
 gui-operators-none = ops.json lists no operators.
 gui-operators-unreadable = ops.json could not be read.
 gui-operators-edit-hint = Change operators with the op and deop console commands. Ephervex does not rewrite ops.json while the server runs.
+
+gui-shell-show-list = Show instances and servers
+gui-shell-show-side = Show storage and tips
+gui-shell-hide-list = Hide instances and servers
+gui-shell-hide-side = Hide storage and tips
+gui-workspace-show-column = Show linked servers and storage
+gui-workspace-show-storage = Show storage
+gui-linked-server-attention = Needs attention
+gui-linked-servers-title = Linked servers
+gui-linked-server-start = Start { $value }
+gui-linked-server-being-built = A linked server is being built. Wait until it is ready.
+
+gui-issue-link = Issue link
+gui-issue-link-add = Add issue link
+gui-issue-link-edit = Edit
+gui-issue-link-save = Save
+gui-issue-link-placeholder = https://github.com/owner/repo/issues/42
+gui-issue-link-open = Open the issue link { $value }
+gui-issue-link-open-failed = The issue link could not be opened in the browser.
+
+gui-report-title = Copy summary for the issue
+gui-report-detail = Exactly this text is copied. Paste it into the bug report.
+gui-report-copy = Copy summary
+
+gui-issue-link-optional = Issue link (optional)
+gui-create-with-server = Also create a linked server
+gui-linked-server-name = Linked server name
+
+gui-mod-downloads = { $value } downloads
+
+gui-java-settings-heading = Runtimes
+gui-java-runtimes-found =
+    { $count ->
+        [one] { $count } found
+       *[other] { $count } found
+    }
+gui-java-managed = managed by Ephervex
+gui-java-origin-system = installed by the system
+gui-java-origin-sdkman = installed with SDKMAN
+gui-accounts-count =
+    { $count ->
+        [one] { $count } account
+       *[other] { $count } accounts
+    }
+gui-accounts-add-heading = Add an account
+gui-microsoft-account-detail = Needed for online-mode servers and to play with your own skin.
+gui-offline-account-detail = Any name. Offline accounts can join offline-mode servers only.
+gui-providers-catalogs-heading = Mod catalogs
+gui-minecraft-defaults-heading = Minecraft defaults
+gui-server-defaults-heading = Server defaults
+gui-java-origin-java-home = found through JAVA_HOME
+gui-java-origin-path = found on PATH
+gui-java-origin-user = chosen by you
+gui-java-origin-detected = detected on this machine
+gui-storage-locations = Locations
+gui-storage-instances = Instances
+gui-artifact-cache-budget = Budget
+gui-storage-shared-files = Shared files
+gui-storage-shared-files-detail = What instances and servers use from the shared folders.
+gui-storage-integrity = Integrity
+gui-storage-integrity-detail = Compares downloaded files with their hashes.
+gui-storage-unreferenced = Unreferenced files
+gui-storage-unreferenced-detail = Only entries no instance or server uses and that can be downloaded again.
+gui-launcher-bundle-privacy = Copied as-is and never uploaded.
+gui-launcher-bundle-save = Save launcher log bundle...
+gui-launcher-bundle-save-title = Save launcher log bundle
+gui-third-party-licenses = Third-Party Licenses
+gui-slint-attribution = Slint attribution is available directly in About & Licenses through Slint's official AboutSlint widget.
+gui-show-file = Show file
+gui-show-file-named = Show { $value }
+gui-source = Source
+gui-source-page-unavailable = Could not open a browser. The source is at the project's page on GitHub.
+gui-file-unavailable = Could not open the file with the desktop.
+gui-open-slint-page = Open the Slint website
+gui-slint-page-unavailable = Could not open a browser. The Slint website is slint.dev.
+gui-stamp-running = Running
+gui-stamp-starting = Starting
+gui-stamp-stopping = Stopping
+gui-stamp-stopped = Stopped
+gui-stamp-needs-fix = Needs fix
+gui-stamp-in-game = in game
+gui-stamp-problems = { $count ->
+    [one] 1 problem before it can start
+   *[other] { $count } problems before it can start
+}
+gui-stamp-reproduced = Reproduced ×{ $count }
+gui-stamp-reproduced-detail = seen again
+gui-stamp-not-yet = Not yet
+gui-stamp-not-yet-detail = not reproduced yet
+gui-run-title = Run
+gui-run-log = Log
+gui-run-server-beside = Server beside
+gui-run-client-beside = Client beside
+gui-storage-keep = Keep it
+gui-storage-delete = Delete...
+gui-storage-temporary-note = Temporary folders can be cleared by the system at any time. Keep it moves the folder somewhere permanent.
+gui-bundle-card-title = Diagnostic bundle (.zip)
+gui-bundle-card-save = Save zip...
+gui-bundle-card-note = Files are copied as-is and never uploaded. Logs may contain server addresses and player names.
+gui-create-basics = Basics
+gui-create-name-note = what you are reproducing
+gui-create-optional = optional
+gui-create-favorite-note = star = favorite
+gui-create-build-note = exact, never upgraded
+gui-loader-build = Loader build
+gui-linked-server-heading = Linked server
+gui-create-with-server-note = same versions, server-side mods
+gui-create-port-note = empty for automatic
+gui-accounts-online = Online
+gui-accounts-offline = Offline
+gui-link-to-instance = Link to instance
+gui-create-summary-temporary = This instance runs Minecraft { $first } with { $second }, stored temporarily.
+gui-create-summary-persistent = This instance runs Minecraft { $first } with { $second }, stored persistently.
+gui-server-pack-drop = Drop a server pack (.zip) here, or choose one
+gui-server-pack-drop-detail = Optional. Without one, the instance's server-side mods are installed.
+gui-server-pack-remove = Remove
+gui-accounts = Accounts
+
+gui-event-storage-temporary = temporary
+gui-event-storage-persistent = persistent
+gui-event-created = Created in { $value } storage
+gui-event-launched = Launched as { $value }
+gui-event-exited-clean = The game exited normally
+gui-event-exited-code = The game exited with code { $value }
+gui-event-exited-signal = The game was stopped by signal { $value }
+gui-event-exited-unknown = The game ended
+gui-event-stopped-clean = The server stopped normally
+gui-event-stopped-code = The server exited with code { $value }
+gui-event-stopped-signal = The server was stopped by signal { $value }
+gui-event-stopped-unknown = The server stopped
+gui-event-server-started = The server started on { $value }
+gui-event-log-error = Error in the log: { $value }
+gui-event-reproduced = { $count ->
+    [one] Seen again, now 1 time
+   *[other] Seen again, now { $count } times
+}
+gui-event-other = Something else happened
+gui-case-what-happened = What happened
+gui-case-what-happened-empty = Nothing has happened to this instance yet.

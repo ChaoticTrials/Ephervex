@@ -1,0 +1,12 @@
+// Two things worth knowing, always the same.
+
+import { BodyText, DisplayHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+import { SideCard } from "side-card.slint";
+
+export component TipsCard inherits SideCard {
+    DisplayHeading { text: GuiI18n.text("gui-home-tips"); font-size: Theme.item-title-size; }
+    BodyText { text: GuiI18n.text("gui-home-tip-open"); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
+    BodyText { text: GuiI18n.value("gui-home-tip-pair", GuiI18n.text("gui-pair-show-beside")); font-size: Theme.label-size; color: Theme.text-secondary; wrap: word-wrap; }
+}

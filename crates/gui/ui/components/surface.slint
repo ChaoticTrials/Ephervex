@@ -1,0 +1,163 @@
+// Surfaces: the face with a hard offset shadow and the grid drawn over the window floor.
+
+import { Theme } from "../theme.slint";
+
+// A rounded outlined rectangle on whole physical pixels, its fill running under
+// the outline's inner half so the page never shows between them.
+export component Outlined inherits Rectangle {
+    in property <brush> fill: Theme.surface;
+    in property <brush> outline: Theme.border-strong;
+    in property <length> radius: Theme.card-radius;
+    in property <length> outline-width: Theme.strong-border-width;
+    // The fraction of the width filled from the left, in `progress-fill`.
+    in property <float> progress: 0;
+    in property <brush> progress-fill: Theme.accent-primary;
+    // Also put the far edges on whole pixels. Only for a box whose size no
+    // content depends on, or the size and the position chase each other.
+    in property <bool> snap-size: false;
+    // Half a pixel off puts a gray band along an edge on renderers that do not snap.
+    pure public function snap(position: length) -> length {
+        return Math.round(position / 1phx) * 1phx;
+    }
+    private property <length> left: root.snap(root.absolute-position.x);
+    private property <length> top: root.snap(root.absolute-position.y);
+    private property <length> snapped-x: root.left - root.absolute-position.x;
+    private property <length> snapped-y: root.top - root.absolute-position.y;
+    private property <length> snapped-width: root.snap-size ? root.snap(root.absolute-position.x + root.width) - root.left : root.width;
+    private property <length> snapped-height: root.snap-size ? root.snap(root.absolute-position.y + root.height) - root.top : root.height;
+    Rectangle {
+        x: root.snapped-x + root.outline-width / 2;
+        y: root.snapped-y + root.outline-width / 2;
+        width: max(0px, root.snapped-width - root.outline-width);
+        height: max(0px, root.snapped-height - root.outline-width);
+        border-radius: max(0px, root.radius - root.outline-width / 2);
+        background: root.fill;
+    }
+    if root.progress > 0 : Rectangle {
+        x: root.snapped-x + root.outline-width / 2;
+        y: root.snapped-y + root.outline-width / 2;
+        width: root.progress * max(0px, root.snapped-width - root.outline-width);
+        height: max(0px, root.snapped-height - root.outline-width);
+        border-radius: max(0px, root.radius - root.outline-width / 2);
+        background: root.progress-fill;
+    }
+    Rectangle {
+        x: root.snapped-x;
+        y: root.snapped-y;
+        width: root.snapped-width;
+        height: root.snapped-height;
+        border-radius: root.radius;
+        border-width: root.outline-width;
+        border-color: root.outline;
+        @children
+    }
+}
+
+// A face with a hard shadow offset to the right and down, drawn as a second
+// rectangle behind the face because the software renderer has no drop shadow.
+//
+// The component is the size of the face. The shadow overflows its right and
+// bottom edges by `lift`, so a container pads those sides by the lift and a
+// ScrollView clips it. Callers bind `lift` on hover and press.
+export component Plate inherits Rectangle {
+    in property <length> lift: Theme.shadow-offset-card;
+    // Whether the shadow falls to the left instead of the right.
+    in property <bool> shadow-left: false;
+    in property <brush> fill: Theme.surface;
+    in property <brush> outline: Theme.border-strong;
+    in property <length> radius: Theme.card-radius;
+    in property <length> outline-width: Theme.strong-border-width;
+    // How faded the face and its shadow are, from 0 to 1. The shadow fades as a
+    // layer of its own, and the face washes its colors toward the surface
+    // instead of turning translucent, so the shadow does not show through it.
+    // Fading the whole plate would also clip the shadow to the face's bounds.
+    in property <float> fade: 1;
+    // The room inside the outline, for content that sizes itself to the face.
+    out property <length> inner-width: max(0px, root.width - 2 * root.outline-width);
+    out property <length> inner-height: max(0px, root.height - 2 * root.outline-width);
+    shadow := Rectangle {
+        x: root.shadow-left ? -root.lift : root.lift;
+        y: root.lift;
+        width: root.width;
+        height: root.height;
+        visible: root.lift > 0px;
+        opacity: root.fade;
+        border-radius: root.radius;
+        background: Theme.shadow-hard;
+    }
+    face := Rectangle {
+        width: root.width;
+        height: root.height;
+        border-radius: root.radius;
+        border-width: root.outline-width;
+        border-color: root.fade < 1 ? root.outline.mix(Theme.surface, root.fade) : root.outline;
+        background: root.fade < 1 ? root.fill.mix(Theme.surface, root.fade) : root.fill;
+        @children
+    }
+}
+
+// A face whose children stay inside its outline and its rounded corners, for a
+// page that scrolls or paints its own backgrounds.
+export component Panel inherits Plate {
+    Rectangle {
+        x: root.outline-width;
+        y: root.outline-width;
+        width: root.inner-width;
+        height: root.inner-height;
+        border-radius: max(0px, root.radius - root.outline-width);
+        clip: true;
+        @children
+    }
+}
+
+// The face of a button. It rises one pixel toward the pointer with a longer
+// shadow and sinks onto its shadow while pressed. A control that cannot be
+// used holds still and fades, shadow included.
+//
+// Placed directly in a non-layout parent the size of the button, because it
+// moves itself with `x` and `y`.
+export component ButtonPlate inherits Plate {
+    in property <bool> live: true;
+    in property <bool> hovered;
+    in property <bool> pressed;
+    // How far the shadow falls while the button rests.
+    in property <length> rest-lift: Theme.shadow-offset-card;
+    private property <bool> sunk: root.live && root.pressed;
+    private property <bool> raised: root.live && root.hovered && !root.pressed;
+    x: root.sunk ? Theme.shadow-offset-small : root.raised ? -1px : 0px;
+    y: root.sunk ? Theme.shadow-offset-small : root.raised ? -1px : 0px;
+    lift: !root.live ? root.rest-lift : root.sunk ? 1px : root.raised ? Theme.shadow-offset-card + 1px : root.rest-lift;
+    radius: Theme.button-radius;
+    fade: root.live ? 1 : Theme.disabled-opacity;
+    animate x, y, lift { duration: 80ms; }
+}
+
+// Hairlines every `Theme.grid-size`, filling the element it is placed in. The
+// line count is capped so a very large window cannot create thousands of
+// elements.
+export component GridFloor inherits Rectangle {
+    private property <int> max-lines: 200;
+    private property <int> columns: min(root.max-lines, Math.ceil(root.width / Theme.grid-size));
+    private property <int> rows: min(root.max-lines, Math.ceil(root.height / Theme.grid-size));
+    clip: true;
+    for column in root.columns : Rectangle {
+        x: column * Theme.grid-size;
+        width: 1px;
+        height: root.height;
+        background: Theme.grid-line;
+    }
+    for row in root.rows : Rectangle {
+        y: row * Theme.grid-size;
+        width: root.width;
+        height: 1px;
+        background: Theme.grid-line;
+    }
+}
+
+// Dims what it is laid over, and says when it is pressed. The quick view puts
+// one over each thing it covers.
+export component Scrim inherits Rectangle {
+    callback pressed();
+    background: Theme.scrim.with-alpha(0.22);
+    TouchArea { clicked => { root.pressed(); } }
+}

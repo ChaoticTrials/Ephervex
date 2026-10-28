@@ -85,6 +85,7 @@ hex = "0.4.3"
 image = { version = "0.25.9", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 i18n-embed = { version = "0.16.0", features = ["fluent-system", "desktop-requester"] }
 i18n-embed-fl = "0.10.1"
+fluent-syntax = "0.12.0"
 keyring = "4.1.6"
 # MD5 exists for exactly one reason: Minecraft derives an offline player's UUID
 # with `UUID.nameUUIDFromBytes`, which is MD5-based. Ephervex must reproduce
@@ -119,7 +120,6 @@ slint = { version = "1.17.1", features = ["raw-window-handle-06", "unstable-wini
 # Kept at the same release as `slint`, whose generated code it has to match.
 slint-build = "1.17.1"
 sysinfo = "0.39.6"
-fontdb = "0.23.0"
 tar = "0.4.46"
 tempfile = "3.27.0"
 thiserror = "2.0.19"

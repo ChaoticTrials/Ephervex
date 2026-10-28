@@ -8,7 +8,7 @@
 
 #![allow(clippy::expect_used)]
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow};
+use ephervex_gui::ui::{AppWindow, GuiI18n, MinecraftPreferenceRow, Theme};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
@@ -61,7 +61,6 @@ fn dropdowns_in_a_fixed_height_dialog_stay_dropdown_sized_and_fill_their_row() {
     // Entries must not make a dropdown claim the dialog's spare height.
     for label in [
         lookup("gui-minecraft-release"),
-        lookup("gui-loader"),
         lookup("gui-loader-version-placeholder"),
     ] {
         let height = dropdown(&ui, &label).size().height;
@@ -69,11 +68,13 @@ fn dropdowns_in_a_fixed_height_dialog_stay_dropdown_sized_and_fill_their_row() {
     }
 
     // The release dropdown takes the row beside its star.
-    let loader = dropdown(&ui, &lookup("gui-loader")).size().width;
+    let build = dropdown(&ui, &lookup("gui-loader-version-placeholder"))
+        .size()
+        .width;
     let release = dropdown(&ui, &lookup("gui-minecraft-release")).size().width;
     assert!(
-        release > loader / 2.0,
-        "the release dropdown is {release}px wide in a {loader}px dialog"
+        release > build / 2.0,
+        "the release dropdown is {release}px wide beside a {build}px build dropdown"
     );
 }
 
@@ -87,7 +88,8 @@ fn the_create_dialog_shows_the_loader_and_build_the_application_chose() {
     ui.set_create_loader("NeoForge".into());
     ui.set_modal("create-instance".into());
     settle(&ui);
-    assert_eq!(shown(&ui, &lookup("gui-loader")), "NeoForge");
+    assert!(loader_is_chosen(&ui, "NeoForge"));
+    assert!(!loader_is_chosen(&ui, "Vanilla"));
 
     ui.set_create_loader_versions(strings(&["21.1.9", "21.1.8", "21.1.7"]));
     ui.set_create_loader_version("21.1.8".into());
@@ -120,7 +122,8 @@ fn the_server_dialog_shows_the_release_loader_and_build_it_will_submit() {
     settle(&ui);
 
     assert_eq!(shown(&ui, &lookup("gui-minecraft-release")), "1.20.4");
-    assert_eq!(shown(&ui, &lookup("gui-loader")), "Fabric");
+    assert!(loader_is_chosen(&ui, "Fabric"));
+    assert!(!loader_is_chosen(&ui, "Vanilla"));
     assert_eq!(
         shown(&ui, &lookup("gui-loader-version-placeholder")),
         "0.15.11"
@@ -181,8 +184,7 @@ fn a_dropdown_shows_nothing_for_a_value_that_is_in_none_of_its_entries() {
 fn the_results_per_page_and_cache_unit_dropdowns_show_their_stored_values() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Storage".into());
+    ui.invoke_open_settings("Storage".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.set_artifact_cache_units(strings(&["MiB", "GiB"]));
     ui.set_artifact_cache_custom_unit("GiB".into());
@@ -202,8 +204,7 @@ fn the_results_per_page_and_cache_unit_dropdowns_show_their_stored_values() {
 fn a_general_settings_dropdown_follows_the_stored_value_after_the_user_picked() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
+    ui.invoke_open_settings("General".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     ui.set_operator_permission_level(1);
     settle(&ui);
@@ -224,8 +225,7 @@ fn a_general_settings_dropdown_follows_the_stored_value_after_the_user_picked() 
 fn a_minecraft_default_dropdown_follows_the_stored_choice_after_the_user_picked() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("Minecraft".into());
+    ui.invoke_open_settings("Minecraft".into());
     ui.window().set_size(PhysicalSize::new(1600, 1600));
     let row = MinecraftPreferenceRow {
         id: "difficulty".into(),
@@ -338,7 +338,7 @@ fn an_open_list_closes_when_the_window_is_resized_under_it() {
     // The dialog stays centered, so the dropdown moves with the window while
     // the list would stay where it was drawn.
     let before = dropdown(&ui, &target).absolute_position();
-    ui.window().set_size(PhysicalSize::new(1100, 900));
+    ui.window().set_size(PhysicalSize::new(1300, 900));
     settle(&ui);
     assert_ne!(dropdown(&ui, &target).absolute_position(), before);
 
@@ -369,33 +369,41 @@ fn an_open_list_stays_open_while_nothing_moves() {
 fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open() {
     let ui = window();
     ui.set_loading(false);
-    ui.set_page(4);
-    ui.set_settings_tab("General".into());
-    let label = lookup("gui-default-operator-level");
+    ui.invoke_open_settings("General".into());
 
-    // The page draws only what is in view, so the dropdown first exists once
-    // the window is tall enough to show its top edge. A little more height
-    // leaves a sliver of it showing above the page's edge.
-    let mut height = 400;
-    let found = |ui: &AppWindow| {
-        ElementHandle::find_by_accessible_label(ui, &label)
-            .any(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
+    // A dropdown lower on the page is not on screen until the window is tall
+    // enough to show part of it, so grow the window from its smallest height
+    // until the page's last dropdown first appears across the bottom edge.
+    let theme = ui.global::<Theme>();
+    let width = theme.get_window_min_width() + 60.0;
+    let lowest = |ui: &AppWindow| {
+        ElementHandle::find_by_element_type_name(ui, "ChoiceBox")
+            .filter(|element| element.size().width > 0.0)
+            .max_by(|left, right| {
+                left.absolute_position()
+                    .y
+                    .total_cmp(&right.absolute_position().y)
+            })
     };
-    while {
-        ui.window().set_size(PhysicalSize::new(1600, height));
+    let mut cut_off = None;
+    let mut height = theme.get_window_min_height();
+    while height < theme.get_window_min_height() + 600.0 && cut_off.is_none() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        ui.window()
+            .set_size(PhysicalSize::new(width as u32, height as u32));
         settle(&ui);
-        !found(&ui)
-    } {
-        height += 1;
-        assert!(height < 1600, "the dropdown never appears");
+        let page_bottom = height - theme.get_shell_padding() - theme.get_strong_border_width();
+        cut_off = lowest(&ui)
+            .filter(|found| {
+                let top = found.absolute_position().y;
+                // Enough of it shows to be pressed, and not all of it.
+                top + 12.0 < page_bottom && top + found.size().height > page_bottom
+            })
+            .map(|found| (found.absolute_position(), found.size()));
+        height += 4.0;
     }
-    ui.window().set_size(PhysicalSize::new(1600, height + 12));
-    settle(&ui);
-
-    // Focusing the dropdown scrolls it into view, which moves it.
-    let box_ = dropdown(&ui, &label);
-    let (at, size) = (box_.absolute_position(), box_.size());
-    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 2.0);
+    let (at, size) = cut_off.expect("the last dropdown is cut off by the page edge at some height");
+    let position = slint::LogicalPosition::new(at.x + size.width / 2.0, at.y + 4.0);
     ui.window()
         .dispatch_event(WindowEvent::PointerMoved { position });
     ui.window().dispatch_event(WindowEvent::PointerPressed {
@@ -409,8 +417,10 @@ fn clicking_a_dropdown_cut_off_by_the_page_edge_opens_its_list_and_keeps_it_open
     settle(&ui);
     settle(&ui);
 
-    assert_eq!(dropdown(&ui, &label).accessible_expanded(), Some(true));
-    assert_ne!(dropdown(&ui, &label).absolute_position(), at);
+    // Focusing the dropdown scrolls it into view, which moves it.
+    let moved = lowest(&ui).expect("the dropdown is still on the page");
+    assert_eq!(moved.accessible_expanded(), Some(true));
+    assert_ne!(moved.absolute_position(), at);
 }
 
 /// The dropdown carrying `label`, not the text beside it that reads the same.
@@ -418,6 +428,15 @@ fn dropdown(ui: &AppWindow, label: &str) -> ElementHandle {
     ElementHandle::find_by_accessible_label(ui, label)
         .find(|element| element.accessible_role() == Some(AccessibleRole::Combobox))
         .expect("a dropdown with that label")
+}
+
+/// Whether the loader segment named `name` is the highlighted one.
+fn loader_is_chosen(ui: &AppWindow, name: &str) -> bool {
+    ElementHandle::find_by_accessible_label(ui, name)
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Button))
+        .expect("a loader segment with that name")
+        .accessible_checked()
+        .unwrap_or(false)
 }
 
 fn shown(ui: &AppWindow, label: &str) -> String {

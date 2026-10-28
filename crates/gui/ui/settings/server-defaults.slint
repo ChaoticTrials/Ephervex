@@ -1,8 +1,8 @@
 // The server.properties values new servers start with.
 
 import { ScrollView } from "std-widgets.slint";
-import { AppButton, LabeledToggle } from "../components/controls.slint";
-import { BodyText, Divider } from "../components/text.slint";
+import { DraftBar, LabeledToggle } from "../components/controls.slint";
+import { BodyText } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { ServerPropertyGroup } from "../models.slint";
 import { Theme } from "../theme.slint";
@@ -33,16 +33,20 @@ export component ServerDefaultsPanel inherits VerticalLayout {
         VerticalLayout { alignment: start; spacing: 14px; padding-right: 12px; padding-bottom: 12px;
             for group in root.groups : ServerPropertyGroupCard {
                 group: group;
+                keys-only: true;
                 edited(key, value) => { root.edit(key, value); }
                 chosen(key, index) => { root.choose(key, index); }
                 reset(key) => { root.reset(key); }
             }
         }
     }
-    Divider { }
-    HorizontalLayout { spacing: 10px; vertical-stretch: 0;
-        BodyText { text: root.edits > 0 ? GuiI18n.count("gui-property-unsaved-count", root.edits) : GuiI18n.text("gui-property-no-unsaved"); color: root.edits > 0 ? Theme.accent : Theme.text-muted; vertical-alignment: center; horizontal-stretch: 1; }
-        AppButton { text: GuiI18n.text("gui-discard-changes"); enabled: root.edits > 0; hint: GuiI18n.text("gui-hint-no-unsaved-changes"); clicked => { root.discard(); } }
-        AppButton { text: GuiI18n.text("gui-save-changes"); tone: "primary"; enabled: root.edits > 0 && !root.invalid; hint: root.invalid ? GuiI18n.text("gui-hint-fix-property-values") : GuiI18n.text("gui-hint-no-unsaved-changes"); clicked => { root.save(); } }
+    DraftBar {
+        message: root.edits > 0 ? GuiI18n.count("gui-property-unsaved-count", root.edits) : GuiI18n.text("gui-property-no-unsaved");
+        dirty: root.edits > 0;
+        can-save: root.edits > 0 && !root.invalid;
+        discard-hint: GuiI18n.text("gui-hint-no-unsaved-changes");
+        save-hint: root.invalid ? GuiI18n.text("gui-hint-fix-property-values") : GuiI18n.text("gui-hint-no-unsaved-changes");
+        discard => { root.discard(); }
+        save => { root.save(); }
     }
 }

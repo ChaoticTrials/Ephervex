@@ -3,7 +3,7 @@
 
 import { ScrollView } from "std-widgets.slint";
 import { ModArtwork } from "../components/artwork.slint";
-import { AppButton, EmptyState, FilterChip, InlineToggle, Pill, TextField } from "../components/controls.slint";
+import { AppButton, EmptyState, InlineToggle, Pill, SegmentedChoice, TextField } from "../components/controls.slint";
 import { ValueComboBox } from "../components/selection.slint";
 import { ActionRow, BodyText, Heading, TooltipCard } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -18,8 +18,8 @@ component SupportBadge inherits Rectangle {
     width: 22px;
     height: 22px;
     horizontal-stretch: 0;
-    border-radius: 11px;
-    border-width: 1px;
+    border-radius: Theme.card-radius;
+    border-width: Theme.strong-border-width;
     border-color: Theme.warning.with-alpha(0.55);
     background: Theme.warning.with-alpha(0.12);
     accessible-role: AccessibleRole.text;
@@ -57,15 +57,8 @@ export component ModBrowser inherits Rectangle {
     callback set-include-incompatible(bool);
     callback set-page-size(string);
     callback open-provider-settings();
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: Theme.surface;
     VerticalLayout {
-        padding: 16px;
         spacing: 10px;
-        // As tall as the mod list's toolbar beside it, so both descriptions start on one line.
-        Heading { text: GuiI18n.text("gui-add-mods"); min-height: Theme.control-height; }
         BodyText {
             text: root.for-server ? GuiI18n.text("gui-server-catalog-compatibility") : GuiI18n.text("gui-catalog-compatibility");
             wrap: word-wrap;
@@ -74,8 +67,12 @@ export component ModBrowser inherits Rectangle {
             spacing: 8px;
             cross-axis-alignment: center;
             Text { text: GuiI18n.text("gui-mod-catalog"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
-            FilterChip { text: GuiI18n.text("gui-provider-modrinth"); accessible-name: GuiI18n.text("gui-provider-modrinth"); selected: root.host.browser-provider == "modrinth"; clicked => { root.switch-catalog("modrinth"); } }
-            FilterChip { text: GuiI18n.text("gui-provider-curseforge"); accessible-name: GuiI18n.text("gui-provider-curseforge"); selected: root.host.browser-provider == "curseforge"; clicked => { root.switch-catalog("curseforge"); } }
+            SegmentedChoice {
+                accessible-name: GuiI18n.text("gui-mod-catalog");
+                options: [GuiI18n.text("gui-provider-modrinth"), GuiI18n.text("gui-provider-curseforge")];
+                current-value: root.host.browser-provider == "curseforge" ? GuiI18n.text("gui-provider-curseforge") : GuiI18n.text("gui-provider-modrinth");
+                chosen(value) => { root.switch-catalog(value == GuiI18n.text("gui-provider-curseforge") ? "curseforge" : "modrinth"); }
+            }
             Rectangle { horizontal-stretch: 1; }
             Text { text: GuiI18n.text("gui-mod-results-per-page"); color: Theme.text-secondary; font-size: Theme.label-size; vertical-alignment: center; }
             ValueComboBox { width: 92px; label: GuiI18n.text("gui-mod-results-per-page"); model: root.page-sizes; value: root.page-size-label; selected(value) => { root.set-page-size(value); } }
@@ -104,8 +101,8 @@ export component ModBrowser inherits Rectangle {
             }
         }
         if root.host.browser-notice != "" : Rectangle {
-            border-radius: 6px;
-            border-width: 1px;
+            border-radius: Theme.card-radius;
+            border-width: Theme.strong-border-width;
             border-color: Theme.danger;
             background: Theme.background;
             VerticalLayout {
@@ -126,13 +123,17 @@ export component ModBrowser inherits Rectangle {
         }
         ScrollView {
             VerticalLayout {
+                padding-left: Theme.lift-room;
+                padding-top: Theme.lift-room;
+                padding-right: Theme.shadow-room;
+                padding-bottom: Theme.shadow-room;
                 spacing: 8px;
                 for mod in root.host.browser-results : Rectangle {
                     height: 92px;
                     clip: true;
-                    border-radius: 6px;
-                    border-width: 1px;
-                    border-color: Theme.border;
+                    border-radius: Theme.card-radius;
+                    border-width: Theme.strong-border-width;
+                    border-color: Theme.border-strong;
                     background: Theme.background;
                     HorizontalLayout {
                         padding: 10px;
@@ -142,7 +143,7 @@ export component ModBrowser inherits Rectangle {
                             horizontal-stretch: 1;
                             Heading { text: mod.title; font-size: Theme.row-heading-size; overflow: elide; }
                             BodyText { text: mod.description; wrap: word-wrap; overflow: elide; vertical-alignment: top; height: Theme.body-size * 2.7; }
-                            BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.note); color: Theme.text-muted; overflow: elide; }
+                            BodyText { text: GuiI18n.values("gui-mod-result-meta", mod.author, mod.downloads != "" ? mod.note + " | " + mod.downloads : mod.note); color: Theme.text-muted; overflow: elide; }
                         }
                         // What the server makes of the mod sits over the action
                         // it affects, as a managed mod's badges sit over its bin.

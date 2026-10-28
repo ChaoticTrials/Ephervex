@@ -7,10 +7,12 @@
 
 #![allow(clippy::expect_used)]
 
+mod support;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ephervex_gui::ui::{AppWindow, GuiI18n, ServerPackRules};
+use ephervex_gui::ui::{AppWindow, GuiI18n, InstanceRow, ServerPackRules};
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{ElementHandle, TestingBackend, TestingBackendOptions};
 use slint::platform::WindowEvent;
@@ -52,7 +54,7 @@ fn submitting_carries_the_chosen_archive_path() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack| {
+    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack, _| {
         sink.borrow_mut().push(server_pack.to_string());
     });
 
@@ -77,7 +79,7 @@ fn a_server_built_the_usual_way_submits_no_archive() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack| {
+    ui.on_submit_create_server(move |_, _, _, _, _, _, _, _, server_pack, _| {
         sink.borrow_mut().push(server_pack.to_string());
     });
 
@@ -124,7 +126,7 @@ fn an_untouched_dialog_submits_the_suggested_name() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _, _| {
         sink.borrow_mut().push(name.to_string());
     });
 
@@ -148,7 +150,7 @@ fn a_typed_name_is_submitted_instead_of_the_suggestion() {
     let ui = window();
     let submitted: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let sink = Rc::clone(&submitted);
-    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _| {
+    ui.on_submit_create_server(move |name, _, _, _, _, _, _, _, _, _| {
         sink.borrow_mut().push(name.to_string());
     });
 
@@ -367,7 +369,7 @@ fn the_import_dialog_keeps_its_server_files_row_above_its_buttons() {
 #[test]
 fn a_long_import_error_stays_clear_of_the_buttons() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(560, 900));
+    support::set_minimum_width(&ui, 900);
     open_import(&ui, true);
     let error = "The pack could not be read because one of the files it lists is missing \
                  from the archive and no provider offers a download for it either";
@@ -392,7 +394,7 @@ fn a_long_import_error_stays_clear_of_the_buttons() {
 #[test]
 fn a_long_pack_summary_stays_clear_of_the_rows_below_it() {
     let ui = window();
-    ui.window().set_size(PhysicalSize::new(560, 900));
+    support::set_minimum_width(&ui, 900);
     open_import(&ui, false);
     ui.set_import_pack_header("Pack".into());
     ui.set_import_minecraft_line("Minecraft 1.20.1".into());
@@ -443,10 +445,15 @@ fn summary_and_next_row(ui: &AppWindow, counts: &str) -> (f32, f32) {
 }
 
 fn open_import(ui: &AppWindow, create_server: bool) {
-    ui.set_loading(false);
-    // Away from the instances page, whose own "Import Modpack" button carries
-    // the same label as the dialog's confirm and would be found instead.
-    ui.set_page(1);
+    // Over the settings with one instance listed: Home and the empty list each
+    // have an "Import Modpack" button with the dialog's label, which would be
+    // found instead of the dialog's own.
+    support::open_settings(ui, "General");
+    ui.set_instances(ModelRc::new(VecModel::from(vec![InstanceRow {
+        id: "listed".into(),
+        name: "Listed".into(),
+        ..InstanceRow::default()
+    }])));
     ui.set_import_create_server(create_server);
     ui.set_import_server_pack(SharedString::default());
     ui.set_import_server_pack_name(SharedString::default());
@@ -519,4 +526,50 @@ fn install_i18n(ui: &AppWindow) {
         )
         .into()
     });
+}
+
+#[test]
+fn a_server_for_an_instance_is_titled_as_a_linked_server() {
+    let ui = window();
+    ui.set_create_server_client_id("client".into());
+    ui.set_modal("create-server".into());
+    settle(&ui);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-create-linked-server"))
+            .any(|element| element.size().width > 0.0),
+        "the dialog says it creates a linked server"
+    );
+
+    ui.set_create_server_client_id("".into());
+    settle(&ui);
+    assert!(
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-modal-new-server"))
+            .any(|element| element.size().width > 0.0),
+        "a standalone server keeps its own title"
+    );
+}
+
+/// An empty port field means the port is chosen on creation, and the account
+/// check chosen in the dialog is what is submitted.
+#[test]
+fn an_empty_port_is_automatic_and_the_account_check_is_submitted() {
+    let ui = window();
+    let submitted: Rc<RefCell<Vec<(bool, String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&submitted);
+    ui.on_submit_create_server(move |_, _, _, _, _, _, automatic, port, _, online| {
+        sink.borrow_mut()
+            .push((automatic, port.to_string(), online));
+    });
+
+    open_create_server(&ui, "repro-client");
+    ui.set_create_server_name("Repro Server".into());
+    settle(&ui);
+    widest(&ui, &lookup("gui-accounts-online"))
+        .expect("the account choice")
+        .invoke_accessible_default_action();
+    widest(&ui, &lookup("gui-create-server"))
+        .expect("the dialog can be submitted")
+        .invoke_accessible_default_action();
+
+    assert_eq!(submitted.borrow().as_slice(), [(true, String::new(), true)]);
 }

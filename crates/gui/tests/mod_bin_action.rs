@@ -251,7 +251,7 @@ fn client() -> InstanceRow {
 fn show(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
     let mut view = support::client_view(client());
     view.allow_pack_mod_changes = mods_are_the_users;
-    support::show(ui, 0, vec![view], vec![support::pane(1, 0, "Mods")]);
+    support::show(ui, vec![view], vec![support::pane(1, 0, "Mods")]);
     support::update_host(ui, 0, |view| {
         view.mods = ModelRc::from(Rc::new(VecModel::from(rows.to_vec())));
     });
@@ -265,7 +265,7 @@ fn show_server(ui: &AppWindow, mods_are_the_users: bool, rows: &[ModRow]) {
         ..ServerRow::default()
     });
     view.mods_are_the_users = mods_are_the_users;
-    support::show(ui, 1, vec![view], vec![support::pane(1, 0, "Mods")]);
+    support::show(ui, vec![view], vec![support::pane(1, 0, "Mods")]);
     support::update_host(ui, 0, |view| {
         view.mods = ModelRc::from(Rc::new(VecModel::from(rows.to_vec())));
     });

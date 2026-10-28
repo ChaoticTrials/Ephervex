@@ -7,6 +7,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::ServerId;
 
 use crate::backend::{ConsoleOutcome, ServerToolEvent};
+use crate::presentation::server_state_line;
 use crate::ui::ServerRow;
 
 /// How often a shown Overview rereads what its server printed.
@@ -432,6 +433,8 @@ impl ServerTools {
             String::new()
         }
         .into();
+        // The line follows whichever state the phases above settled on.
+        row.state_line = server_state_line(&row.state, &row.address).into();
     }
 }
 
@@ -701,6 +704,39 @@ mod tests {
             a.can_stop && a.can_send_command,
             "a failed stop releases busy state"
         );
+    }
+
+    #[test]
+    fn the_state_line_follows_every_state_a_stamp_writes() {
+        let id = ServerId::new();
+        let mut tools = ServerTools::default();
+        tools.observe(&[row(id, false)]);
+        let line = |tools: &ServerTools, restarting: bool| {
+            let mut shown = row(id, tools.rows[&id].state_kind == "running");
+            shown.address = "localhost:25565".into();
+            tools.stamp(id, &mut shown, restarting);
+            assert_eq!(
+                shown.state_line,
+                format!("{} | localhost:25565", shown.state)
+            );
+            shown.state_line.to_string()
+        };
+        assert_eq!(line(&tools, false), "Stopped | localhost:25565");
+        assert!(tools.request(id, ServerAction::Start, false));
+        assert_eq!(line(&tools, false), "Starting | localhost:25565");
+        tools.apply(
+            id,
+            ServerToolEvent::Finished {
+                failure: Some("failed".to_owned()),
+            },
+        );
+        assert_eq!(line(&tools, false), "Failed | localhost:25565");
+        tools.observe(&[row(id, true)]);
+        assert!(tools.request(id, ServerAction::Stop, false));
+        assert_eq!(line(&tools, false), "Stopping | localhost:25565");
+        tools.apply(id, ServerToolEvent::StopFinished { succeeded: false });
+        assert_eq!(line(&tools, false), "Running | localhost:25565");
+        assert_eq!(line(&tools, true), "Restarting | localhost:25565");
     }
 
     #[test]

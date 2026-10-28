@@ -1,7 +1,7 @@
 // Application settings panels: provider overrides and disk usage.
 
-import { AppButton, BusySpinner, Pill, TextField } from "../components/controls.slint";
-import { BodyText, Divider, Heading, SectionTitle } from "../components/text.slint";
+import { AppButton, BusySpinner, Pill, SettingRow, SettingsGroup, TextField } from "../components/controls.slint";
+import { BodyText, Divider, Heading, SectionHeading, SectionTitle } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
 import { DiskUsageRow, StorageGroupRow } from "../models.slint";
 import { Theme } from "../theme.slint";
@@ -19,22 +19,23 @@ export component OverrideCard inherits Rectangle {
     in property <bool> saving;
     callback reset();
     min-height: card.preferred-height;
-    vertical-stretch: 1;
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: Theme.surface;
+    preferred-height: card.preferred-height;
+    if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
     card := VerticalLayout {
-        padding: 16px;
+        padding-left: 18px;
+        padding-right: 18px;
+        padding-top: 14px;
+        padding-bottom: 14px;
         spacing: 8px;
         HorizontalLayout { Heading { text: root.title; font-size: Theme.row-heading-size; } Rectangle { horizontal-stretch: 1; } Pill { text: root.custom ? GuiI18n.text("gui-override") : GuiI18n.text("gui-default"); tone-color: root.custom ? Theme.accent : Theme.text-secondary; } }
-        HorizontalLayout { spacing: 8px; TextField { text <=> root.value; placeholder: root.placeholder; horizontal-stretch: 1; } if root.custom : AppButton { text: GuiI18n.text("gui-reset-default"); enabled: !root.saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.reset(); } } }
-        BodyText { text: GuiI18n.value(root.custom ? "gui-effective-value" : "gui-effective-default", root.effective); color: Theme.text-muted; wrap: word-wrap; }
+        HorizontalLayout { spacing: 8px; padding-right: Theme.shadow-room; TextField { text <=> root.value; placeholder: root.placeholder; horizontal-stretch: 1; } if root.custom : AppButton { text: GuiI18n.text("gui-reset-default"); enabled: !root.saving; hint: GuiI18n.text("gui-save-in-progress-hint"); clicked => { root.reset(); } } }
+        BodyText { text: GuiI18n.value(root.custom ? "gui-effective-value" : "gui-effective-default", root.effective); color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
     }
 }
 
-// How much space Ephervex's own directories hold. Global rather than per
-// host: it measures the launcher's roots, not one workspace.
+// How much space Ephervex's own directories hold, and what can be cleaned up.
+// Global rather than per host: it measures the launcher's roots, not one
+// workspace.
 export component DiskUsagePanel inherits VerticalLayout {
     // "idle", "measuring", or "measured".
     in property <string> state;
@@ -84,72 +85,76 @@ export component DiskUsagePanel inherits VerticalLayout {
     spacing: 14px;
     HorizontalLayout {
         spacing: 10px;
-        SectionTitle { title: GuiI18n.text("gui-disk-usage-title"); detail: GuiI18n.text("gui-disk-usage-detail"); horizontal-stretch: 1; }
-        if root.state == "measuring" : VerticalLayout { alignment: center; AppButton { text: GuiI18n.text("gui-disk-usage-stop"); clicked => { root.stop(); } } }
-        VerticalLayout { alignment: center; AppButton { text: root.state == "idle" ? GuiI18n.text("gui-disk-usage-measure") : GuiI18n.text("gui-disk-usage-refresh"); tone: "primary"; enabled: root.state != "measuring"; hint: GuiI18n.text("gui-hint-measure-running"); clicked => { root.refresh(); } } }
+        SectionHeading { title: GuiI18n.text("gui-disk-usage-title"); detail: root.state == "measured" ? root.measured-at : ""; horizontal-stretch: 1; }
+        VerticalLayout { alignment: end; padding-right: Theme.shadow-room; padding-bottom: 2px; HorizontalLayout { spacing: 8px;
+            if root.state == "measuring" : AppButton { text: GuiI18n.text("gui-disk-usage-stop"); compact: true; clicked => { root.stop(); } }
+            AppButton { text: root.state == "idle" ? GuiI18n.text("gui-disk-usage-measure") : GuiI18n.text("gui-disk-usage-refresh"); icon: @image-url("../../../../assets/icons/refresh.svg"); compact: true; enabled: root.state != "measuring"; hint: GuiI18n.text("gui-hint-measure-running"); clicked => { root.refresh(); } }
+        } }
     }
-    BodyText { text: GuiI18n.text("gui-disk-usage-metric"); color: Theme.text-secondary; wrap: word-wrap; }
-    if root.state == "measuring" : HorizontalLayout {
-        spacing: 8px;
-        BusySpinner { width: 16px; height: 16px; }
-        BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("gui-disk-usage-measuring"); horizontal-stretch: 1; wrap: word-wrap; }
-    }
-    if root.state == "idle" : BodyText { text: root.stale ? GuiI18n.text("gui-disk-usage-stale") : GuiI18n.text("gui-disk-usage-idle"); color: root.stale ? Theme.warning : Theme.text-muted; wrap: word-wrap; }
-    if root.state == "measured" : VerticalLayout {
-        spacing: 14px;
-        HorizontalLayout {
-            spacing: 10px;
-            Heading { text: GuiI18n.value("gui-disk-usage-total", root.total); horizontal-stretch: 1; }
-            BodyText { text: root.measured-at; color: Theme.text-muted; vertical-alignment: center; }
+    SettingsGroup {
+        if root.state == "idle" : Rectangle {
+            min-height: idle-text.preferred-height + 32px;
+            preferred-height: idle-text.preferred-height + 32px;
+            idle-text := BodyText { x: 18px; y: 16px; width: parent.width - 36px; text: root.stale ? GuiI18n.text("gui-disk-usage-stale") : GuiI18n.text("gui-disk-usage-idle"); color: root.stale ? Theme.warning : Theme.text-muted; wrap: word-wrap; }
         }
-        if root.incomplete : Rectangle {
-            border-radius: 7px;
-            border-width: 1px;
-            border-color: Theme.warning;
-            background: Theme.surface;
-            height: incomplete-body.preferred-height;
+        if root.state == "measuring" : Rectangle {
+            min-height: 56px;
+            preferred-height: 56px;
+            HorizontalLayout {
+                padding-left: 18px; padding-right: 18px; spacing: 10px;
+                VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
+                BodyText { text: root.progress != "" ? root.progress : GuiI18n.text("gui-disk-usage-measuring"); horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+            }
+        }
+        if root.state == "measured" && root.incomplete : Rectangle {
+            min-height: incomplete-body.preferred-height;
+            preferred-height: incomplete-body.preferred-height;
             incomplete-body := VerticalLayout {
-                padding: 12px;
-                spacing: 4px;
+                padding-left: 18px; padding-right: 18px; padding-top: 12px; padding-bottom: 12px; spacing: 4px;
                 BodyText { text: root.incomplete-text; color: Theme.warning; wrap: word-wrap; }
-                for path in root.unreadable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; wrap: word-wrap; }
+                for path in root.unreadable : BodyText { text: path; color: Theme.text-secondary; font-size: Theme.caption-size; font-family: Theme.mono-family; overflow: elide; }
             }
         }
         // The whole measurement split by whether it could be recreated.
-        Rectangle {
-            height: 14px;
-            border-radius: 4px;
-            clip: true;
-            background: Theme.border;
-            accessible-role: text;
-            accessible-label: GuiI18n.text("gui-disk-usage-retention-bar");
-            HorizontalLayout {
-                for part in root.retention : Rectangle {
-                    width: parent.width * part.fraction;
-                    background: root.retention-color(part.id);
+        if root.state == "measured" : Rectangle {
+            min-height: split-body.preferred-height;
+            preferred-height: split-body.preferred-height;
+            if root.incomplete : Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            split-body := VerticalLayout {
+                padding-left: 18px; padding-right: 18px; padding-top: 14px; padding-bottom: 14px; spacing: 10px;
+                Heading { text: GuiI18n.value("gui-disk-usage-total", root.total); font-size: Theme.row-heading-size; }
+                Rectangle {
+                    height: 14px;
+                    border-radius: 4px;
+                    clip: true;
+                    background: Theme.border;
+                    accessible-role: text;
+                    accessible-label: GuiI18n.text("gui-disk-usage-retention-bar");
+                    HorizontalLayout {
+                        for part in root.retention : Rectangle {
+                            width: parent.width * part.fraction;
+                            background: root.retention-color(part.id);
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                    }
                 }
-                Rectangle { horizontal-stretch: 1; }
+                for part in root.retention : HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout { alignment: center; Rectangle { width: 12px; height: 12px; border-radius: 3px; background: root.retention-color(part.id); } }
+                    BodyText { text: part.label; horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+                    BodyText { text: part.size; vertical-alignment: center; }
+                }
             }
         }
-        for part in root.retention : HorizontalLayout {
-            spacing: 10px;
-            VerticalLayout { alignment: center; Rectangle { width: 12px; height: 12px; border-radius: 3px; background: root.retention-color(part.id); } }
-            VerticalLayout {
-                horizontal-stretch: 1;
-                BodyText { text: part.label; }
-                BodyText { text: part.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            }
-            BodyText { text: part.size; vertical-alignment: center; }
-        }
-        Divider { }
         for category in root.categories : Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Theme.border;
-            background: Theme.surface;
-            height: category-body.preferred-height;
+            height: root.state == "measured" ? category-body.preferred-height : 0px;
+            visible: root.state == "measured";
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
             category-body := VerticalLayout {
-                padding: 12px;
+                padding-left: 18px;
+                padding-right: 18px;
+                padding-top: 12px;
+                padding-bottom: 12px;
                 spacing: 6px;
                 HorizontalLayout {
                     spacing: 10px;
@@ -160,81 +165,94 @@ export component DiskUsagePanel inherits VerticalLayout {
                     height: 6px;
                     border-radius: 3px;
                     background: Theme.border;
-                    Rectangle { x: 0px; width: parent.width * category.fraction; height: parent.height; border-radius: 3px; background: Theme.accent; }
+                    Rectangle { x: 0px; width: parent.width * category.fraction; height: parent.height; border-radius: 3px; background: Theme.state-stopped; }
                 }
-                BodyText { text: category.detail; color: Theme.text-secondary; wrap: word-wrap; }
                 for location[index] in category.locations : HorizontalLayout {
                     spacing: 8px;
-                    BodyText { text: location; color: Theme.text-muted; font-size: Theme.caption-size; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
-                    AppButton { text: GuiI18n.text("gui-open-folder"); accessible-name: GuiI18n.value("gui-disk-usage-open", location); clicked => { root.open-location(category.id, index); } }
+                    BodyText { text: location; color: Theme.text-muted; font-size: Theme.label-size; font-family: Theme.mono-family; horizontal-stretch: 1; overflow: elide; vertical-alignment: center; }
+                    VerticalLayout { alignment: center; padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-open-folder"); icon: @image-url("../../../../assets/icons/folder.svg"); compact: true; accessible-name: GuiI18n.value("gui-disk-usage-open", location); clicked => { root.open-location(category.id, index); } } }
                 }
             }
         }
     }
     // Maintenance of the shared, regenerable stores. Reachable whether or not a
     // measurement exists: it reads the stores and the hosts, not the totals.
-    Divider { }
-    SectionTitle { title: GuiI18n.text("gui-storage-maintenance-title"); detail: GuiI18n.text("gui-storage-maintenance-detail"); }
-    HorizontalLayout {
-        spacing: 10px;
-        AppButton { text: root.maintenance-inspected ? GuiI18n.text("gui-storage-inspect-again") : GuiI18n.text("gui-storage-inspect"); enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.inspect(); } }
-        AppButton { text: GuiI18n.text("gui-storage-verify"); enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.verify(); } }
-        Rectangle { horizontal-stretch: 1; }
-    }
-    HorizontalLayout {
-        spacing: 10px;
-        AppButton { text: GuiI18n.text("gui-storage-recover"); enabled: root.maintenance-busy == "" && root.maintenance-can-recover; hint: root.maintenance-busy != "" ? GuiI18n.text("gui-storage-busy-hint") : GuiI18n.text("gui-storage-recover-hint"); clicked => { root.recover(); } }
-        AppButton { text: GuiI18n.text("gui-storage-preview-cleanup"); tone: "primary"; enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.review(); } }
-        Rectangle { horizontal-stretch: 1; }
-    }
-    if root.maintenance-busy != "" : HorizontalLayout {
-        spacing: 8px;
-        BusySpinner { width: 16px; height: 16px; }
-        BodyText { text: root.maintenance-progress != "" ? root.maintenance-progress : GuiI18n.text("gui-storage-working"); horizontal-stretch: 1; wrap: word-wrap; }
-        AppButton { text: GuiI18n.text("gui-storage-stop"); clicked => { root.stop-maintenance(); } }
-    }
-    if root.maintenance-result.length > 0 : Rectangle {
-        border-radius: 7px;
-        border-width: 1px;
-        border-color: Theme.border;
-        background: Theme.surface;
-        height: result-body.preferred-height;
-        result-body := VerticalLayout {
-            padding: 12px;
-            spacing: 4px;
-            for line in root.maintenance-result : BodyText { text: line; wrap: word-wrap; }
+    SectionHeading { title: GuiI18n.text("gui-storage-maintenance-title"); }
+    SettingsGroup {
+        SettingRow {
+            title: GuiI18n.text("gui-storage-shared-files");
+            detail: root.maintenance-inspected ? root.maintenance-headline : GuiI18n.text("gui-storage-shared-files-detail");
+            VerticalLayout { padding-right: Theme.shadow-room; AppButton { text: root.maintenance-inspected ? GuiI18n.text("gui-storage-inspect-again") : GuiI18n.text("gui-storage-inspect"); compact: true; enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.inspect(); } } }
         }
-    }
-    if !root.maintenance-inspected && !root.maintenance-checked && root.maintenance-busy == "" : BodyText { text: GuiI18n.text("gui-storage-idle"); color: Theme.text-muted; wrap: word-wrap; }
-    if root.maintenance-inspected : VerticalLayout {
-        spacing: 10px;
-        Heading { text: root.maintenance-headline; }
-        BodyText { text: root.maintenance-hosts; color: Theme.text-muted; wrap: word-wrap; }
-        if root.maintenance-incomplete : BodyText { text: GuiI18n.text("gui-storage-incomplete"); color: Theme.warning; wrap: word-wrap; }
+        SettingRow {
+            title: GuiI18n.text("gui-storage-integrity");
+            detail: root.maintenance-checked ? root.maintenance-integrity : GuiI18n.text("gui-storage-integrity-detail");
+            HorizontalLayout { spacing: 8px; padding-right: Theme.shadow-room;
+                AppButton { text: GuiI18n.text("gui-storage-verify"); compact: true; enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.verify(); } }
+                AppButton { text: GuiI18n.text("gui-storage-recover"); compact: true; enabled: root.maintenance-busy == "" && root.maintenance-can-recover; hint: root.maintenance-busy != "" ? GuiI18n.text("gui-storage-busy-hint") : GuiI18n.text("gui-storage-recover-hint"); clicked => { root.recover(); } }
+            }
+        }
+        SettingRow {
+            title: GuiI18n.text("gui-storage-unreferenced");
+            detail: GuiI18n.text("gui-storage-unreferenced-detail");
+            VerticalLayout { padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-storage-preview-cleanup"); icon: @image-url("../../../../assets/icons/trash.svg"); compact: true; tone: "primary"; enabled: root.maintenance-busy == ""; hint: GuiI18n.text("gui-storage-busy-hint"); clicked => { root.review(); } } }
+        }
+        if root.maintenance-busy != "" : Rectangle {
+            min-height: 56px;
+            preferred-height: 56px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            HorizontalLayout {
+                padding-left: 18px; padding-right: 18px; spacing: 10px;
+                VerticalLayout { alignment: center; BusySpinner { width: 16px; height: 16px; } }
+                BodyText { text: root.maintenance-progress != "" ? root.maintenance-progress : GuiI18n.text("gui-storage-working"); horizontal-stretch: 1; vertical-alignment: center; overflow: elide; }
+                VerticalLayout { alignment: center; padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-storage-stop"); compact: true; clicked => { root.stop-maintenance(); } } }
+            }
+        }
+        for line[index] in root.maintenance-result : Rectangle {
+            min-height: result-line.preferred-height + 24px;
+            preferred-height: result-line.preferred-height + 24px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            result-line := BodyText { x: 18px; y: 12px; width: parent.width - 36px; text: line; wrap: word-wrap; }
+        }
         for group in root.maintenance-groups : Rectangle {
-            border-radius: 8px;
-            border-width: 1px;
-            border-color: Theme.border;
-            background: Theme.surface;
-            height: group-body.preferred-height;
+            min-height: group-body.preferred-height;
+            preferred-height: group-body.preferred-height;
+            visible: root.maintenance-inspected;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
             group-body := VerticalLayout {
-                padding: 12px;
-                spacing: 4px;
+                padding-left: 18px; padding-right: 18px; padding-top: 12px; padding-bottom: 12px; spacing: 3px;
                 HorizontalLayout {
                     spacing: 10px;
                     Heading { text: group.label; font-size: Theme.row-heading-size; horizontal-stretch: 1; }
                     BodyText { text: group.size; vertical-alignment: center; }
                 }
-                BodyText { text: group.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-                for line in group.lines : BodyText { text: line; color: Theme.text-secondary; wrap: word-wrap; }
+                BodyText { text: group.detail; color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
+                for line in group.lines : BodyText { text: line; color: Theme.text-secondary; font-size: Theme.label-size; wrap: word-wrap; }
             }
         }
+        if root.maintenance-inspected : Rectangle {
+            min-height: hosts-note.preferred-height + 24px;
+            preferred-height: hosts-note.preferred-height + 24px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            hosts-note := BodyText { x: 18px; y: 12px; width: parent.width - 36px; text: root.maintenance-hosts; color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
+        }
+        if root.maintenance-inspected && root.maintenance-incomplete : Rectangle {
+            min-height: incomplete-note.preferred-height + 24px;
+            preferred-height: incomplete-note.preferred-height + 24px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            incomplete-note := BodyText { x: 18px; y: 12px; width: parent.width - 36px; text: GuiI18n.text("gui-storage-incomplete"); color: Theme.warning; font-size: Theme.label-size; wrap: word-wrap; }
+        }
+        for note in root.maintenance-unchecked : Rectangle {
+            min-height: unchecked-line.preferred-height + 24px;
+            preferred-height: unchecked-line.preferred-height + 24px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            unchecked-line := BodyText { x: 18px; y: 12px; width: parent.width - 36px; text: note; color: Theme.text-muted; font-size: Theme.label-size; wrap: word-wrap; }
+        }
+        for fault in root.maintenance-faults : Rectangle {
+            min-height: fault-line.preferred-height + 24px;
+            preferred-height: fault-line.preferred-height + 24px;
+            Rectangle { y: 0px; height: 1px; background: Theme.border; }
+            fault-line := BodyText { x: 18px; y: 12px; width: parent.width - 36px; text: fault; color: Theme.warning; font-size: Theme.label-size; wrap: word-wrap; }
+        }
     }
-    if root.maintenance-checked : VerticalLayout {
-        spacing: 6px;
-        Heading { text: root.maintenance-integrity; font-size: Theme.row-heading-size; wrap: word-wrap; }
-        for fault in root.maintenance-faults : BodyText { text: fault; color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
-        for note in root.maintenance-unchecked : BodyText { text: note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-    }
-
 }

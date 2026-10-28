@@ -1,5 +1,6 @@
 // A host's own settings forms: runtime options and server properties.
 
+import { Plate } from "../components/surface.slint";
 import { ScrollView } from "std-widgets.slint";
 import { ChoiceBox } from "../components/selection.slint";
 import { AppButton, BusySpinner, LabeledToggle, Pill, TextField, Toggle } from "../components/controls.slint";
@@ -9,51 +10,14 @@ import {
     Divider,
     FieldLabel,
     Heading,
+    HoverNote,
     SectionTitle
 } from "../components/text.slint";
 import { GuiI18n, PropertyRules, ServerHints } from "../globals.slint";
 import { HostView, JavaChoiceRow, ServerPropertyGroup, ServerPropertyRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 import { FixPanel } from "diagnostics.slint";
-
-// One runtime a host could use, with whether it is the one in use and, when
-// the host refuses it, why.
-component JavaChoiceItem inherits Rectangle {
-    in property <JavaChoiceRow> choice;
-    in property <bool> enabled;
-    // Why choosing waits while `enabled` is false.
-    in property <string> hint;
-    callback chosen();
-    border-radius: 6px;
-    border-width: 1px;
-    border-color: root.choice.current ? Theme.accent : Theme.border;
-    background: root.choice.current ? Theme.selection-card : Theme.surface;
-    height: row.preferred-height;
-    accessible-role: AccessibleRole.groupbox;
-    accessible-label: root.choice.title;
-    row := HorizontalLayout {
-        padding: 10px;
-        spacing: 10px;
-        VerticalLayout {
-            horizontal-stretch: 1;
-            spacing: 2px;
-            BodyText { text: root.choice.title; color: root.choice.compatible ? Theme.text : Theme.text-muted; wrap: word-wrap; }
-            if root.choice.detail != "" : BodyText { text: root.choice.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            if root.choice.reason != "" : BodyText { text: root.choice.reason; color: Theme.warning; font-size: Theme.caption-size; wrap: word-wrap; }
-        }
-        VerticalLayout {
-            alignment: center;
-            if root.choice.current : Pill { text: GuiI18n.text("gui-java-choice-current"); tone-color: Theme.accent; }
-            if !root.choice.current : AppButton {
-                text: GuiI18n.text("gui-java-choice-use");
-                accessible-name: GuiI18n.value("gui-java-choice-use-named", root.choice.title);
-                enabled: root.enabled && root.choice.compatible;
-                hint: !root.choice.compatible ? root.choice.reason : root.hint;
-                clicked => { root.chosen(); }
-            }
-        }
-    }
-}
+import { JavaChoiceItem } from "java-choice.slint";
 
 // One labeled line of the status card.
 component JavaFact inherits HorizontalLayout {
@@ -91,8 +55,8 @@ export component JavaRuntimeSection inherits VerticalLayout {
         BodyText { text: GuiI18n.text("gui-java-loading"); horizontal-stretch: 1; }
     }
     if root.host.java-tone != "" : Rectangle {
-        border-radius: 8px;
-        border-width: 1px;
+        border-radius: Theme.card-radius;
+        border-width: Theme.strong-border-width;
         border-color: root.tone.with-alpha(0.55);
         background: Theme.surface;
         height: card.preferred-height;
@@ -197,7 +161,7 @@ export component HostRuntimeForm inherits ScrollView {
         args-field.text = root.host.runtime-jvm-args;
     }
     viewport-width: self.width;
-    VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px;
+    VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
         SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: root.for-client ? GuiI18n.text("gui-instance-runtime-detail") : GuiI18n.text("gui-server-runtime-detail"); }
         BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
         HorizontalLayout { spacing: 12px;
@@ -243,6 +207,9 @@ export component ServerPropertyRowView inherits Rectangle {
     in property <bool> restart-pending;
     // Draws the line that separates it from the row above.
     in property <bool> separated;
+    // Names the row by its key in server.properties and keeps the description
+    // for hover, for a long list of settings read by their keys.
+    in property <bool> keys-only;
     callback edited(string);
     callback chosen(int);
     callback reset();
@@ -257,20 +224,35 @@ export component ServerPropertyRowView inherits Rectangle {
         padding-left: 16px;
         padding-right: 16px;
         spacing: 24px;
-        VerticalLayout {
+        Rectangle {
             horizontal-stretch: 1;
-            alignment: center;
-            spacing: 3px;
-            HorizontalLayout {
-                spacing: 8px;
-                BodyText { text: root.item.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
-                if root.item.changed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-changed"); tone-color: Theme.accent; content-height: 20px; } }
-                if root.item.awaiting-restart && root.restart-pending : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-restart"); tone-color: Theme.warning; content-height: 20px; } }
-                Rectangle { horizontal-stretch: 1; }
+            min-width: 0px;
+            min-height: label-column.preferred-height;
+            preferred-height: label-column.preferred-height;
+            label-column := VerticalLayout {
+                width: parent.width;
+                height: parent.height;
+                alignment: center;
+                spacing: 3px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    if !root.keys-only : BodyText { text: root.item.label; color: Theme.text; vertical-alignment: center; horizontal-stretch: 0; }
+                    if root.keys-only : Text { text: root.item.key; color: Theme.text; font-family: Theme.mono-family; font-size: Theme.body-size; font-weight: 700; vertical-alignment: center; horizontal-stretch: 0; overflow: elide; min-width: 0px; }
+                    if root.item.changed : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-changed"); tone-color: Theme.accent; content-height: 20px; } }
+                    if root.item.awaiting-restart && root.restart-pending : VerticalLayout { alignment: center; Pill { text: GuiI18n.text("gui-property-restart"); tone-color: Theme.warning; content-height: 20px; } }
+                    Rectangle { horizontal-stretch: 1; }
+                }
+                if !root.keys-only : BodyText { text: root.item.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                if !root.keys-only && root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
+                if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
             }
-            BodyText { text: root.item.detail; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            if root.item.note != "" : BodyText { text: root.item.note; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
-            if root.item.error != "" : BodyText { text: root.item.error; color: Theme.danger; font-size: Theme.caption-size; wrap: word-wrap; }
+            label-area := TouchArea { enabled: root.keys-only; }
+            HoverNote {
+                text: root.keys-only ? (root.item.note == "" ? root.item.detail : root.item.detail + " " + root.item.note) : "";
+                hovered: label-area.has-hover;
+                pointer-x: label-area.mouse-x;
+                pointer-y: label-area.mouse-y;
+            }
         }
         if root.item.can-reset : VerticalLayout {
             alignment: center;
@@ -305,17 +287,16 @@ export component ServerPropertyRowView inherits Rectangle {
 export component ServerPropertyGroupCard inherits Rectangle {
     in property <ServerPropertyGroup> group;
     in property <bool> restart-pending;
+    // See `ServerPropertyRowView.keys-only`.
+    in property <bool> keys-only;
     callback edited(string, string);
     callback chosen(string, int);
     callback reset(string);
-    border-radius: 8px;
-    border-width: 1px;
-    border-color: Theme.border;
-    background: Theme.surface;
     // Left to itself, the card measures its wrapped lines unwrapped.
     height: card.preferred-height;
     accessible-role: AccessibleRole.groupbox;
     accessible-label: root.group.heading;
+    Plate { width: root.width; height: root.height; }
     card := VerticalLayout {
         padding-top: 12px;
         padding-bottom: 4px;
@@ -323,6 +304,7 @@ export component ServerPropertyGroupCard inherits Rectangle {
         for row[index] in root.group.rows : ServerPropertyRowView {
             item: row;
             separated: index > 0;
+            keys-only: root.keys-only;
             restart-pending: root.restart-pending;
             edited(value) => { root.edited(row.key, value); }
             chosen(position) => { root.chosen(row.key, position); }
@@ -388,7 +370,7 @@ export component ServerPropertiesForm inherits VerticalLayout {
             if root.running && !root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-properties-running"); color: Theme.text-secondary; wrap: word-wrap; }
             if root.host.server.restart-required : HorizontalLayout { alignment: start; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }
             if root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-restart-required-detail"); color: Theme.warning; wrap: word-wrap; }
-            Rectangle { border-radius: 8px; border-width: 1px; border-color: Theme.border; background: Theme.surface;
+            Rectangle { border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                 // Left to itself, the card measures its wrapped lines unwrapped.
                 height: network-card.preferred-height;
                 network-card := VerticalLayout { padding: 16px; spacing: 10px;
@@ -397,7 +379,7 @@ export component ServerPropertiesForm inherits VerticalLayout {
             Rectangle { height: 32px; HorizontalLayout { spacing: 10px; LabeledToggle { label: GuiI18n.text("gui-online-mode"); enabled: !root.running; checked <=> root.online-mode; } BodyText { visible: !root.online-mode && root.access != "Localhost"; text: GuiI18n.text("gui-network-warning"); color: Theme.warning; } } }
                 }
             }
-            Rectangle { height: eula-card.preferred-height; border-radius: 8px; border-width: 1px; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface;
+            Rectangle { height: eula-card.preferred-height; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: root.eula-accepted ? Theme.success : Theme.warning; background: Theme.surface;
                 eula-card := HorizontalLayout { padding: 14px; spacing: 14px;
                     VerticalLayout { horizontal-stretch: 1; spacing: 2px; Heading { text: GuiI18n.text("gui-server-eula"); font-size: Theme.row-heading-size; } BodyText { text: root.eula-status; wrap: word-wrap; } }
                     VerticalLayout { alignment: center; AppButton { text: root.eula-accepted ? GuiI18n.text("gui-eula-review") : GuiI18n.text("gui-eula-review-accept"); clicked => { root.review-eula(); } } }

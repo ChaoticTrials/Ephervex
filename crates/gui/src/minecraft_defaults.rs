@@ -2391,13 +2391,7 @@ impl MinecraftDefaultsModel {
             editor: editor.as_str().into(),
             advanced: descriptor.tier == PresentationTier::Advanced,
             overridden: origin == ValueOrigin::Overridden,
-            // An overridden row says so with its pill and its Reset action,
-            // so the caption is only worth spending a line on for a row that
-            // is showing what Minecraft would do.
-            state_text: match origin {
-                ValueOrigin::Overridden => SharedString::default(),
-                ValueOrigin::NotOverridden => lookup(origin.message_id()).into(),
-            },
+            state_text: lookup(origin.message_id()).into(),
             // Offered whenever configuration holds anything for this row,
             // including a value an older Ephervex stored without applying, so
             // there is always a way to clear it.
@@ -2552,6 +2546,20 @@ impl MinecraftDefaultsModel {
             }
         }
 
+        // A row that is showing what Minecraft would do says what that is.
+        if origin == ValueOrigin::NotOverridden
+            && shown.is_some()
+            && let Some(value) = shown.as_ref().and_then(|value| default_text(&row, value))
+        {
+            row.state_text = lookup_args(
+                "gui-minecraft-state-default",
+                [
+                    ("state", Arg::from(lookup(origin.message_id()).as_str())),
+                    ("value", Arg::from(value.as_str())),
+                ],
+            )
+            .into();
+        }
         if invalid.contains(&id) {
             row.invalid = true;
             row.validation = self
@@ -2576,6 +2584,38 @@ impl MinecraftDefaultsModel {
         }
         row
     }
+}
+
+/// The value Minecraft would use, written out as the caption that names it.
+///
+/// Read from the value itself rather than from the row's fields, which hold
+/// what the user is typing. `None` when the row's editor has nothing to read
+/// back.
+fn default_text(row: &MinecraftPreferenceRow, value: &MinecraftPreferenceValue) -> Option<String> {
+    let text = match (row.editor.as_str(), value) {
+        ("toggle", MinecraftPreferenceValue::Boolean(on)) => lookup(if *on {
+            "gui-minecraft-value-on"
+        } else {
+            "gui-minecraft-value-off"
+        }),
+        ("slider", _) => row.number_readout.to_string(),
+        ("number", MinecraftPreferenceValue::Integer(number)) => {
+            trim_number(whole_as_number(*number))
+        }
+        ("number", MinecraftPreferenceValue::Decimal(number)) => trim_number(number.get()),
+        ("enum" | "language", _) => usize::try_from(row.enum_index)
+            .ok()
+            .and_then(|index| slint::Model::row_data(&row.enum_labels, index))
+            .map(|label| label.to_string())
+            .unwrap_or_default(),
+        ("window", MinecraftPreferenceValue::WindowSize(size)) => {
+            format!("{} \u{d7} {}", size.width, size.height)
+        }
+        ("keybinding", _) => row.binding_label.to_string(),
+        ("text", MinecraftPreferenceValue::Text(text)) => text.clone(),
+        _ => String::new(),
+    };
+    (!text.is_empty()).then_some(text)
 }
 
 /// Whether one descriptor answers the filter.
@@ -2839,6 +2879,35 @@ mod tests {
             1,
             "and it is saved rather than optimized away"
         );
+    }
+
+    #[test]
+    fn a_row_that_is_not_overridden_names_what_minecraft_uses_and_not_what_is_being_typed() {
+        let mut model = loaded_model();
+        let scale = id("gui_scale");
+        let caption = |model: &mut MinecraftDefaultsModel| {
+            (0..CATEGORIES.len()).find_map(|index| {
+                model.select_category(index);
+                model
+                    .rows()
+                    .into_iter()
+                    .find(|row| row.id == "gui_scale")
+                    .map(|row| row.state_text.to_string())
+            })
+        };
+        let before = caption(&mut model).expect("the GUI scale row");
+        assert!(
+            before.starts_with(&lookup("gui-minecraft-state-not-overridden")),
+            "{before}"
+        );
+
+        // Text that is not a value overrides nothing, so the caption goes on
+        // naming Minecraft's own value.
+        model.set_number_text(&scale, "abc");
+        assert_eq!(model.origin_of(&scale), ValueOrigin::NotOverridden);
+        let after = caption(&mut model).expect("the GUI scale row");
+        assert_eq!(after, before);
+        assert!(!after.contains("abc"), "{after}");
     }
 
     #[test]

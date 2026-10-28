@@ -48,7 +48,7 @@ fn row(label: &str, size: &str, lines: &[&str], examples: &[&str]) -> StorageGro
 
 fn settings(ui: &AppWindow, tab: &str) {
     ui.set_loading(false);
-    ui.set_page(4);
+    ui.set_settings_open(true);
     ui.set_workspace_open(false);
     ui.set_settings_tab(tab.into());
     settle(ui);
@@ -69,7 +69,7 @@ fn every_maintenance_action_is_offered_and_raises_its_own_request() {
         let sink = Rc::clone(&asked);
         register(&ui, move || sink.borrow_mut().push(name));
     }
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
 
     button(&ui, &lookup("gui-storage-inspect")).mock_single_click(PointerEventButton::Left);
     button(&ui, &lookup("gui-storage-verify")).mock_single_click(PointerEventButton::Left);
@@ -77,7 +77,7 @@ fn every_maintenance_action_is_offered_and_raises_its_own_request() {
 
     assert_eq!(asked.borrow().as_slice(), ["inspect", "verify", "review"]);
     assert!(
-        visible(&ui, &lookup("gui-storage-idle")),
+        visible(&ui, &lookup("gui-storage-shared-files-detail")),
         "nothing is claimed before something has been inspected"
     );
 }
@@ -88,7 +88,7 @@ fn a_running_step_disables_the_others_with_a_reason_and_can_be_stopped() {
     let stopped = Rc::new(RefCell::new(false));
     let sink = Rc::clone(&stopped);
     ui.on_stop_storage_maintenance(move || *sink.borrow_mut() = true);
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     ui.set_storage_maintenance_busy("verify".into());
     ui.set_storage_maintenance_progress("a-library.jar".into());
     settle(&ui);
@@ -117,7 +117,7 @@ fn recovery_waits_for_damage_an_instance_needs_and_says_so() {
     let recovered = Rc::new(RefCell::new(0));
     let sink = Rc::clone(&recovered);
     ui.on_recover_storage(move || *sink.borrow_mut() += 1);
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
 
     let recover = button(&ui, &lookup("gui-storage-recover"));
     assert_eq!(recover.accessible_enabled(), Some(false));
@@ -135,7 +135,7 @@ fn recovery_waits_for_damage_an_instance_needs_and_says_so() {
 #[test]
 fn an_inspection_shows_each_kind_what_is_reclaimable_and_why_the_rest_is_kept() {
     let ui = window();
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     ui.set_storage_inspected(true);
     ui.set_storage_headline("2.0 KiB can be reclaimed".into());
     ui.set_storage_hosts("Based on 2 instances and 1 server".into());
@@ -172,7 +172,7 @@ fn an_inspection_shows_each_kind_what_is_reclaimable_and_why_the_rest_is_kept() 
 #[test]
 fn an_integrity_result_lists_damage_and_what_could_not_be_checked() {
     let ui = window();
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     ui.set_storage_checked(true);
     ui.set_storage_integrity("1 file is damaged or missing.".into());
     ui.set_storage_faults(strings(&[
@@ -195,7 +195,7 @@ fn an_integrity_result_lists_damage_and_what_could_not_be_checked() {
 #[test]
 fn totals_that_maintenance_made_stale_are_replaced_by_a_notice() {
     let ui = window();
-    settings(&ui, "Disk Usage");
+    settings(&ui, "Storage");
     ui.set_disk_usage_stale(true);
     settle(&ui);
 
@@ -293,7 +293,7 @@ fn the_storage_page_offers_a_review_and_no_unconditional_clear() {
     ui.on_review_storage_cleanup(move || *sink.borrow_mut() += 1);
     settings(&ui, "Storage");
 
-    button(&ui, &lookup("gui-review-storage-cleanup")).mock_single_click(PointerEventButton::Left);
+    button(&ui, &lookup("gui-storage-preview-cleanup")).mock_single_click(PointerEventButton::Left);
 
     assert_eq!(*reviews.borrow(), 1);
     assert_eq!(ui.get_modal(), "", "reviewing is the controller's to open");

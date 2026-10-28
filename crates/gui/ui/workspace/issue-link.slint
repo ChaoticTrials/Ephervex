@@ -1,0 +1,107 @@
+// The issue or bug report an instance reproduces: shown as a link that opens
+// in the browser, with a way to change or clear it.
+
+import { AppButton, TextField } from "../components/controls.slint";
+import { GuiI18n } from "../globals.slint";
+import { Theme } from "../theme.slint";
+
+export component IssueLinkRow inherits FocusScope {
+    // Whose link this is, so an edit does not follow the pane to another
+    // instance.
+    in property <string> host-id;
+    // The stored link, empty when none is set.
+    in property <string> link;
+    // Asks to store this link; empty clears it.
+    callback save(string);
+    callback open();
+    private property <bool> editing: false;
+    // Whether a save was asked for and the stored link has not answered yet. A
+    // link that was refused stays in the field to be fixed.
+    private property <bool> waiting: false;
+    // What is typed while editing.
+    private property <string> draft;
+    // The link and the hard shadow of its button.
+    private property <length> link-width: min(440px, probe.preferred-width + 28px + Theme.button-icon-size + 6px);
+    focus-on-tab-navigation: false;
+    focus-on-click: false;
+    height: Theme.button-height-small + Theme.shadow-room;
+    changed host-id => { root.editing = false; root.waiting = false; root.draft = ""; }
+    // The stored link changing is the answer to a save.
+    changed link => { if (root.waiting) { root.editing = false; root.waiting = false; } }
+    // Asks to store the draft, or just closes when it is what is stored.
+    function submit() {
+        if (root.draft == root.link) {
+            root.editing = false;
+        } else {
+            root.waiting = true;
+            root.save(root.draft);
+        }
+    }
+    // Escape leaves the edit without storing it.
+    key-pressed(event) => {
+        if (root.editing && event.text == Key.Escape) {
+            root.editing = false;
+            root.waiting = false;
+            return accept;
+        }
+        return reject;
+    }
+    // Measures the link at the button's size; never drawn.
+    probe := Text { visible: false; text: root.link; font-size: Theme.label-size; font-weight: 700; }
+    HorizontalLayout {
+        spacing: 8px;
+        alignment: start;
+        padding-bottom: Theme.shadow-room;
+        // Held to its own width rather than the link's: a long address is
+        // elided in the button, whatever room the header has.
+        if !root.editing && root.link != "" : Rectangle {
+            width: root.link-width;
+            horizontal-stretch: 0;
+            AppButton {
+                width: parent.width;
+                compact: true;
+                text: root.link;
+                accessible-name: GuiI18n.value("gui-issue-link-open", root.link);
+                icon: @image-url("../../../../assets/icons/external-link.svg");
+                clicked => { root.open(); }
+            }
+        }
+        if !root.editing && root.link == "" : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-issue-link-add");
+            icon: @image-url("../../../../assets/icons/add.svg");
+            clicked => {
+                root.draft = "";
+                root.editing = true;
+            }
+        }
+        if !root.editing && root.link != "" : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-issue-link-edit");
+            clicked => {
+                root.draft = root.link;
+                root.editing = true;
+            }
+        }
+        if root.editing : TextField {
+            text <=> root.draft;
+            focus-when-shown: true;
+            placeholder: GuiI18n.text("gui-issue-link-placeholder");
+            accessible-name: GuiI18n.text("gui-issue-link");
+            height: Theme.button-height-small;
+            horizontal-stretch: 1;
+            accepted => { root.submit(); }
+        }
+        if root.editing : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-issue-link-save");
+            tone: "primary";
+            clicked => { root.submit(); }
+        }
+        if root.editing : AppButton {
+            compact: true;
+            text: GuiI18n.text("gui-cancel");
+            clicked => { root.editing = false; root.waiting = false; }
+        }
+    }
+}

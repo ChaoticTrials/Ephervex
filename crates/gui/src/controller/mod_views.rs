@@ -438,6 +438,7 @@ mod tests {
                 author: String::new(),
                 icon: String::new(),
                 note: String::new(),
+                downloads: String::new(),
                 server_support: String::new(),
                 blocked_reason: String::new(),
             }],

@@ -7,31 +7,38 @@ import { GuiI18n } from "../globals.slint";
 import { MinecraftPreferenceRow } from "../models.slint";
 import { Theme } from "../theme.slint";
 
-export component CompatibilityBadge inherits Rectangle {
+// What a release does with a setting, as a mark and a colored word.
+component CompatibilityLine inherits Rectangle {
     in property <string> text;
     in property <string> kind;
     in property <string> detail;
     property <color> tone: root.kind == "supported" ? Theme.success
-        : root.kind == "unavailable" ? Theme.text-muted
-        : root.kind == "unrepresentable" ? Theme.danger
+        : root.kind == "unavailable" || root.kind == "unrepresentable" ? Theme.danger
         : Theme.warning;
     visible: root.text != "";
-    width: root.text == "" ? 0px : label.preferred-width + 18px;
-    height: 24px;
-    horizontal-stretch: 0;
-    border-radius: 5px;
-    border-width: 1px;
-    border-color: root.tone.with-alpha(0.55);
-    background: root.tone.with-alpha(0.12);
+    height: root.text == "" ? 0px : label.preferred-height;
     accessible-role: AccessibleRole.text;
     accessible-label: root.detail == "" ? root.text : root.text + ". " + root.detail;
-    label := Text {
-        text: root.text;
-        color: root.tone;
-        font-size: Theme.caption-size;
-        font-weight: 600;
-        horizontal-alignment: center;
-        vertical-alignment: center;
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 12px;
+                height: 12px;
+                source: root.kind == "supported" ? @image-url("../../../../assets/icons/check.svg") : root.kind == "unavailable" || root.kind == "unrepresentable" ? @image-url("../../../../assets/icons/close.svg") : @image-url("../../../../assets/icons/alert.svg");
+                colorize: root.tone;
+            }
+        }
+        label := Text {
+            text: root.text;
+            color: root.tone;
+            font-size: Theme.label-size;
+            font-weight: 600;
+            vertical-alignment: center;
+            overflow: elide;
+        }
     }
 }
 
@@ -58,9 +65,9 @@ export component PreferenceKeyBindingEditor inherits Rectangle {
     // a mouse button produces, so neither is elided into a guess.
     min-width: 210px;
     horizontal-stretch: 0;
-    border-radius: 6px;
-    border-width: root.capturing ? 2px : 1px;
-    border-color: root.capturing ? Theme.accent : scope.has-focus ? Theme.accent : Theme.border;
+    border-radius: Theme.card-radius;
+    border-width: root.capturing ? Theme.selection-outline-width : Theme.strong-border-width;
+    border-color: root.capturing ? Theme.accent : scope.has-focus ? Theme.accent : Theme.border-strong;
     background: root.capturing ? Theme.capture-active : Theme.field;
     accessible-role: button;
     accessible-label: root.accessible-name;
@@ -167,8 +174,8 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     property <length> line-gap: 6px;
     property <length> inner-width: root.width - 2 * root.inset;
     property <length> text-width: root.split ? root.inner-width - Theme.preference-control-column-width - root.gap : root.inner-width;
-    property <length> heading-height: root.item.section-heading == "" ? 0px : 42px * Theme.text-scale;
-    property <length> head-height: root.split ? names.preferred-height + root.line-gap + badges.preferred-height : max(names.preferred-height, badges.preferred-height);
+    property <length> heading-height: root.item.section-heading == "" ? 0px : Theme.preference-heading-height;
+    property <length> head-height: root.split ? names.preferred-height + (badges.preferred-height > 0px ? root.line-gap + badges.preferred-height : 0px) : max(names.preferred-height, badges.preferred-height);
     property <length> detail-gap: details.preferred-height > 0px ? root.line-gap : 0px;
     property <length> text-height: root.split
         ? root.head-height + root.detail-gap + details.preferred-height
@@ -181,8 +188,11 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     if root.item.section-heading != "" : Rectangle {
         y: 0px;
         height: root.heading-height;
+        background: Theme.background;
+        if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
         VerticalLayout {
             alignment: end;
+            padding-left: root.inset;
             padding-bottom: 7px;
             Eyebrow { text: root.item.section-heading; }
         }
@@ -190,10 +200,11 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
     Rectangle {
         y: root.heading-height;
         height: parent.height - root.heading-height;
-        border-radius: 8px;
-        border-width: 1px;
-        border-color: root.item.dirty ? Theme.accent.with-alpha(0.65) : Theme.border;
-        background: Theme.surface;
+        // A release that lacks the setting dims the row, and an edit that is
+        // not saved yet tints it.
+        opacity: root.item.status-kind == "unavailable" ? 0.6 : 1;
+        background: root.item.dirty ? Theme.accent.with-alpha(0.08) : root.item.status-kind == "unavailable" ? Theme.well : transparent;
+        if root.y > 0px || root.heading-height > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
         names := VerticalLayout {
             x: root.inset;
             y: root.inset + (root.split ? 0px : (root.head-height - self.preferred-height) / 2);
@@ -204,22 +215,17 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
             Text { text: root.item.label; color: Theme.text; font-size: Theme.row-heading-size; font-weight: 600; vertical-alignment: center; overflow: elide; }
             Text { text: root.item.technical-id; color: Theme.text-muted; font-size: Theme.caption-size; font-family: Theme.mono-family; overflow: elide; }
         }
-        // Every badge in one cluster on one baseline. Split across the
-        // label column and this one they sat at different heights, and an
-        // override read as a second compatibility verdict.
+        // The row's tags in one cluster on one baseline.
         badges := ActionRow {
             x: root.split ? root.inset : root.inset + root.inner-width - self.preferred-width;
             y: root.split ? root.inset + names.preferred-height + root.line-gap : root.inset + (root.head-height - self.preferred-height) / 2;
             width: min(self.preferred-width, root.split ? root.text-width : root.inner-width);
             height: self.preferred-height;
-            // Muted: a tier is a classification, not a state, and it must
-            // not compete with the three badges beside it that are.
+            // Muted: a tier is a classification, not a state.
             if root.item.advanced : Pill { text: GuiI18n.text("gui-minecraft-advanced"); tone-color: Theme.text-muted; }
-            // Not the compatibility badge's green: what Ephervex writes and
-            // what a release supports are different sentences.
-            if root.item.overridden : Pill { text: GuiI18n.text("gui-minecraft-state-overridden"); tone-color: Theme.accent-secondary; }
             if root.item.dirty : Pill { text: GuiI18n.text("gui-minecraft-unsaved"); tone-color: Theme.accent; }
-            CompatibilityBadge { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
+            // Beside the name when the row is stacked, so it takes no line of its own.
+            if !root.split : CompatibilityLine { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
         }
         controls := HorizontalLayout {
             spacing: 10px;
@@ -229,6 +235,8 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                 : root.inset + root.head-height + root.line-gap;
             width: root.split ? Theme.preference-control-column-width : root.inner-width;
             height: self.preferred-height;
+            // Editors sit against the Reset slot, so they line up down the page.
+            if root.split : Rectangle { horizontal-stretch: 1; min-width: 0px; }
             if root.item.editor == "toggle" : Toggle {
                 accessible-name: root.item.label;
                 checked: root.item.bool-value;
@@ -359,13 +367,25 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
                 accepted => { root.commit-text(root.item.id, text-field.text); }
                 focus-lost => { root.commit-text(root.item.id, text-field.text); }
             }
-            Rectangle { horizontal-stretch: 1; min-width: 8px; }
+            if !root.split : Rectangle { horizontal-stretch: 1; min-width: 8px; }
             // Never elided: which of absent, chosen, and applied a row is in
             // is the sentence this screen exists to make legible, and the
             // spacer beside it can shrink. In a split row it is the text
             // column's first line instead.
-            if !root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; horizontal-stretch: 0; }
-            if root.item.can-reset : AppButton {
+            if !root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: root.item.overridden ? Theme.accent-secondary : Theme.text-muted; horizontal-stretch: 0; }
+            if root.split : Rectangle {
+                width: 100px;
+                AppButton {
+                    x: 0px;
+                    y: (parent.height - self.height) / 2;
+                    width: parent.width;
+                    text: GuiI18n.text("gui-minecraft-forget");
+                    enabled: root.item.can-reset;
+                    hint: GuiI18n.text("gui-minecraft-forget-nothing");
+                    clicked => { root.forget(root.item.id); }
+                }
+            }
+            if !root.split && root.item.can-reset : AppButton {
                 text: GuiI18n.text("gui-minecraft-forget");
                 min-width: 116px;
                 clicked => { root.forget(root.item.id); }
@@ -377,7 +397,8 @@ export component MinecraftPreferenceRowCard inherits Rectangle {
             width: root.text-width;
             height: self.preferred-height;
             spacing: 3px;
-            if root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: Theme.text-muted; wrap: word-wrap; }
+            if root.split && root.item.state-text != "" : BodyText { text: root.item.state-text; color: root.item.overridden ? Theme.accent-secondary : Theme.text-muted; wrap: word-wrap; }
+            if root.split : CompatibilityLine { text: root.item.status; kind: root.item.status-kind; detail: root.item.status-detail; }
             if root.item.description != "" : Text { text: root.item.description; color: Theme.text-muted; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
             if root.item.invalid : Text { text: root.item.validation; color: Theme.danger; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }
             if root.item.notice != "" : Text { text: root.item.notice; color: Theme.warning; font-size: Theme.caption-size; wrap: root.split ? TextWrap.word-wrap : TextWrap.no-wrap; overflow: elide; }

@@ -1,0 +1,166 @@
+// The start page: a greeting, the ways to make something new, what is running,
+// what needs a look, where to pick up again, and what the launcher has been doing.
+
+import { ScrollView } from "std-widgets.slint";
+import { AppButton } from "../components/controls.slint";
+import { Panel } from "../components/surface.slint";
+import { BodyText, DisplayHeading } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { ActivityRow, AttentionRow, ResumeRow, RunningRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+import { ActivityCard } from "activity-card.slint";
+import { AttentionCard } from "attention-card.slint";
+import { ResumeCard } from "resume-card.slint";
+import { RunningCard } from "running-card.slint";
+
+// A heading over one block of the page, with how many it holds when it holds any.
+component HomeSection inherits VerticalLayout {
+    in property <string> title;
+    in property <int> count: -1;
+    spacing: 12px;
+    HorizontalLayout {
+        spacing: 9px;
+        alignment: start;
+        DisplayHeading { text: root.title; font-size: Theme.item-title-size; }
+        if root.count > 0 : BodyText { text: "\{root.count}"; color: Theme.text-muted; font-weight: 600; }
+    }
+    @children
+}
+
+export component HomePage inherits Panel {
+    in property <string> greeting;
+    in property <string> summary;
+    in property <[RunningRow]> running;
+    in property <[AttentionRow]> attention;
+    in property <[ResumeRow]> resume;
+    in property <[ActivityRow]> activities;
+    callback new-instance();
+    callback import-modpack();
+    callback new-server();
+    // (kind, id, surface)
+    callback open-host(string, string, string);
+    callback open-log(string, string);
+    callback open-console(string);
+    // (kind, id, launch)
+    callback stop(string, string, string);
+    callback force-stop(string, string);
+    callback launch(string, string);
+    callback cancel-operation(string);
+    private property <length> side-padding: 26px;
+    private property <length> grid-gap: 16px;
+    // Two columns of cards where each keeps at least its minimum width. Read
+    // from this page's own width, which the window decides, and not from the
+    // grid, which would be asking its content how wide it is.
+    private property <int> columns: root.width - 2 * root.side-padding - Theme.shadow-room >= 2 * Theme.home-card-min-width + root.grid-gap ? 2 : 1;
+    radius: Theme.dialog-radius;
+    lift: Theme.shadow-offset-card;
+    ScrollView {
+        width: parent.width;
+        height: parent.height;
+        viewport-width: self.width;
+        VerticalLayout {
+            alignment: start;
+            padding-left: root.side-padding;
+            padding-right: root.side-padding;
+            padding-top: 22px;
+            padding-bottom: 30px;
+            spacing: 26px;
+            VerticalLayout {
+                spacing: 4px;
+                DisplayHeading { text: root.greeting; font-size: Theme.greeting-size; wrap: word-wrap; }
+                BodyText { text: root.summary; font-size: Theme.row-heading-size; overflow: elide; }
+                // The buttons raise a hard shadow to the right and below.
+                HorizontalLayout {
+                    padding-top: 12px;
+                    padding-right: Theme.shadow-room;
+                    padding-bottom: Theme.shadow-room;
+                    spacing: 12px;
+                    alignment: start;
+                    AppButton { text: GuiI18n.text("gui-modal-new-instance"); icon: @image-url("../../../../assets/icons/add.svg"); tone: "primary"; clicked => { root.new-instance(); } }
+                    AppButton { text: GuiI18n.text("gui-import-modpack"); icon: @image-url("../../../../assets/icons/import.svg"); tone: "lavender"; clicked => { root.import-modpack(); } }
+                    AppButton { text: GuiI18n.text("gui-modal-new-server"); icon: @image-url("../../../../assets/icons/server.svg"); tone: "info"; clicked => { root.new-server(); } }
+                }
+            }
+            HomeSection {
+                title: GuiI18n.text("gui-home-running-now");
+                count: root.running.length;
+                if root.running.length == 0 : BodyText { text: GuiI18n.text("gui-nothing-running-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: root.grid-gap;
+                    padding-right: Theme.shadow-room;
+                    padding-bottom: Theme.shadow-room;
+                    for column in root.columns : VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        for item[index] in root.running : VerticalLayout {
+                            padding-bottom: Math.mod(index, root.columns) == column ? root.grid-gap : 0px;
+                            if Math.mod(index, root.columns) == column : RunningCard {
+                                item: item;
+                                open-log(kind, id) => { root.open-log(kind, id); }
+                                open-console(id) => { root.open-console(id); }
+                                open-workspace(kind, id) => { root.open-host(kind, id, "Overview"); }
+                                stop(kind, id) => { root.stop(kind, id, item.launch); }
+                                force-stop(id, launch) => { root.force-stop(id, launch); }
+                            }
+                        }
+                    }
+                }
+            }
+            HomeSection {
+                title: GuiI18n.text("gui-home-attention");
+                count: root.attention.length;
+                if root.attention.length == 0 : BodyText { text: GuiI18n.text("gui-home-attention-empty"); color: Theme.text-muted; wrap: word-wrap; }
+                VerticalLayout {
+                    spacing: 10px;
+                    padding-right: Theme.shadow-room;
+                    padding-bottom: Theme.shadow-room;
+                    for item in root.attention : AttentionCard {
+                        item: item;
+                        open(kind, id, surface) => { root.open-host(kind, id, surface); }
+                    }
+                }
+            }
+            if root.resume.length > 0 : HomeSection {
+                title: GuiI18n.text("gui-home-continue");
+                HorizontalLayout {
+                    spacing: root.grid-gap;
+                    padding-right: Theme.shadow-room;
+                    padding-bottom: Theme.shadow-room;
+                    for column in root.columns : VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        for item[index] in root.resume : VerticalLayout {
+                            padding-bottom: Math.mod(index, root.columns) == column ? root.grid-gap : 0px;
+                            if Math.mod(index, root.columns) == column : ResumeCard {
+                                item: item;
+                                launch(kind, id) => { root.launch(kind, id); }
+                                open-workspace(kind, id) => { root.open-host(kind, id, "Overview"); }
+                            }
+                        }
+                    }
+                }
+            }
+            HomeSection {
+                title: GuiI18n.text("gui-activity");
+                count: root.activities.length;
+                if root.activities.length == 0 : BodyText { text: GuiI18n.text("gui-no-recent-activity-detail"); color: Theme.text-muted; wrap: word-wrap; }
+                HorizontalLayout {
+                    spacing: root.grid-gap;
+                    padding-right: Theme.shadow-room;
+                    padding-bottom: Theme.shadow-room;
+                    for column in root.columns : VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: start;
+                        for item[index] in root.activities : VerticalLayout {
+                            padding-bottom: Math.mod(index, root.columns) == column ? root.grid-gap : 0px;
+                            if Math.mod(index, root.columns) == column : ActivityCard {
+                                item: item;
+                                cancel(id) => { root.cancel-operation(id); }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
