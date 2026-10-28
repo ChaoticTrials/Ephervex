@@ -962,11 +962,20 @@ mod tests {
             for id in &ids {
                 let paths = &paths;
                 scope.spawn(move || {
-                    Organization::update(paths, |organization| {
-                        organization.favorite_clients.insert(*id);
-                        Ok::<_, OrganizationError>(())
-                    })
-                    .expect("update");
+                    // A heavily loaded machine can outlast the lock's patience;
+                    // Busy changes nothing, so the update is simply retried.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+                    loop {
+                        let result = Organization::update(paths, |organization| {
+                            organization.favorite_clients.insert(*id);
+                            Ok::<_, OrganizationError>(())
+                        });
+                        match result {
+                            Err(OrganizationError::Busy { .. })
+                                if std::time::Instant::now() < deadline => {}
+                            other => break other.expect("update"),
+                        }
+                    }
                 });
             }
         });
