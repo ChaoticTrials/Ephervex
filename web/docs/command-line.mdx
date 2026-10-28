@@ -60,6 +60,8 @@ shell's installation instructions.
 | Task | Command | Guide |
 | --- | --- | --- |
 | Inspect an imported pack's retained file plan | `ephervex instance recipe INSTANCE_ID` | [Instances](./instances.mdx#inspect-a-retained-pack-recipe) |
+| Attach the issue an instance reproduces | `ephervex instance issue INSTANCE_ID URL` | [Instances](./instances.mdx#track-the-bug-you-are-reproducing) |
+| Keep steps, a note, and a reproduced count for an instance | `ephervex instance case INSTANCE_ID` | [Instances](./instances.mdx#track-the-bug-you-are-reproducing) |
 | Check which Java runtime a version or host would use | `ephervex java select --instance INSTANCE_ID` | [Settings](./settings.mdx#java) |
 | Install the Java a host expects | `ephervex java install --instance INSTANCE_ID` | [Instances](./instances.mdx#set-java-and-memory-for-one-instance) |
 | Check or clear interrupted server runtime state | `ephervex server recover status SERVER_ID` | [Servers](./servers.mdx#recover-a-server-after-an-interruption) |

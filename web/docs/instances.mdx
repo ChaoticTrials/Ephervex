@@ -50,7 +50,10 @@ In the host list, select **New Instance** and enter a name. Then:
 2. Choose Vanilla, Forge, or NeoForge. For Forge or NeoForge, select the exact
    loader build below the loader choice.
 3. Choose temporary storage for a disposable test, or turn on **Store
-   persistently** to keep the instance. Select **Create Instance**.
+   persistently** to keep the instance. Optionally enter an **Issue link**
+   (see [below](#track-the-bug-you-are-reproducing)) and turn on **Also create
+   a linked server** to get a server with the same versions and the mods that
+   run on a server. Select **Create Instance**.
 
 <ThemeScreenshot state="create-instance-dialog" region="dialog" callouts={createInstanceCallouts} alt="New Instance dialog: 1 marks the Minecraft release, 2 marks the loader build, and 3 marks the persistent storage choice" />
 
@@ -222,6 +225,90 @@ ask for confirmation.
 
 </TabItem>
 </Tabs>
+
+## Track the bug you are reproducing
+
+An instance can carry what you know about the bug it reproduces: a link to the
+issue, the steps that trigger it, a note, and how often it showed up again.
+The steps, note, and count are kept by Ephervex outside the instance's files,
+so restoring a snapshot does not roll them back and a diagnostic bundle never
+includes them. Servers have no case and no issue link.
+
+An issue link is a full `http://` or `https://` address of at most 2048 bytes,
+without spaces, a user name, or a password. Ephervex stores it as you typed it.
+Steps are limited to 100 per instance, 300 characters each, and a note to 8000
+characters. A refused entry names the limit and keeps what you typed.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Fill in **Issue link (optional)** when you create an instance, or select **Add
+issue link** in the instance's header later. **Edit** changes it in place: press
+Enter to save and Escape to leave. Pressing the link opens it in your browser,
+and **Overview** shows it under **Issue**.
+
+Open the **Case** tab, next to **Overview**, to write the case down:
+
+- **Steps** lists what it takes to make the bug happen. Type in **Add a step...**
+  and select **Add**. Turn on the switch beside a step when you have done it;
+  the heading counts "2 of 5 done". The remove button on a step deletes it.
+- **Reproduced** counts how often the bug showed up again. **Reproduced it**
+  adds one, and **Reset** sets the count back to zero.
+- **Note** holds free text. Select **Save note** to keep it; the button says
+  when there is nothing unsaved.
+- **What happened** lists the instance's history, oldest first: when it was
+  created, launched, and stopped, how the game exited, the errors its log
+  complained about, and each time you counted the bug again.
+
+<ThemeScreenshot state="client-case" alt="The Case tab of an instance with two of three steps done, a note, a reproduced count, and the history" />
+
+The host page also has a **Copy summary for the issue** card. **Copy summary**
+copies plain text for a bug report: the name, the issue link, the Minecraft
+version, loader, mod count, storage, linked server, your steps with their
+done marks, and how often the bug was seen again. It contains no paths from
+your computer.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Show, set, or remove the issue link:
+
+```bash
+ephervex instance issue INSTANCE_ID
+ephervex instance issue INSTANCE_ID https://github.com/owner/repo/issues/42
+ephervex instance issue INSTANCE_ID --clear
+```
+
+`instance show` prints it as `issue:`, and `--json` output reports it as
+`issue_link`.
+
+Without an action, `instance case` prints the steps, the note, and the
+reproduced count. Steps are named by the number printed beside them:
+
+```bash
+ephervex instance case INSTANCE_ID
+ephervex instance case INSTANCE_ID add-step "Place a belt and fill it"
+ephervex instance case INSTANCE_ID done 1
+ephervex instance case INSTANCE_ID undo 1
+ephervex instance case INSTANCE_ID remove-step 1
+ephervex instance case INSTANCE_ID note "The belt jams after a restart."
+ephervex instance case INSTANCE_ID note --clear
+ephervex instance case INSTANCE_ID reproduced
+ephervex instance case INSTANCE_ID reproduced --reset
+ephervex instance case INSTANCE_ID history
+```
+
+Add `--json` to get `steps` (each with `id`, `text`, and `done`), `note`, and
+`reproduced`. `history` lists what happened to the instance, oldest first;
+with `--json` it reports `events`, each with `at`, `kind`, `subject`, and
+`detail`.
+
+</TabItem>
+</Tabs>
+
+The history is removed with the instance's files, and it keeps only the newest
+events once it grows large. A game left running after Ephervex closed records
+its start but not its end.
 
 ## Copy or keep an instance
 
