@@ -9,7 +9,13 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 
 # Settings
 
-Open **Settings** to change Ephervex-wide behavior. An instance's or server's
+Open **Settings** with the gear beside the account chip at the bottom of the
+host list. A category list on the left has **General**, **Minecraft**,
+**Java**, **Accounts**, **Providers & APIs**, **Server Properties**,
+**Storage**, **Diagnostics**, and **About & Licenses**. Back returns to the
+host you had open.
+
+Settings change Ephervex-wide behavior. An instance's or server's
 own Java and memory overrides live in its workspace **Settings**
 ([instances](./instances.mdx#set-java-and-memory-for-one-instance),
 [servers](./servers.mdx#set-the-servers-java-and-memory)).
@@ -21,10 +27,11 @@ CLI commands available for them.
 
 **General** controls where linked servers appear, whether a compatible
 default account becomes an operator on new servers, and that operator's
-permission level. It also controls Ephervex's theme, whether
-[seasonal themes](./themes.mdx#seasonal-themes) may replace it, and interface
-text size; the separate **Diagnostics and console text** size affects
-technical views.
+permission level. It also controls Ephervex's theme, which you pick from cards
+drawn in each theme's colors, and interface text size; the separate
+**Diagnostics and console text** size affects technical views. While a
+[seasonal theme](./themes.mdx#seasonal-themes) is on, **Seasonal themes** also
+appears there.
 These display settings do not change Minecraft's interface. See [Themes](./themes.mdx)
 to add your own colors and logo.
 
@@ -75,9 +82,10 @@ Open **Settings > Minecraft**. Choose a category or filter for a setting.
 **Show advanced** reveals less common options, and **Only overridden** narrows
 the list to your choices. Choose a release under **Compatibility preview** to
 see which choices it supports; the preview does not change the saved defaults.
-Edit the preferences you want and select **Save Changes**. Use **Discard
-Changes** to abandon unsaved edits, or **Reset** on one preference to stop
-overriding it.
+Edit the preferences you want. A bar shows how many changes are unsaved; select
+**Save Changes** to keep them or **Discard Changes** to abandon them. **Reset**
+on one preference stops overriding it, and is disabled with an explanation on a
+preference that is not overridden.
 
 To change a key binding, select its control, or focus it and press Enter or
 Space, then press the new key or mouse button. Escape leaves the binding as
@@ -117,8 +125,8 @@ and the EULA are not part of these defaults.
 Open **Settings > Server Properties**. It has the same cards as a server's
 **Properties**; turn on **Show advanced** for the **Advanced** card. A row
 without a default says what a new server gets. Edit the values you want and
-select **Save Changes**, or **Discard Changes** to drop unsaved edits.
-**Reset** on a row removes its default.
+select **Save Changes** in the bar that shows the unsaved changes, or **Discard
+Changes** to drop them. **Reset** on a row removes its default.
 
 <ThemeScreenshot state="settings-server-defaults" alt="Settings Server Properties page with defaults for new servers, where Spawn protection has a default and a Reset button" />
 
@@ -262,7 +270,7 @@ CLI does not expose the desktop's watched-folder or cache controls.
 
 ## Disk usage
 
-**Settings > Disk usage** measures Ephervex's instances, servers, snapshots,
+The **Disk usage** card in **Settings > Storage** measures Ephervex's instances, servers, snapshots,
 logs, caches, shared game files, Java runtimes, and recovery state. Select
 **Measure** or **Measure again** to update the figures; measuring changes no
 files. The page groups space by how long it is retained and lets you open
@@ -275,11 +283,22 @@ disk-usage view.
 
 <ThemeScreenshot state="settings-disk-usage" alt="Disk usage view with measured categories and retention groups" />
 
+## Launcher log
+
+**Settings > Diagnostics** offers Ephervex's own log, which records its
+downloads, launches, and errors. Select **Save launcher log bundle...** to save
+it as a ZIP file. The files are copied as they are and never uploaded. On the
+CLI, `ephervex logs bundle --launcher` does the same; see
+[Diagnostics](./diagnostics.mdx#prepare-a-report-or-bundle).
+
 ## About & Licenses
 
 **Settings > About & Licenses** shows the open-source packages Ephervex is
-built on and the license each is under. Select a package to read its license
-text. The list is built into the release, so viewing it contacts nothing.
+built on and the license each is under. It also lists the three fonts Ephervex
+bundles, Pixelify Sans, Space Grotesk, and IBM Plex Mono, marked "(font)" and
+licensed under the SIL Open Font License 1.1. Select a package to read its
+license text. The list is built into the release, so viewing it contacts
+nothing.
 
 On the CLI, `ephervex licenses` shows a count per license, `--all` lists every
 package, and `--text LICENSE` prints the full text for one license identifier,
