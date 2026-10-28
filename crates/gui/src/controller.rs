@@ -46,8 +46,8 @@ use crate::ui::{
     JavaRow, LicenseRow, LinkedTargetRow, LocalModClashRow, LogChunk, MenuRow, ModRow,
     ModSearchRow, ModVersionRow, NameRules, PackContentRow, PendingEntityRow, PromoteServerRow,
     PropertyRules, RelationRow, RunningRow, ServerPackRules, ServerPropertyGroup,
-    ServerPropertyRow, ServerRow, SnapshotRow, Theme, WindowSizePreview, WorkflowActionRow,
-    WorkspaceSurfaceRow,
+    ServerPropertyRow, ServerRow, SnapshotRow, Theme, ThemeSwatch, WindowSizePreview,
+    WorkflowActionRow, WorkspaceSurfaceRow,
 };
 use crate::window_aspect;
 use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
@@ -10007,6 +10007,19 @@ fn apply_theme_settings(
             .map(|choice| SharedString::from(choice.theme.to_stored()))
             .collect(),
     ));
+    ui.set_theme_swatches(model(
+        choices
+            .iter()
+            .map(|choice| {
+                let palette =
+                    crate::palette::choice_palette(ui, &choice.theme, &user_themes.themes);
+                ThemeSwatch {
+                    fill: palette.background,
+                    outline: palette.border_strong,
+                }
+            })
+            .collect(),
+    ));
     let chosen = crate::palette::choice_index(&choices, theme);
     ui.set_theme_index(i32::try_from(chosen).unwrap_or_default());
     ui.set_application_theme(theme.to_stored().into());
@@ -17378,6 +17391,38 @@ mod tests {
         let problems: Vec<SharedString> = ui.get_theme_problems().iter().collect();
         assert_eq!(problems, ["broken.toml: Skipped."]);
         assert_eq!(ui.global::<Theme>().get_accent(), accent);
+    }
+
+    /// A card shows the colors of its own theme, so Light looks light and Dark
+    /// looks dark whichever one is painted now.
+    #[test]
+    fn a_theme_card_shows_its_own_colors_whichever_theme_is_painted() {
+        use crate::ui::BuiltInPalettes;
+
+        let ui = test_window();
+        let palettes = ui.global::<BuiltInPalettes>();
+        let (light, dark) = (palettes.get_workbench(), palettes.get_workbench_dark());
+        for scheme in [
+            ephervex_core::ApplicationColorScheme::Workbench,
+            ephervex_core::ApplicationColorScheme::Dark,
+        ] {
+            let chosen = ephervex_core::ApplicationTheme::BuiltIn(scheme);
+            apply_theme_settings(
+                &ui,
+                &chosen,
+                false,
+                &unseasoned(&chosen),
+                &crate::theme_files::UserThemes::default(),
+                &crate::theme_files::BrandingImages::default(),
+                "",
+            );
+            let swatches: Vec<_> = ui.get_theme_swatches().iter().collect();
+            assert_eq!(swatches.len(), 2, "{scheme:?}");
+            assert_eq!(swatches[0].fill, light.background, "{scheme:?}");
+            assert_eq!(swatches[0].outline, light.border_strong, "{scheme:?}");
+            assert_eq!(swatches[1].fill, dark.background, "{scheme:?}");
+            assert_eq!(swatches[1].outline, dark.border_strong, "{scheme:?}");
+        }
     }
 
     /// The chosen theme folder's decoded branding, read the way a settings

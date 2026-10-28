@@ -260,6 +260,15 @@ fn resolve(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) -> The
     }
 }
 
+/// The palette a theme in the list paints in, for the card that offers it.
+pub(crate) fn choice_palette(
+    ui: &AppWindow,
+    theme: &ApplicationTheme,
+    user_themes: &[UserTheme],
+) -> ThemePalette {
+    resolve(ui, &ShownTheme::Recorded(theme.clone()), user_themes)
+}
+
 /// Repaints the interface in the palette the shown theme resolves to.
 pub(crate) fn apply_theme(ui: &AppWindow, shown: &ShownTheme, user_themes: &[UserTheme]) {
     ui.global::<Theme>()

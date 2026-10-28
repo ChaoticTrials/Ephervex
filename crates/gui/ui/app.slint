@@ -93,6 +93,7 @@ import {
     ImportOptionRow,
     InstanceRow,
     JavaRow,
+    ThemeSwatch,
     LicenseRow,
     LinkedTargetRow,
     LocalModClashRow,
@@ -784,6 +785,8 @@ export component AppWindow inherits Window {
     in-out property <[string]> theme-labels: [GuiI18n.text("gui-color-scheme-light")];
     in-out property <[string]> theme-ids: ["workbench"];
     in-out property <int> theme-index: 0;
+    // One entry per theme in the list: the colors that theme paints a page with.
+    in-out property <[ThemeSwatch]> theme-swatches;
     // Whether a season is on today, which is when its switch is offered.
     in-out property <bool> seasonal-theme-in-season: false;
     // Whether a season's theme may stand in for Dark or Light, the name of
@@ -1620,6 +1623,8 @@ export component AppWindow inherits Window {
                                             HorizontalLayout { spacing: 12px; alignment: end; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
                                                 for label[index] in root.theme-labels : ThemeCard {
                                                     label: label;
+                                                    swatch-fill: root.theme-swatches[index].fill;
+                                                    swatch-outline: root.theme-swatches[index].outline;
                                                     selected: index == root.theme-index;
                                                     clicked => { root.theme-index = index; root.application-theme = root.theme-ids[index]; root.save-general(); }
                                                 }

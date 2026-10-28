@@ -1333,6 +1333,10 @@ export component ThemeCard inherits Rectangle {
     in property <bool> enabled: true;
     // Why the card cannot be chosen, shown on hover while it is disabled.
     in property <string> hint;
+    // The colors the theme paints a page with, so a card looks like its own
+    // theme and not like the one that is painted now.
+    in property <color> swatch-fill;
+    in property <color> swatch-outline;
     callback clicked();
     width: max(110px, name.preferred-width + 64px);
     height: 52px;
@@ -1352,8 +1356,6 @@ export component ThemeCard inherits Rectangle {
         lift: root.selected ? Theme.shadow-offset-small : 0px;
         fill: root.selected ? Theme.accent-primary : area.has-hover ? Theme.elevated : Theme.surface;
     }
-    // The theme's own colors are not known here, so the swatch only shows
-    // that a theme is chosen.
     Rectangle {
         x: 14px;
         y: (parent.height - self.height) / 2;
@@ -1361,8 +1363,8 @@ export component ThemeCard inherits Rectangle {
         height: 24px;
         border-radius: Theme.chip-radius;
         border-width: Theme.chip-border-width;
-        border-color: Theme.border-strong;
-        background: root.selected ? Theme.surface : Theme.background;
+        border-color: root.swatch-outline;
+        background: root.swatch-fill;
     }
     name := Text {
         x: 50px;
