@@ -9,39 +9,61 @@ import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
 
 # Themes
 
-Ephervex ships **Dark** and **Light** interface themes. A custom theme is a
-TOML file that starts from either built-in theme and changes the colors you
-choose. A theme folder can also replace the logo and window icon. Themes
-affect Ephervex, not Minecraft. Interface text size and the separate
+Ephervex ships **Light** and **Dark** interface themes. Both are the same
+look, with ink outlines, hard shadows, and pastel fills that carry meaning, on
+a light page and on a dark page. A custom theme is a TOML file that starts from
+either built-in theme and changes the colors you choose. A theme folder can
+also replace the logo and window icon. A few seasonal themes show themselves on
+set days of the year. Themes affect Ephervex, not Minecraft. Interface text size and the separate
 diagnostics and console text size are set in [General settings](./settings.mdx#general);
 themes do not change fonts or layout.
 
 ## Choose a theme
 
-Open **Settings > General > Interface theme** and select **Dark**, **Light**,
-or a custom theme listed there. The change is saved when selected.
+Open **Settings > General > Interface theme** and select the card of **Light**,
+**Dark**, or a custom theme. Each card shows the theme in its own colors. The
+change is saved when selected, and Light is the default for a new
+configuration.
 
-<ThemeScreenshot state="theme-selector-open" alt="General settings with the Interface theme list open, showing Dark, Light, and a custom theme" />
+<ThemeScreenshot state="theme-selector-open" alt="General settings with the Interface theme cards for Light, Dark, and a custom theme, each drawn in its own colors" />
 
 The CLI has no theme selector. Use the desktop app to choose a theme.
 
 ## Seasonal themes
 
-From October 25 through October 31, by the computer's local date, a
-Halloween theme with its own colors and pumpkin-ghost logo replaces **Dark**
-or **Light**. It is not in the theme list and cannot be chosen there. A custom
-theme is never replaced.
+On a few days of the year, by the computer's local date, a seasonal theme with
+its own colors, logo, and window icon replaces **Light** or **Dark**:
 
-Turn off **Settings > General > Seasonal themes** to see your chosen theme
-again. While a season's theme is shown, that setting names it. Your theme
+| Theme | Days |
+| --- | --- |
+| Halloween | October 25 through October 31 |
+| Christmas | December 24 through December 26 |
+| Pride Month | June 1 through June 30 |
+| April Fools | April 1 |
+
+A seasonal theme is not in the theme list and cannot be chosen there. It is
+the same look as the built-in themes in the season's colors. Halloween is a
+charcoal page with bone outlines, pumpkin orange fills, and ghost green for
+running hosts. Christmas is a snowy page with pine-green outlines and candy-red
+shadows. Pride Month is a warm white page where each fill is another color of
+the rainbow. April Fools is a sunny yellow page with navy outlines and clashing
+fills. The theme starts at midnight on its first day and ends at midnight after
+its last day, also while Ephervex stays open. A custom theme is never replaced.
+
+**Settings > General > Seasonal themes** appears only while a season is on,
+because it changes nothing on any other day. Turn it off to see your chosen
+theme again. While a season's theme is shown, the setting names it. Your theme
 setting is never changed, and your theme comes back when the season ends.
 
 <ThemeScreenshot state="settings-general" theme="halloween" alt="General settings in the Halloween theme, with the pumpkin-ghost logo and a note under Seasonal themes naming the Halloween theme" />
 
-To preview Halloween outside those dates, start the desktop app with
-`SEASONS_THEME=halloween ephervex-gui`. This changes only which date-based
-theme is shown. **Seasonal themes** must still be on, and a custom theme still
-takes precedence. Remove the variable to return to the calendar's choice.
+To preview a season outside its days, start the desktop app with the
+`SEASONS_THEME` variable set to `halloween`, `christmas`, `pride`, or
+`april-fools`, for example `SEASONS_THEME=halloween ephervex-gui`. The value is
+matched without regard to case, and a value that names no season is ignored.
+This changes only which date-based theme is shown. **Seasonal themes** must
+still be on, and a custom theme still takes precedence. Remove the variable to
+return to the calendar's choice.
 
 ## Add a custom theme
 
@@ -62,12 +84,12 @@ Start with a small file:
 ```toml
 format_version = 1
 name = "My Theme"
-parent = "dark"
+parent = "workbench"
 
 [colors]
-accent = "#1bd96a"
-background = "#16181c"
-surface = "#1d1f23"
+accent = "#0d7143"
+background = "#e6f4ec"
+surface = "#f7fcf9"
 ```
 
 For a complete example, see the [Modrinth theme on GitHub](https://github.com/ChaoticTrials/Ephervex/blob/main/docs/themes/modrinth.toml).
@@ -77,15 +99,21 @@ It sets every available color. Copy it into your themes folder as
 The file name, without `.toml`, is the theme's ID. Use lowercase letters,
 digits, `-`, or `_` in the name. A [theme folder](#add-a-logo-and-window-icon)
 takes its ID from the folder name instead. The `name` field is the label
-shown in the selector. Set `parent` to `"dark"` or `"light"`; omitted colors
-come from that parent, including the color scheme used by standard controls.
+shown in the selector. Omitted colors come from the `parent`, including any
+color added after your file was written, so a theme is never missing a color.
 `format_version`, `name`, `parent`, and `[colors]` may all be omitted. The
-defaults are format 1, the file or folder name, Dark, and no overrides. Names
+defaults are format 1, the file or folder name, Light, and no overrides. Names
 longer than 64 characters are cut to 64.
+
+| `parent` | Starts from |
+| --- | --- |
+| `"workbench"` | The Light theme: a light page with ink outlines and pastel fills |
+| `"light"` | The same as `"workbench"`. The name stays valid so existing themes keep loading. |
+| `"dark"` | The Dark theme: the same look on a dark page, with light outlines and a black hard shadow |
 
 Colors must be quoted hexadecimal values in `"#rrggbb"` form. Use
 `"#rrggbbaa"` when a color needs transparency. Edit the file, then select
-**Refresh** in the app's top bar or restart Ephervex. Choose **My Theme**
+**Refresh** above the host list or restart Ephervex. Choose **My Theme**
 under **Interface theme**. Renaming a file or folder changes its ID, so
 select the renamed theme again.
 
@@ -115,28 +143,38 @@ add more when a control needs a different color.
 
 | Tokens | What they color |
 | --- | --- |
-| `background`, `surface`, `field`, `elevated`, `overlay`, `border`, `bar`, `well` | Page floors, cards, text inputs and dropdowns, popovers, borders, bars, and technical views |
-| `selection`, `selection-card`, `selection-strong`, `toggle-on`, `toggle-knob`, `capture-active` | Selected rows, cards, chips, switches (track and knob), and key capture |
-| `accent`, `accent-secondary`, `success`, `warning`, `danger` | Focus, links, highlights, and status messages |
-| `primary-fill`, `primary-fill-hover`, `danger-fill`, `danger-fill-hover` | Filled buttons and their hover states |
-| `text`, `text-secondary`, `text-muted`, `on-primary`, `on-danger`, `log-error` | Text, button captions, and error lines in logs |
-| `server`, `modrinth`, `curseforge`, `vanilla`, `forge`, `neoforge` | Server, catalog, and loader marks |
+| `background`, `surface`, `field`, `elevated`, `overlay`, `border`, `bar`, `well` | The window floor, cards, text inputs and dropdowns, raised cards, popovers, dividers, the track of a switch that is off, and technical views |
+| `border-strong`, `shadow-hard`, `grid-line` | The outline around cards, buttons, chips, and panels, the hard shadow under them, and the hairline grid on the window floor |
+| `selection`, `selection-card`, `selection-strong`, `toggle-on`, `toggle-knob`, `capture-active` | Highlighted menu entries, a selected card or filter chip, switches (track and knob), and key capture |
+| `accent`, `accent-secondary`, `success`, `warning`, `danger` | Links, focus, highlights, and status messages |
+| `accent-primary`, `on-accent` | The fill of the selected navigation item, tab, and slider, and the caption drawn on it and on the host state fills |
+| `state-running`, `state-building`, `state-attention`, `state-stopped`, `state-server` | The tags and the strip down the cards of running, starting, failed, stopped, and server hosts, and the matching buttons and toasts |
+| `note-fill`, `danger-soft`, `ok-soft` | The workflow banner and favorite star, problem boxes, and healthy or in-use items |
+| `primary-fill`, `primary-fill-hover`, `danger-fill`, `danger-fill-hover` | Filled buttons and their hover states, and the account chip tile |
+| `text`, `text-secondary`, `text-muted`, `on-primary`, `on-danger`, `log-error` | Text, button captions, and error lines |
+| `terminal`, `on-terminal`, `on-terminal-muted`, `terminal-error` | Consoles and logs, which are drawn dark on any page |
+| `server`, `modrinth`, `curseforge`, `vanilla`, `forge`, `neoforge`, `chip-forge`, `chip-neoforge`, `chip-vanilla` | Server, catalog, and loader marks, and the loader chips on host cards |
 | `group-tone-1` to `group-tone-6` | Instance group labels, one color per group |
 | `shadow`, `scrim` | Popover shadows and the wash behind dialogs |
+| `header-ribbon-1` to `header-ribbon-6` | Nothing. The window has no header ribbon; the names stay valid so existing theme files load. |
 
 Keep text readable against `background`, `surface`, `field`, and `elevated`.
 A primary button uses `on-primary` over `primary-fill`; a destructive button
-uses `on-danger` over `danger-fill`. Keep `toggle-knob` distinct from
-`toggle-on`, so the knob of a switch that is on stands out from its track.
+uses `on-danger` over `danger-fill`; `on-accent` is drawn over `accent-primary`
+and the `state-` fills. Tones drawn as text, such as `accent`, `success`, and
+`danger`, need to be readable on `surface` too, so they are usually darker than
+the fills of the same hue. Keep the knob of a switch apart from `toggle-on` and
+`bar`, by its own color or by the `border-strong` outline around it.
 
 A theme that sets `accent`, `background`, or `text` and leaves out
 `toggle-knob`, `field`, or `on-primary` respectively gives that token the
 color it set. Otherwise, omitted colors come from the parent.
 
 Dropdowns, sliders, spinners, and menus use the colors above, including menus
-opened by a right-click or a "Launch as" button. Scroll bars and lists follow
-only the light or dark look of the parent and take no theme colors, so a theme
-with a very different palette can leave them looking out of place.
+opened by a right-click or a "Launch as" button. Scroll bars and lists take no
+theme colors and are drawn light or dark by the theme's `parent`, which a theme
+cannot set otherwise. A theme with a dark background therefore needs
+`parent = "dark"` to get dark scroll bars and lists.
 
 ## Add a logo and window icon
 
@@ -164,7 +202,7 @@ icon = "icon.png"
 
 | Key | Replaces |
 | --- | --- |
-| `logo` | The logo in the top bar and on **Settings > About & Licenses** |
+| `logo` | The logo above the host list and on **Settings > About & Licenses** |
 | `icon` | The window icon |
 
 Both keys are optional, and each image falls back to the Ephervex logo on its
@@ -172,7 +210,7 @@ own. If a theme file and a usable theme folder share a name, the folder is
 used. The [Modrinth theme](https://github.com/ChaoticTrials/Ephervex/blob/main/docs/themes/modrinth.toml)
 has a commented-out `[branding]` section to start from.
 
-<ThemeScreenshot state="theme-branding" alt="About & Licenses with a theme folder's logo in the top bar and above the version" />
+<ThemeScreenshot state="theme-branding" alt="About & Licenses with a theme folder's logo above the host list and above the version" />
 
 Each image must:
 
@@ -205,7 +243,7 @@ Select **Show problems** to list them, one line per problem.
 
 <ThemeScreenshot state="theme-problems" alt="Theme problems dialog listing each theme file or folder and what was wrong with it" />
 
-Ephervex skips a file with invalid TOML, an unsupported parent, a newer format
+Ephervex skips a file with invalid TOML, a `parent` other than `"workbench"`, `"dark"`, or `"light"`, a newer format
 version, a wrong field type, or an invalid color. It also skips a file whose
 name uses anything other than lowercase letters, digits, `-`, and `_`, a file
 that is not UTF-8 text, and a file that has the same name as a usable theme
@@ -217,5 +255,5 @@ listed with its path, and the Ephervex logo is shown instead.
 
 Theme files are limited to 64 KiB each, and Ephervex reads at most 100 themes,
 files and folders together. If the selected theme cannot be read, Ephervex
-uses Dark while keeping the choice; fix the file and select **Refresh** to
+uses Light while keeping the choice; fix the file and select **Refresh** to
 bring it back.
