@@ -14,18 +14,43 @@ Ephervex is not affiliated with or endorsed by Mojang or Microsoft.
 
 ## The window
 
-The left navigation has five pages: Instances, Servers, Running, Activity, and
-Settings. The right side shows details and actions for the selected item.
+The window has three columns.
 
-<ThemeScreenshot state="instances-overview" alt="Ephervex instance list" />
+- The left column is the host list. It holds the Ephervex logo with the
+  version and a **Refresh** button, a **Home** button, a search field with a
+  **Filters** button, a card for every instance and server, and the default
+  account chip. The gear beside the chip opens **Settings**.
+- The middle column shows Home, the instance or server you opened, or
+  Settings.
+- The right column appears beside Home only. It counts your temporary and
+  persistent instances and your servers, shows how full the shared download
+  cache is, and lists a few tips.
 
-Each card shows the instance's icon or loader, a favorite star, its group, the
-Minecraft version, how many managed mods it has, where it came from, whether
-its storage is temporary or persistent, and its state. Search, filters, and
-groups narrow a long list; see
+In a narrow window the host list and the right column leave the row. A button
+at the edge of the page opens either one over the page, and choosing a host or
+pressing the dimmed page closes it again.
+
+<ThemeScreenshot state="home-page" alt="Ephervex Home with the host list on the left and storage and tips on the right" />
+
+Home lists what is running, anything that needs your attention, the hosts you
+ran last, and recent activity. See [Running and activity](#running-and-activity).
+
+<ThemeScreenshot state="instances-overview" alt="Ephervex host list with instance and server cards" />
+
+Each card shows the host's name, a colored square and strip for its state, a
+favorite star, its group, chips for the Minecraft version and loader, and one
+state line: **Ready**, **Not yet**, **Last run** with how long ago, or **Needs
+fix**. A badge counts the problems recorded for the host. Press a card to open
+that host. Search, filters, and groups narrow a long list; see
 [Instances](./instances.mdx#search-filter-and-sort-instances).
 
 <ThemeScreenshot state="instances-overview" region="client-card" alt="An instance card" />
+
+The **Quick view** button on a card shows that host over the window without
+leaving the page you are on. **Open as page** opens it in the middle column,
+**Fullscreen** enlarges it, and **Close quick view** returns to where you were.
+
+<ThemeScreenshot state="quick-view" alt="A quick view of an instance shown over the window" />
 
 ## Creating and importing
 
@@ -112,14 +137,17 @@ that host's folder, and the other buttons add a pane below or close the pane.
 
 ## Running and activity
 
-Running lists the client instances and servers Ephervex currently supervises.
-You can open their logs, stop a game, or open a server console from this page.
+The **Running now** card on Home lists the client instances and servers
+Ephervex currently supervises. You can open their logs, stop a game, or open a
+server console from it. **Needs your attention** lists hosts with a recorded
+problem and opens the host that explains it, and **Continue where you left
+off** lists the hosts you ran last.
 
-<ThemeScreenshot state="running-page" alt="A running client instance and server with process controls" />
+<ThemeScreenshot state="running-page" alt="Home with a running client instance and server and their process controls" />
 
-Activity shows running, queued, completed, failed, and canceled operations.
-You can cancel work that is still running or queued. Activity is cleared when
-Ephervex exits.
+The **Activity** card shows running, queued, completed, failed, and canceled
+operations. You can cancel work that is still running or queued. Activity is
+cleared when Ephervex exits.
 
 <ThemeScreenshot state="activity-import-in-progress" alt="Activity with an import in progress and recent operation results" />
 

@@ -44,7 +44,7 @@ refused.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-On **Instances**, select **New Instance** and enter a name. Then:
+In the host list, select **New Instance** and enter a name. Then:
 
 1. Choose the Minecraft release you need.
 2. Choose Vanilla, Forge, or NeoForge. For Forge or NeoForge, select the exact
@@ -86,9 +86,10 @@ it tried, how it was chosen, and the Java the instance expects.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-Find the instance on **Instances** and select **Launch** on its card. Select
-the card or **Open Workspace** to inspect its mods, settings, logs, and other
-details. The **Running** page shows active clients and their controls.
+Find the instance in the host list and select **Launch** on its card. Press
+the card or select **Open Workspace** in its menu to inspect its mods,
+settings, logs, and other details. **Running now** on Home shows active
+clients and their controls.
 
 <ThemeScreenshot state="instances-overview" region="client-card" alt="Instance card with its version, storage type, state, and Launch button" />
 
@@ -114,17 +115,17 @@ Searching, filtering, and sorting change only what the list shows.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-On **Instances**, type in **Filter instances...** to search names, Minecraft
-versions, loaders, sources, and group names. **All**, **Temporary**, and
-**Persistent** choose the storage type, and **Favorites** shows only
-favorites.
+In the host list, type in **Filter instances and servers...** to search names,
+Minecraft versions, loaders, sources, and group names. The same search also
+narrows the servers.
 
-Select **Filters** to narrow the list by Minecraft version, loader, running
-state, linked servers, or group, and to choose **Sort by**: **Favorites
-first**, **Name**, **Minecraft version**, or **Loader**. Ephervex remembers
-the sort order. While anything narrows the list, the header shows a count such
-as "3 of 8 instances", and **Clear filters** resets everything except the
-sort order.
+Select **Filters** to open the filter panel. **All**, **Temporary**, and
+**Persistent** choose the storage type, and **Favorites** shows only
+favorites. Choose a Minecraft version, loader, running state, linked servers,
+or group, and choose **Sort by**: **Favorites first**, **Name**, **Minecraft
+version**, or **Loader**. Ephervex remembers the sort order. The **Filters**
+button shows how many conditions narrow the list, and **Clear filters** resets
+everything except the sort order.
 
 <ThemeScreenshot state="instances-filters" alt="Instances narrowed to NeoForge with the Filters panel open, the header showing 3 of 8 instances, and Clear filters" />
 
@@ -150,18 +151,17 @@ grouped instances `[group: NAME]`.
 
 Favorites, groups, and icons change only how Ephervex shows an instance or
 server. They never move files, and you can change them while the game runs.
-Favorites are listed first on **Instances**, with the default sort order, and
-on **Servers**. An icon replaces the loader or server symbol on the card, in
-the inspector, on **Running**, and in the workspace.
+Favorites are listed first in the host list with the default sort order. An
+icon replaces the loader or server symbol on the card, on Home, and in the
+workspace.
 
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
 Select the star beside an instance's or server's name, or **Add to
 favorites** in its card menu. To set an icon, select **Choose icon...** in the
-card menu, or **Choose icon** under **Organization** in the instance
-inspector, and pick a PNG or JPEG image. **Remove icon** brings back the
-symbol.
+card menu and pick a PNG or JPEG image. **Remove icon** in the same menu
+brings back the symbol.
 
 <ThemeScreenshot state="instance-organization" alt="Instances with two favorites listed first, group labels beside the names, and an instance showing a custom icon" />
 
@@ -195,17 +195,13 @@ leaves its instances ungrouped.
 <Tabs groupId="interface" queryString="interface">
 <TabItem value="gui" label="Desktop" default>
 
-In the instance inspector, choose a **Group** under **Organization**, or
-select the close button beside it to remove the instance from its group. In a
-card menu, **Set group** lists the groups, and **New group...** there creates
-a group with the instance in it.
+In an instance card's menu, **Set group** lists the groups and **Remove from
+group** takes the instance out of its group. **New group...** there creates a
+group with the instance in it.
 
-<ThemeScreenshot state="instance-organization" region="inspector" alt="Instance inspector with a custom icon, the Mod development group, Manage groups..., Choose icon, and Remove icon" />
-
-Select **Groups** on the Instances toolbar, or **Manage groups...** in the
-inspector, to see how many instances each group holds. Select **Rename** or
-**Delete** on a group, or **New group** to create an empty one. **Delete**
-does not ask for confirmation.
+Select **Groups** in the filter panel to see how many instances each group
+holds. Select **Rename** or **Delete** on a group, or **New group** to create
+an empty one. **Delete** does not ask for confirmation.
 
 <ThemeScreenshot state="instance-groups-dialog" alt="Groups dialog listing three groups with their colors and instance counts, each with Rename and Delete" />
 
@@ -393,10 +389,11 @@ snapshots of the instance and its servers.
 <TabItem value="gui" label="Desktop" default>
 
 Stop the game, open the instance card's menu, and select **Delete Instance**.
-The dialog lists affected linked servers. Choose **Keep Files** to leave files
-on disk, or **Delete Files** to remove the managed directories. While linked
-servers are running, the buttons read **Stop and Keep Files** and **Stop and
-Delete Files**, and they stop those servers first.
+The dialog lists affected linked servers and offers two cards. **Keep files**
+removes the instance from Ephervex and leaves its folder on disk. **Delete
+files** deletes the folder, including worlds, mods, and logs. While linked
+servers are running, the card buttons read **Stop and Keep Files** and **Stop
+and Delete Files**, and they stop those servers first.
 
 <ThemeScreenshot state="instance-delete-confirmation" alt="Delete Instance dialog listing the linked server it affects, with Cancel, Stop and Keep Files, and Stop and Delete Files" />
 
