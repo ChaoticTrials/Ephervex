@@ -251,7 +251,6 @@ class CommandLine(unittest.TestCase):
                 status, error = self.run_main("--from-analysis", str(analysis), "--offline")
                 self.assertEqual(status, 1)
                 self.assertIn("malformed", error)
-                self.assertFalse((self.cache / "feed").exists())
         self.bundled.write_bytes(committed)
         for content in ('{"descriptors": 1}', '{"descriptors": [], "exclusions": [3]}'):
             catalog = self.root / "preferences.json"
@@ -261,7 +260,6 @@ class CommandLine(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertIn("the bundled preference catalog", error)
                 self.assertEqual(self.bundled.read_bytes(), committed)
-                self.assertFalse((self.cache / "feed").exists())
 
     def test_a_damaged_bundled_preference_catalog_is_reported_before_anything_is_written(self):
         analysis = self.write_analysis(self.root / "analysis")
@@ -272,7 +270,6 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("the bundled preference catalog", error)
         self.assertFalse(self.bundled.exists())
-        self.assertFalse((self.cache / "feed").exists())
 
     def test_a_damaged_analyzer_record_asks_for_the_analyzer_to_run_again(self):
         analysis = self.write_analysis(self.root / "analysis")
@@ -290,7 +287,7 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("not a JSON object", error)
 
-    def test_an_interrupted_write_keeps_the_committed_dataset_and_the_feed_complete(self):
+    def test_an_interrupted_write_keeps_the_committed_dataset_complete(self):
         analysis = self.write_analysis(self.root / "analysis")
         self.commit_dataset()
         before = self.snapshot()
@@ -301,7 +298,7 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(self.bundled.read_bytes(), before[str(self.bundled)])
         self.assertEqual(sorted(p.name for p in self.bundled.parent.iterdir()), [self.bundled.name])
 
-    def test_the_bundled_dataset_and_the_feed_are_written_by_replacement(self):
+    def test_the_bundled_dataset_is_written_by_replacement(self):
         analysis = self.write_analysis(self.root / "analysis")
         replaced: list[str] = []
         real_replace = file_io.os.replace
@@ -312,8 +309,7 @@ class CommandLine(unittest.TestCase):
 
         with mock.patch.object(file_io.os, "replace", record):
             self.assertEqual(self.run_main("--from-analysis", str(analysis), "--offline")[0], 0)
-        self.assertEqual(replaced, ["minecraft-options.json", "minecraft-options.json"])
-        self.assertEqual(self.bundled.read_text(), (self.cache / "feed" / "minecraft-options.json").read_text())
+        self.assertEqual(replaced, ["minecraft-options.json"])
 
     def test_a_snapshot_is_refused_before_anything_is_downloaded_or_written(self):
         self.cache.mkdir()
@@ -377,7 +373,6 @@ class CommandLine(unittest.TestCase):
                     self.assertEqual(status, 1)
                     self.assertIn(f"no normalized analyzer output under {directory.resolve() / 'normalized'}", error)
         self.assertFalse(self.bundled.exists())
-        self.assertFalse((self.cache / "feed").exists())
 
     def test_a_client_jar_that_fails_its_hash_stops_the_run_before_analysis_and_writes_nothing(self):
         jar_url = self.publish_client()
@@ -389,7 +384,6 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertFalse((self.cache / "jars" / "mc-26.2.jar").exists())
         self.assertFalse(self.bundled.exists())
-        self.assertFalse((self.cache / "feed").exists())
 
     def test_a_verified_client_jar_is_downloaded_once_into_the_cache_before_analysis(self):
         jar_url = self.publish_client()
@@ -421,7 +415,6 @@ class CommandLine(unittest.TestCase):
             check=False,
         )
         self.assertFalse(self.bundled.exists())
-        self.assertFalse((self.cache / "feed").exists())
 
     def test_a_required_setting_the_canonical_release_cannot_encode_is_an_error_and_writes_nothing(self):
         unresolved = copy.deepcopy(REQUIRED)
@@ -439,7 +432,6 @@ class CommandLine(unittest.TestCase):
                     self.assertIn("cannot encode required settings: fov", error)
                     self.assertNotIn("Ephervex application review/update required", self.stdout.getvalue())
                     self.assertEqual(self.snapshot(), before)
-        self.assertFalse((self.cache / "feed").exists())
 
     def test_a_product_catalog_candidate_is_reported_and_never_written_to_the_catalog(self):
         self.commit_dataset("1.20.1")
@@ -472,14 +464,12 @@ class CommandLine(unittest.TestCase):
 
     def test_the_run_reports_what_it_wrote_and_then_that_nothing_changed(self):
         analysis = self.write_analysis(self.root / "analysis")
-        feed = self.cache.resolve() / "feed" / "minecraft-options.json"
         self.assertEqual(self.run_main("--from-analysis", str(analysis), "--offline")[0], 0)
         created = self.printed()
         self.assertIn("new release 26.2", created)
         self.assertIn("bundled dataset created", created)
-        self.assertEqual(created[-2:], [f"bundled dataset: {self.bundled}", f"remote feed to publish: {feed}"])
+        self.assertEqual(created[-1], f"bundled dataset: {self.bundled}")
         written = self.bundled.read_bytes()
-        self.assertEqual(feed.read_bytes(), written)
 
         self.assertEqual(self.run_main("--from-analysis", str(analysis), "--offline")[0], 0)
         again = self.printed()
