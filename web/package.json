@@ -17,6 +17,7 @@
     "typecheck": "tsc",
     "archive:test": "tsx --test src/archive/archive.test.ts",
     "archive:exporter:test": "python3 -m unittest discover -s scripts/forgejo-archive/tests -v",
+    "options:test": "tsx --test src/options/coverage.test.ts",
     "archive:check": "node scripts/archive-check.mjs",
     "screenshots:sync": "node scripts/screenshots.mjs sync",
     "screenshots:check": "node scripts/screenshots.mjs check",

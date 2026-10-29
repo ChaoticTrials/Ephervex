@@ -4,6 +4,7 @@ import type * as Preset from '@docusaurus/preset-classic';
 import fs from 'node:fs';
 import publication from './archive/publication.json';
 import roadToV1 from './plugins/road-to-v1/index';
+import minecraftOptions from './plugins/minecraft-options/index';
 
 const repository = 'https://github.com/ChaoticTrials/Ephervex';
 const baseUrl = process.env.DOCUSAURUS_BASE_URL ?? '/';
@@ -56,7 +57,7 @@ const config: Config = {
       searchBarPosition: 'right',
     },
   ]],
-  plugins: [roadToV1],
+  plugins: [roadToV1, minecraftOptions],
   themeConfig: {
     image: 'img/ephervex-social.png',
     colorMode: {respectPrefersColorScheme: true},
