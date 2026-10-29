@@ -10,6 +10,7 @@ on:
       - 'web/**'
       - 'tools/auto-screenshot-tool/**'
       - 'assets/**'
+      - 'crates/options/data/minecraft-options.json'
       - '.github/workflows/pages.yml'
   release:
     types: [published]
@@ -93,6 +94,24 @@ jobs:
             cp -a "current/$directory" "source/$directory"
           done
 
+      # The application reads this file as its options feed between releases, so
+      # it comes from main, never from the release tag the docs were built from.
+      - name: Check out the options feed from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: feed
+          sparse-checkout: crates/options/data/minecraft-options.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Use the options dataset from main
+        run: |
+          set -euo pipefail
+          feed=feed/crates/options/data/minecraft-options.json
+          jq -e '.format_version == 1 and (.revision | type == "number") and (.releases | length > 0)' "$feed" >/dev/null
+          install -D -m 644 "$feed" source/crates/options/data/minecraft-options.json
+
       - name: Install screenshot build dependencies
         run: |
           sudo apt-get update
@@ -133,6 +152,13 @@ jobs:
       - name: Build website
         working-directory: source/web
         run: npm run build
+
+      - name: Publish the options feed
+        run: |
+          set -euo pipefail
+          feed=feed/crates/options/data/minecraft-options.json
+          install -D -m 644 "$feed" source/web/build/assets/minecraft-options.json
+          cmp "$feed" source/web/build/assets/minecraft-options.json
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
