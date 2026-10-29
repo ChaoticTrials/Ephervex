@@ -98,10 +98,7 @@ pub use dataset::{
     Representation, SchemaFamily, StartupPreset,
 };
 pub use error::OptionsError;
-pub use feed::{
-    DEFAULT_GIST_ID, FEED_FILE_NAME, FEED_HOSTS, FeedError, FeedSource, GIST_API_BASE,
-    OPTIONS_FEED_CACHE_KEY, OptionsFeed,
-};
+pub use feed::{DEFAULT_FEED_URL, FeedError, FeedSource, OPTIONS_FEED_CACHE_KEY, OptionsFeed};
 pub use file::{ParsedOptions, VERSION_KEY};
 pub use input::{InputBinding, MouseButton, PhysicalKey};
 pub use preference::{
