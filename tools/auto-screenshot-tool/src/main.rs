@@ -30,8 +30,8 @@ struct GenerateArgs {
     /// Generate only these states. Repeat to select more than one.
     #[arg(long)]
     state: Vec<String>,
-    /// Generate only these themes: light, dark, or halloween. Repeat to select
-    /// more than one.
+    /// Generate only these themes: light, dark, halloween, christmas, pride, or
+    /// april-fools. Repeat to select more than one.
     #[arg(long)]
     theme: Vec<ThemeName>,
     /// Capture these window dimensions as WIDTHxHEIGHT. Repeat to select more.

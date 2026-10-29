@@ -31,9 +31,11 @@ address and by the SHA-256 of the bytes the catalog served, and a logo whose
 bytes differ is refused. Pass `--offline` to fetch nothing and leave logos that
 are not cached empty, or `--artwork-cache DIR` to keep them elsewhere.
 
-The default command writes Ephervex Light, Dark, and Halloween captures at
-1920x1080 and 2560x1440. Halloween is the seasonal theme as it stands in for a
-chosen Dark, with its logo and the Seasonal themes note. Full-window files are stored at
+The default command writes Ephervex Light, Dark, Halloween, Christmas, Pride,
+and April Fools captures at 1920x1080. Pass `--size 2560x1440` for the larger
+window. Each seasonal theme is shown as it stands in for a chosen Light or Dark
+(Halloween for Dark, the others for Light), with its logo and the Seasonal
+themes note. Full-window files are stored at
 `screenshots/<state>/<theme>-<width>x<height>.png`; crops are stored at
 `screenshots/<state>/<region>/<theme>-<width>x<height>.png`. A full run replaces
 the default screenshot directory, so removed states and old paths do not remain.
@@ -61,7 +63,8 @@ PNGs into optimized WebP assets and a matching manifest:
 npm run screenshots:sync
 ```
 
-Synchronization defaults to 1920x1080. To publish both resolutions, use
+Synchronization defaults to 1920x1080. To publish both resolutions, generate the
+2560x1440 captures first and use
 `npm run screenshots:sync -- --size 1920x1080 --size 2560x1440`. Unchanged
 sources are not recompressed. The source PNGs remain in place. Use the
 component in MDX, for example:
@@ -72,9 +75,9 @@ component in MDX, for example:
 ```
 
 The component renders the light capture in static HTML, then follows
-Docusaurus's selected color mode after hydration, or shows the Halloween
-capture while the site shows its Halloween season. `theme="halloween"` always
-shows the Halloween capture. It reads the manifest and
+Docusaurus's selected color mode after hydration, or shows the seasonal
+capture while the site shows one of its seasons. `theme="halloween"`,
+`"christmas"`, `"pride"`, or `"april-fools"` always shows that capture. It reads the manifest and
 uses responsive sources only for resolutions that were synchronized.
 
 Generate review contact sheets with `cd web && npm run screenshots:contact-sheet`.

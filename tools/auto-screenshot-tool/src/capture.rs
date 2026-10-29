@@ -18,17 +18,58 @@ pub(crate) enum ThemeName {
     Dark,
     /// The Halloween season's theme, shown in place of Dark.
     Halloween,
+    /// The Christmas season's theme, shown in place of Light.
+    Christmas,
+    /// The Pride Month theme, shown in place of Light.
+    Pride,
+    /// The April Fools theme, shown in place of Light.
+    AprilFools,
+}
+
+/// A seasonal theme and what the launcher shows it in place of.
+struct Season {
+    /// The launcher's identifier for the season, as in `season:<id>`.
+    id: &'static str,
+    /// The message naming the season in the "shown right now" note.
+    label: &'static str,
+    /// The chosen color scheme the season stands in for.
+    stands_in_for: ThemeName,
 }
 
 impl ThemeName {
-    pub(crate) const ALL: [Self; 3] = [Self::Light, Self::Dark, Self::Halloween];
+    pub(crate) const ALL: [Self; 6] = [
+        Self::Light,
+        Self::Dark,
+        Self::Halloween,
+        Self::Christmas,
+        Self::Pride,
+        Self::AprilFools,
+    ];
 
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Light => "light",
             Self::Dark => "dark",
             Self::Halloween => "halloween",
+            Self::Christmas => "christmas",
+            Self::Pride => "pride",
+            Self::AprilFools => "april-fools",
         }
+    }
+
+    const fn season(self) -> Option<Season> {
+        let (id, label, stands_in_for) = match self {
+            Self::Light | Self::Dark => return None,
+            Self::Halloween => ("halloween", "gui-seasonal-theme-halloween", Self::Dark),
+            Self::Christmas => ("christmas", "gui-seasonal-theme-christmas", Self::Light),
+            Self::Pride => ("pride", "gui-seasonal-theme-pride", Self::Light),
+            Self::AprilFools => ("april-fools", "gui-seasonal-theme-april-fools", Self::Light),
+        };
+        Some(Season {
+            id,
+            label,
+            stands_in_for,
+        })
     }
 }
 
@@ -36,14 +77,13 @@ impl std::str::FromStr for ThemeName {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "light" => Ok(Self::Light),
-            "dark" => Ok(Self::Dark),
-            "halloween" => Ok(Self::Halloween),
-            _ => Err(format!(
-                "unknown theme {value:?}; use light, dark, or halloween"
-            )),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|theme| theme.name() == value)
+            .ok_or_else(|| {
+                let names: Vec<_> = Self::ALL.iter().map(|theme| theme.name()).collect();
+                format!("unknown theme {value:?}; use {}", names.join(", "))
+            })
     }
 }
 
@@ -62,7 +102,9 @@ impl Dimensions {
         width: 2560,
         height: 1440,
     };
-    pub(crate) const ALL: [Self; 2] = [Self::HD, Self::QHD];
+    /// The sizes a default run captures. 2560x1440 is still available with
+    /// `--size`.
+    pub(crate) const ALL: [Self; 1] = [Self::HD];
 
     pub(crate) fn label(self) -> String {
         format!("{}x{}", self.width, self.height)
@@ -195,16 +237,21 @@ pub(crate) fn generate(options: &CaptureOptions<'_>) -> Result<Vec<PathBuf>> {
 }
 
 /// Paints `ui` in `theme` the way the launcher does, with the season's note
-/// and logo while the Halloween theme stands in for the chosen Dark. A state
-/// that shows a theme of the user's own keeps it, as no season replaces one.
+/// and logo while a seasonal theme stands in for the chosen color scheme. A
+/// state that shows a theme of the user's own keeps it, as no season replaces
+/// one.
 fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
     let user_theme = logo.size().width > 0;
-    let seasonal = theme == ThemeName::Halloween && !user_theme;
+    let season = theme.season().filter(|_| !user_theme);
+    let chosen = season.as_ref().map_or(theme, |season| season.stands_in_for);
     let palettes = ui.global::<BuiltInPalettes>();
-    let (palette, chosen) = match theme {
-        ThemeName::Light => (palettes.get_workbench(), ThemeName::Light),
-        _ if seasonal => (palettes.get_halloween(), ThemeName::Dark),
-        ThemeName::Dark | ThemeName::Halloween => (palettes.get_workbench_dark(), ThemeName::Dark),
+    let palette = match theme {
+        ThemeName::Halloween if season.is_some() => palettes.get_halloween(),
+        ThemeName::Christmas if season.is_some() => palettes.get_christmas(),
+        ThemeName::Pride if season.is_some() => palettes.get_pride(),
+        ThemeName::AprilFools if season.is_some() => palettes.get_april_fools(),
+        _ if chosen == ThemeName::Light => palettes.get_workbench(),
+        _ => palettes.get_workbench_dark(),
     };
     ui.global::<Theme>().set_palette(palette);
     ui.set_application_theme(
@@ -217,30 +264,38 @@ fn show_theme(ui: &AppWindow, theme: ThemeName, (logo, icon): &(Image, Image)) {
     );
     ui.set_theme_index(i32::from(chosen == ThemeName::Dark));
     ui.set_shown_theme(
-        if seasonal {
-            "season:halloween"
-        } else {
-            chosen.name()
-        }
-        .into(),
-    );
-    ui.set_seasonal_theme_in_season(seasonal);
-    ui.set_seasonal_theme_note(
-        if seasonal {
-            lookup_args(
-                "gui-seasonal-theme-shown",
-                [
-                    ("season", Arg::from(lookup("gui-seasonal-theme-halloween"))),
-                    ("value", Arg::from(lookup("gui-color-scheme-dark"))),
-                ],
+        season
+            .as_ref()
+            .map_or_else(
+                || chosen.name().to_owned(),
+                |season| format!("season:{}", season.id),
             )
-        } else {
-            String::new()
-        }
-        .into(),
+            .into(),
     );
-    if seasonal {
-        let mascot = crate::fixtures::branding::halloween_mascot();
+    ui.set_seasonal_theme_in_season(season.is_some());
+    ui.set_seasonal_theme_note(
+        season
+            .as_ref()
+            .map_or_else(String::new, |season| {
+                lookup_args(
+                    "gui-seasonal-theme-shown",
+                    [
+                        ("season", Arg::from(lookup(season.label))),
+                        (
+                            "value",
+                            Arg::from(lookup(if chosen == ThemeName::Light {
+                                "gui-color-scheme-light"
+                            } else {
+                                "gui-color-scheme-dark"
+                            })),
+                        ),
+                    ],
+                )
+            })
+            .into(),
+    );
+    if let Some(season) = &season {
+        let mascot = crate::fixtures::branding::seasonal_mascot(season.id);
         ui.set_theme_logo(mascot.clone());
         ui.set_theme_icon(mascot);
     } else {
@@ -610,7 +665,10 @@ mod tests {
         })
         .expect("capture the real component");
 
-        assert_eq!(files.len(), 6);
+        assert_eq!(
+            files.len(),
+            ThemeName::ALL.len() * crate::catalog::STATES[0].regions.len()
+        );
         let full = crate::catalog::STATES[0].regions[0];
         let light = image::open(output_path(
             output.path(),
@@ -643,6 +701,27 @@ mod tests {
         assert_eq!(dark.dimensions(), (1920, 1080));
         assert_ne!(light.get_pixel(300, 600), dark.get_pixel(300, 600));
         assert_ne!(dark.get_pixel(300, 600), halloween.get_pixel(300, 600));
+
+        let windows: Vec<_> = ThemeName::ALL
+            .iter()
+            .map(|theme| {
+                image::open(output_path(
+                    output.path(),
+                    &crate::catalog::STATES[0],
+                    &full,
+                    *theme,
+                    Dimensions::HD,
+                ))
+                .expect("theme PNG")
+                .into_rgba8()
+                .into_raw()
+            })
+            .collect();
+        for (first, one) in windows.iter().enumerate() {
+            for other in &windows[first + 1..] {
+                assert_ne!(one, other, "two themes rendered the same window");
+            }
+        }
 
         let crop = image::open(output_path(
             output.path(),
