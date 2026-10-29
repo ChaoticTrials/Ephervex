@@ -21,7 +21,7 @@ export const diagnosticResultCallouts: ScreenshotCallout[] = [
 ];
 
 export const serverAccessCallouts: ScreenshotCallout[] = [
-  {number: 1, x: 5.5, y: 16, width: 89, height: 67},
+  {number: 1, x: 5.5, y: 21, width: 89, height: 59},
 ];
 
 export const serverOnlineModeCallouts: ScreenshotCallout[] = [

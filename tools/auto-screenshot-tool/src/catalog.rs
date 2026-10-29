@@ -211,7 +211,7 @@ const SERVER_PROPERTIES_REGIONS: &[Region] = &[
     Region {
         name: "access",
         accessible_label: Some("Access"),
-        padding: (12.0, 22.0),
+        padding: (12.0, 26.0),
         bounds: None,
     },
     Region {
