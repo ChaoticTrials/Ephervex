@@ -62,6 +62,10 @@ fn main() -> Result<()> {
 }
 
 fn run(args: GenerateArgs) -> Result<()> {
+    ensure!(
+        capture::DRAWS_WITH_SKIA,
+        "this build draws with the software renderer, which leaves out item transforms and rounded clips; run tools/auto-screenshot-tool/generate.sh, which builds with --features skia"
+    );
     ephervex_i18n::select_language(&args.locale)
         .with_context(|| format!("select screenshot locale {:?}", args.locale))?;
 

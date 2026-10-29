@@ -7,11 +7,17 @@ Run this command from the repository root to regenerate every documented UI stat
 ```
 
 The script changes to the repository root and runs the Rust generator. It
-captures the compiled `AppWindow` with Slint's headless software renderer at a
+captures the compiled `AppWindow` with Slint's headless Skia renderer at a
 fixed scale of 1, with a fixed `en-US` locale and mocked time. It uses the
 same system font resolution as the launcher, including its monospace family.
-No display server is needed. The Rust tool never attaches the application
-controller, opens launcher storage, or reads accounts or credentials. The rows
+No display server or GPU is needed. Skia is the `skia` feature of the tool,
+which `generate.sh` turns on. It is used instead of Slint's software renderer
+because that one ignores item transforms and rounded clips, so tilted or
+scaled items and rounded panel corners would not match the application. The
+feature is off by default so Skia stays out of the dependency graph the license
+inventory and `cargo deny` read; a build without it refuses to generate. The
+Rust tool never attaches the application controller, opens launcher storage,
+or reads accounts or credentials. The rows
 it shows (instances, servers, the CaveStone mod list, search results, snapshots,
 logs, crash reports, and diagnosis results) come from the files in `data/`,
 which were recorded from real packs, mods, and servers run in an isolated
@@ -97,6 +103,8 @@ with that accessible label in the shown window before it captures. Do not add un
   libraries).
 - Bash and a fontconfig setup with the fonts used by the launcher.
 - No Wayland or X11 display is required.
+- Network access while building: the Skia build downloads prebuilt Skia
+  binaries on first use.
 - For the website, Node.js 20 or newer and npm. Sharp handles WebP conversion
   and contact sheets.
 

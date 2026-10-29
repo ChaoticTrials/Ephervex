@@ -11,6 +11,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Documentation captures are drawn by Skia, which renders item transforms and
+# rounded clips that Slint's software renderer ignores. It is a feature, off by
+# default, so Skia stays out of the resolved graph that the license inventory and
+# `cargo deny` read for default features. generate.sh turns it on.
+[features]
+skia = ["i-slint-backend-testing/renderer-skia"]
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

@@ -93,13 +93,21 @@ pub(crate) struct CaptureOptions<'a> {
     pub(crate) derive_1080: bool,
 }
 
+/// Whether this build draws with the renderer the published captures use.
+pub(crate) const DRAWS_WITH_SKIA: bool = cfg!(feature = "skia");
+
 pub(crate) fn initialize() -> Result<()> {
+    let renderer = if DRAWS_WITH_SKIA {
+        "skia-software"
+    } else {
+        "software"
+    };
     slint::platform::set_platform(Box::new(TestingBackend::new(TestingBackendOptions {
-        renderer_name: Some("software".into()),
+        renderer_name: Some(renderer.into()),
         mock_time: true,
         threading: false,
     })))
-    .context("initialize Slint's headless software renderer")
+    .with_context(|| format!("initialize Slint's headless {renderer} renderer"))
 }
 
 /// Holds the process-wide locale and the thread's headless platform for one test.
