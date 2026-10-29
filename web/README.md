@@ -71,16 +71,17 @@ npm run typecheck
 npm run build
 ```
 
-To publish both 1080p and 1440p, run
+To publish both 1080p and 1440p, generate the 2560x1440 captures with
+`--size 2560x1440` and run
 `npm run screenshots:sync -- --size 1920x1080 --size 2560x1440` instead of
-the default sync command. The Rust generator keeps both sizes configurable.
+the default sync command. The Rust generator captures only 1080p by default.
 The WebP files under `static/img/ephervex/` and their manifest under
 `src/components/` are the site assets. The original PNGs and contact sheets
 remain gitignored under `tools/auto-screenshot-tool/screenshots/`. Generated
 WebP files under `static/img/ephervex/` are also ignored. A fresh checkout must
 generate and synchronize images before building.
 
-`npm run screenshots:sync` checks that all three themes exist for every
+`npm run screenshots:sync` checks that every theme exists for every
 selected state, region, and size. Full-window WebPs live directly under each state;
 named crops have a subdirectory. It hashes the source PNGs and reuses unchanged
 WebPs.

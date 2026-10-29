@@ -11,8 +11,8 @@ const manifestFile = path.join(site, 'src/components/screenshot-manifest.json');
 const review = path.join(source, 'review');
 const encoder = 'sharp-webp-lossless-effort-6';
 const defaultSizes = ['1920x1080'];
-const themes = ['light', 'dark', 'halloween'];
-const filenamePattern = /^(light|dark|halloween)-(\d+)x(\d+)\.png$/;
+const themes = ['light', 'dark', 'halloween', 'christmas', 'pride', 'april-fools'];
+const filenamePattern = new RegExp(`^(${themes.join('|')})-(\\d+)x(\\d+)\\.png$`);
 const safeName = /^[a-z][a-z0-9-]*$/;
 
 function fail(message) {
@@ -165,7 +165,7 @@ async function sync(args) {
       fail(`Incorrect full-window dimensions in ${file.path}`);
     }
     const key = captureKey(file);
-    captures[key] ??= {light: [], dark: [], halloween: []};
+    captures[key] ??= Object.fromEntries(themes.map((theme) => [theme, []]));
     captures[key][file.theme].push({
       window: file.window,
       width: metadata.width,

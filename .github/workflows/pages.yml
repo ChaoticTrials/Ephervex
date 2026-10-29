@@ -143,7 +143,7 @@ jobs:
 
       - name: Generate website images
         working-directory: source/web
-        run: npm run screenshots:sync -- --size 1920x1080 --size 2560x1440
+        run: npm run screenshots:sync -- --size 1920x1080
 
       - name: Check website types
         working-directory: source/web
