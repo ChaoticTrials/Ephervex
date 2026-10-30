@@ -1,16 +1,17 @@
 # Architecture Decision Records
 
-One file per decision, numbered and immutable once accepted. A decision that
-turns out wrong gets a new ADR that supersedes the old one - the original stays
-so the reasoning trail survives.
+One file per decision, numbered. The decision of an accepted ADR is not
+rewritten. A decision that turns out wrong gets a new ADR that supersedes the
+old one, and a narrower change is recorded as an amendment, so the reasoning
+trail survives. Number 0056 is unused.
 
 | ADR | Decision | Status |
 |---|---|---|
 | [0001](0001-slint-for-the-gui.md) | Slint for the GUI | Accepted |
 | [0002](0002-sqlite-index-with-per-instance-metadata.md) | SQLite index with per-instance metadata | Accepted |
 | [0003](0003-xdg-base-directories.md) | XDG base directories | Accepted |
-| [0004](0004-keyring-for-secret-storage.md) | Keyring for secret storage, no plaintext fallback | Accepted |
-| [0005](0005-provider-abstractions.md) | Provider abstractions for loaders, mods, and accounts | Accepted |
+| [0004](0004-keyring-for-secret-storage.md) | Keyring for secret storage, with no plaintext fallback | Accepted |
+| [0005](0005-provider-abstractions.md) | Provider abstractions for loaders, mod platforms, and accounts | Accepted |
 | [0006](0006-temporary-instance-lifecycle.md) | The OS owns temporary-instance cleanup | Accepted |
 | [0007](0007-licensing-and-prism-reference.md) | Licensing deferred; Prism is behavioral reference only | Superseded by ADR 0018 |
 | [0008](0008-first-version-scope.md) | Features excluded from the first complete version | Accepted |
@@ -29,7 +30,7 @@ so the reasoning trail survives.
 | [0021](0021-linked-mod-sync-pins-the-root-and-resolves-per-target.md) | Linked mod synchronization pins the root release and resolves dependencies per target | Accepted |
 | [0022](0022-curseforge-uses-a-user-supplied-key-and-persists-nothing.md) | CurseForge uses a user-supplied API key, and its responses are never persisted | Accepted (its no-embedded-key decision amended by ADR 0030, its persists-nothing decision by ADR 0034) |
 | [0023](0023-appimage-is-the-linux-release-artifact.md) | AppImage is the Linux release artifact, on a declared glibc baseline | Accepted (its "No `.deb`" decision superseded by ADR 0026) |
-| [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are installed as a complete server, and the loader stays the launcher's | Accepted |
+| [0024](0024-published-server-files-are-a-complete-installation.md) | Published server files are a complete installation | Accepted |
 | [0025](0025-storage-class-is-promoted-in-place.md) | An instance becomes persistent by moving, not by being copied | Accepted |
 | [0026](0026-a-debian-package-alongside-the-appimage.md) | A Debian package alongside the AppImage | Accepted (its "no RPM repository" decision amended by ADR 0044) |
 | [0027](0027-a-pack-address-is-a-second-trust-category.md) | A pack address the user activated is a second trust category | Accepted (its scheme-registration decision amended by ADR 0028) |
