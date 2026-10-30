@@ -2,7 +2,8 @@
 //! with, recent activity, and the right column's counts and cache meter.
 
 use ephervex_gui::ui::{AppWindow, AttentionRow, InstanceRow, ResumeRow, ServerRow};
-use ephervex_i18n::{Arg, lookup, lookup_attribute_args};
+use ephervex_i18n::{Arg, lookup, lookup_args, lookup_attribute_args};
+use slint::Model;
 
 use super::{in_progress, rows};
 
@@ -86,6 +87,9 @@ pub(crate) fn install_home_base(ui: &AppWindow, instances: &[InstanceRow], serve
     ui.set_artifact_cache_fill(0.21);
 }
 
+/// The instance that needs a fix.
+const FOG_HOST: &str = "the horrors in the fog";
+
 /// Home with running hosts, a host that needs a fix, and an import under way.
 pub(crate) fn home_page(ui: &AppWindow) {
     in_progress::running_page(ui);
@@ -98,12 +102,27 @@ pub(crate) fn home_page(ui: &AppWindow) {
         )
         .into(),
     );
+    // The line under the title is the host's target, as the launcher words it.
+    let target = ui
+        .get_instances()
+        .iter()
+        .find(|row| row.name == FOG_HOST)
+        .map(|row| {
+            lookup_args(
+                "gui-target-summary",
+                [
+                    ("first", Arg::from(row.minecraft.as_str())),
+                    ("second", Arg::from(row.loader.as_str())),
+                ],
+            )
+        })
+        .unwrap_or_default();
     ui.set_home_attention(rows(vec![AttentionRow {
         kind: "client".into(),
         id: "fog".into(),
-        host_name: "the horrors in the fog".into(),
+        host_name: FOG_HOST.into(),
         title: lookup("gui-attention-missing-root").into(),
+        detail: target.into(),
         surface: "Diagnostics".into(),
-        ..AttentionRow::default()
     }]));
 }
