@@ -14,10 +14,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-  # The test builds compile the generated interface code of several crates at
-  # once. With full debug information that exhausts the runner's memory and the
-  # job is killed mid-compile, so keep line tables for backtraces and no more.
-  CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
 jobs:
   check:
@@ -86,4 +82,9 @@ jobs:
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
+        #
+        # One build, one rustc at a time: compiling the interface crate's
+        # generated code takes about 14 GB, and a hosted runner has 16.
+        env:
+          CARGO_BUILD_JOBS: 1
         run: cargo test --workspace
