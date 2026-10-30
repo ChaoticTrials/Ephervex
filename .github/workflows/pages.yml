@@ -1,6 +1,11 @@
 # The Release workflow publishes with GITHUB_TOKEN, so its release event cannot
 # start another workflow. workflow_run covers that path; release covers releases
 # published by a maintainer.
+#
+# The site is built from the latest published release, so nothing deploys before
+# the first one. A manual run with "from_current_commit" builds from the chosen
+# commit instead, which is how the site and the options feed go live before a
+# release exists and how a build is forced again afterwards.
 name: Pages
 
 on:
@@ -18,6 +23,11 @@ on:
     workflows: [Release]
     types: [completed]
   workflow_dispatch:
+    inputs:
+      from_current_commit:
+        description: Build the site from this commit instead of the latest published release, and deploy it even before any release exists
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -63,16 +73,16 @@ jobs:
 
   build:
     needs: release
-    if: needs.release.outputs.tag != ''
+    if: needs.release.outputs.tag != '' || (github.event_name == 'workflow_dispatch' && inputs.from_current_commit)
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pages: read
     steps:
-      - name: Check out released application source
+      - name: Check out application source
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.from_current_commit) && github.sha || needs.release.outputs.tag }}
           path: source
           persist-credentials: false
 
