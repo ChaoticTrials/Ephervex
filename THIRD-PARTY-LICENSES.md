@@ -12,7 +12,7 @@ compiled into the binaries, so `ephervex licenses` and the desktop
 application's "About & Licenses" screen answer from it too.
 
 
-524 packages, under 142 license texts.
+525 packages, under 142 license texts.
 
 ## Dependencies
 
@@ -207,6 +207,7 @@ application's "About & Licenses" screen answer from it too.
 | hyper-rustls | 0.27.9 | Apache-2.0 OR ISC OR MIT |
 | hyper-util | 0.1.20 | MIT |
 | i-slint-backend-selector | 1.17.1 | LicenseRef-Slint-Royalty-free-2.0 |
+| i-slint-backend-testing | 1.17.1 | LicenseRef-Slint-Royalty-free-2.0 |
 | i-slint-backend-winit | 1.17.1 | LicenseRef-Slint-Royalty-free-2.0 |
 | i-slint-common | 1.17.1 | LicenseRef-Slint-Royalty-free-2.0 |
 | i-slint-compiler | 1.17.1 | LicenseRef-Slint-Royalty-free-2.0 |
@@ -10517,7 +10518,7 @@ THE SOFTWARE IS PROVIDED "AS IS" AND ISC DISCLAIMS ALL WARRANTIES WITH REGARD TO
 
 ### LicenseRef-Slint-Royalty-free-2.0
 
-Applies to: i-slint-backend-selector 1.17.1, i-slint-backend-winit 1.17.1, i-slint-common 1.17.1, i-slint-compiler 1.17.1, i-slint-core 1.17.1, i-slint-core-macros 1.17.1, i-slint-renderer-femtovg 1.17.1, i-slint-renderer-software 1.17.1, slint 1.17.1, slint-macros 1.17.1.
+Applies to: i-slint-backend-selector 1.17.1, i-slint-backend-testing 1.17.1, i-slint-backend-winit 1.17.1, i-slint-common 1.17.1, i-slint-compiler 1.17.1, i-slint-core 1.17.1, i-slint-core-macros 1.17.1, i-slint-renderer-femtovg 1.17.1, i-slint-renderer-software 1.17.1, slint 1.17.1, slint-macros 1.17.1.
 
 ```text
 # Slint Royalty-free Desktop, Mobile, and Web Applications License

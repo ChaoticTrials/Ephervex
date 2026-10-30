@@ -1,0 +1,121 @@
+---
+title: Snapshots
+description: Capture and restore the local state of a client or server.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Snapshots
+
+A snapshot saves the current state of one client instance or local server.
+Use one before changing a reproduction environment, testing a fix, or editing
+a server setup. It captures the game directory, retained source information,
+and exact host metadata. Each host keeps its own snapshots; a client snapshot
+does not include a linked server's state. Favorites, groups, and icons are not
+part of a snapshot, so a restore leaves them as they are.
+
+Snapshots stay inside that host's local storage until you delete them or
+delete the host's files. They are not modpack exports or off-device backups.
+Stop the client or server before capturing or restoring a snapshot.
+
+## Capture a snapshot
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the client or server workspace and select **Snapshots**. Select **Create
+snapshot**, give it a label, and confirm. The list shows each snapshot's date,
+size, mod counts, and origin. A **Full copy** badge means the filesystem did
+not support a reflink for that snapshot; it may use more disk space.
+
+<ThemeScreenshot state="snapshots" alt="Snapshots tab with saved states, sizes, origins, and restore actions" />
+
+<ThemeScreenshot state="snapshot-create-dialog" alt="Create snapshot dialog with a label field showing a suggested label, and a note that the snapshot stays local" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Choose exactly one host with `--instance INSTANCE_ID` or `--server SERVER_ID`.
+Create a snapshot, then list the retained snapshots to find its ID:
+
+```bash
+ephervex snapshot create --instance INSTANCE_ID "Before mod changes"
+ephervex snapshot list --instance INSTANCE_ID
+```
+
+Replace `--instance INSTANCE_ID` with `--server SERVER_ID` for a local server.
+
+</TabItem>
+</Tabs>
+
+## Restore a saved state
+
+:::warning
+Restore replaces the captured parts of the live host. Files created after
+the snapshot are removed from those parts; restore does not merge them. Keep
+the default **Before restore** safety snapshot if you may need the current state.
+:::
+
+A snapshot cannot be restored while a [mod isolation](./mod-isolation.mdx)
+session is active on the same host. Choose **Finish** or **Cancel isolation**
+first (`ephervex mod isolate finish` or `ephervex mod isolate cancel` in the
+CLI), then restore.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Stop the client or server. In **Snapshots**, select **Restore snapshot** on
+the saved state you want. Read the replacement warning. **Capture the current
+state first** is on by default; confirm **Restore snapshot** to proceed.
+The safety copy appears in the same list after the restore.
+
+<ThemeScreenshot state="snapshot-restore-dialog" alt="Restore confirmation showing the replacement warning and current-state safety copy option" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Stop the host, get the snapshot ID from `list`, then explicitly confirm the
+replacement with `--yes`:
+
+```bash
+ephervex snapshot restore --instance INSTANCE_ID SNAPSHOT_ID --yes
+```
+
+The command prints the restored snapshot and the new safety snapshot. Add
+`--no-safety-snapshot` only when you do not want to keep the current state.
+Use `--server SERVER_ID` in place of `--instance INSTANCE_ID` for a server.
+
+</TabItem>
+</Tabs>
+
+## Rename or delete a snapshot
+
+Renaming changes only the label; the snapshot's contents and ID stay the
+same. Deleting a snapshot permanently removes its retained copy. Ephervex
+does not automatically prune snapshots. The safety snapshot of an active
+[mod isolation](./mod-isolation.mdx) session cannot be deleted until that
+session ends.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In **Snapshots**, select **Rename** on a card to change its label, or
+**Delete** to review and confirm permanent removal. The total at the top of
+the tab shows the snapshots' apparent size; a full copy can take more disk
+space than a reflink.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex snapshot rename --instance INSTANCE_ID SNAPSHOT_ID "Known good"
+ephervex snapshot delete --instance INSTANCE_ID SNAPSHOT_ID --yes
+```
+
+`delete` requires `--yes` because removal cannot be undone. Use
+`--server SERVER_ID` for a server.
+
+</TabItem>
+</Tabs>

@@ -22,3 +22,7 @@
 # cargo-deny binaries. What they produce is committed; they are not.
 /license-tools/
 __pycache__/
+
+tools/auto-screenshot-tool/screenshots
+tools/auto-screenshot-tool/artwork
+/web/static/img/ephervex/

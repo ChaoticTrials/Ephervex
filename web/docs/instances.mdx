@@ -1,0 +1,501 @@
+---
+title: Instances
+description: Create, launch, copy, and manage Minecraft instances.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {createInstanceCallouts} from '@site/src/components/screenshot-callouts';
+
+# Instances
+
+An instance is a Minecraft game directory with an exact Minecraft version and
+loader selection. Each instance has its own mods, saves, configuration, and
+logs. Ephervex reuses downloaded game files, libraries, assets, and managed
+Java runtimes across instances.
+
+## Choose temporary or persistent storage
+
+New instances are **temporary** by default. They live in the operating
+system's temporary directory. Closing the game does not delete them, but the
+operating system can clear that directory at any time. Use temporary storage
+for a test you can discard.
+
+:::note
+Choose persistent storage for worlds or test results you need to keep. The
+operating system can remove temporary instances without asking Ephervex.
+:::
+
+Choose **persistent** storage when you want the instance to remain in your
+configured instance folder. You can also move a stopped temporary instance
+there later with **Make Persistent**. Its mods, saves, logs, and name move with
+it. Linked temporary servers move too unless you choose to leave them behind.
+
+## Create an instance
+
+Choose the exact Minecraft release you need. Vanilla needs no loader build;
+Forge and NeoForge need an exact build that supports that release. Ephervex
+does not replace an unsupported selection with another version. For Minecraft
+1.12.2, Forge builds older than 14.23.5.2851 use an installer format Ephervex
+does not support. They are not offered, and selecting one by exact version is
+refused.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In the host list, select **New Instance** and enter a name. Then:
+
+1. Choose the Minecraft release you need.
+2. Choose Vanilla, Forge, or NeoForge. For Forge or NeoForge, select the exact
+   loader build below the loader choice.
+3. Choose temporary storage for a disposable test, or turn on **Store
+   persistently** to keep the instance. Optionally enter an **Issue link**
+   (see [below](#track-the-bug-you-are-reproducing)) and turn on **Also create
+   a linked server** to get a server with the same versions and the mods that
+   run on a server. Select **Create Instance**.
+
+<ThemeScreenshot state="create-instance-dialog" region="dialog" callouts={createInstanceCallouts} alt="New Instance dialog: 1 marks the Minecraft release, 2 marks the loader build, and 3 marks the persistent storage choice" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Replace `VERSION` with an exact Minecraft release:
+
+```bash
+ephervex instance create "Test World" --minecraft VERSION
+```
+
+For Forge or NeoForge, supply the exact loader build. Add `--persistent` if
+you want to keep the instance under the persistent instance root:
+
+```bash
+ephervex instance create "Mod Test" --minecraft VERSION --loader neoforge --loader-version LOADER_BUILD --persistent
+```
+
+`--temporary` explicitly selects the default temporary storage.
+
+</TabItem>
+</Tabs>
+
+## Find and launch an instance
+
+You need an [account](./accounts.mdx) before launching. The first launch
+downloads missing game files. Ephervex picks a compatible Java runtime unless
+one is [pinned](#set-java-and-memory-for-one-instance). The workspace header
+shows that runtime and its status. A launch Ephervex refuses names the runtime
+it tried, how it was chosen, and the Java the instance expects.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Find the instance in the host list and select **Launch** on its card. Press
+the card or select **Open Workspace** in its menu to inspect its mods,
+settings, logs, and other details. **Running now** on Home shows active
+clients and their controls.
+
+<ThemeScreenshot state="instances-overview" region="client-card" alt="Instance card with its version, storage type, state, and Launch button" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instances list
+ephervex instance show INSTANCE_ID
+ephervex launch INSTANCE_ID
+```
+
+Use the ID from `instances list`. The launch command stays attached to the
+game process and reports its exit status when it ends.
+
+</TabItem>
+</Tabs>
+
+## Search, filter, and sort instances
+
+Searching, filtering, and sorting change only what the list shows.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In the host list, type in **Filter instances and servers...** to search names,
+Minecraft versions, loaders, sources, and group names. The same search also
+narrows the servers.
+
+Select **Filters** to open the filter panel. **All**, **Temporary**, and
+**Persistent** choose the storage type, and **Favorites** shows only
+favorites. Choose a Minecraft version, loader, running state, linked servers,
+or group, and choose **Sort by**: **Favorites first**, **Name**, **Minecraft
+version**, or **Loader**. Ephervex remembers the sort order. The **Filters**
+button shows how many conditions narrow the list, and **Clear filters** resets
+everything except the sort order.
+
+<ThemeScreenshot state="instances-filters" alt="Instances narrowed to NeoForge with the Filters panel open, the header showing 3 of 8 instances, and Clear filters" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instances list --search TEXT
+ephervex instances list --favorite --loader neoforge --running
+ephervex instances list --group GROUP_NAME --sort name
+```
+
+Every option you give must match. Other filters are `--minecraft VERSION`,
+`--stopped`, `--ungrouped`, and `--linking paired|servers|none`. `--sort`
+takes `favorite`, `name`, `minecraft`, or `loader`; without it, the list uses
+the order chosen in the desktop app. Favorites are marked `[favorite]` and
+grouped instances `[group: NAME]`.
+
+</TabItem>
+</Tabs>
+
+## Mark favorites and set icons
+
+Favorites, groups, and icons change only how Ephervex shows an instance or
+server. They never move files, and you can change them while the game runs.
+Favorites are listed first in the host list with the default sort order. An
+icon replaces the loader or server symbol on the card, on Home, and in the
+workspace.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Select the star beside an instance's or server's name, or **Add to
+favorites** in its card menu. To set an icon, select **Choose icon...** in the
+card menu and pick a PNG or JPEG image. **Remove icon** in the same menu
+brings back the symbol.
+
+<ThemeScreenshot state="instance-organization" alt="Instances with two favorites listed first, group labels beside the names, and an instance showing a custom icon" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance favorite INSTANCE_ID
+ephervex instance unfavorite INSTANCE_ID
+ephervex instance icon INSTANCE_ID IMAGE_FILE
+ephervex instance icon INSTANCE_ID --clear
+```
+
+For a server, use `server favorite`, `server unfavorite`, and `server icon`
+with a `SERVER_ID`.
+
+</TabItem>
+</Tabs>
+
+An icon file can be at most 16 MiB, 8192 pixels on a side, and 16 megapixels.
+Ephervex keeps its own copy scaled to at most 256 pixels, so changing the
+original file later has no effect.
+
+## Group instances
+
+A group is a label for finding instances. An instance is in at most one group;
+servers have none. Each group gets one of six colors and keeps it when
+renamed. Group names are compared without regard to case. Deleting a group
+leaves its instances ungrouped.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In an instance card's menu, **Set group** lists the groups and **Remove from
+group** takes the instance out of its group. **New group...** there creates a
+group with the instance in it.
+
+Select **Groups** in the filter panel to see how many instances each group
+holds. Select **Rename** or **Delete** on a group, or **New group** to create
+an empty one. **Delete** does not ask for confirmation.
+
+<ThemeScreenshot state="instance-groups-dialog" alt="Groups dialog listing three groups with their colors and instance counts, each with Rename and Delete" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex groups create GROUP_NAME
+ephervex instance group INSTANCE_ID GROUP_NAME
+ephervex instance group INSTANCE_ID --none
+ephervex groups list
+ephervex groups rename GROUP_NAME NEW_NAME
+ephervex groups delete GROUP_NAME
+```
+
+`instance group` needs a group that already exists. `groups delete` does not
+ask for confirmation.
+
+</TabItem>
+</Tabs>
+
+## Track the bug you are reproducing
+
+An instance can carry what you know about the bug it reproduces: a link to the
+issue, the steps that trigger it, a note, and how often it showed up again.
+The steps, note, and count are kept by Ephervex outside the instance's files,
+so restoring a snapshot does not roll them back and a diagnostic bundle never
+includes them. Servers have no case and no issue link.
+
+An issue link is a full `http://` or `https://` address of at most 2048 bytes,
+without spaces, a user name, or a password. Ephervex stores it as you typed it.
+Steps are limited to 100 per instance, 300 characters each, and a note to 8000
+characters. A refused entry names the limit and keeps what you typed.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Fill in **Issue link (optional)** when you create an instance, or select **Add
+issue link** in the instance's header later. **Edit** changes it in place: press
+Enter to save and Escape to leave. Pressing the link opens it in your browser,
+and **Overview** shows it under **Issue**.
+
+Open the **Case** tab, next to **Overview**, to write the case down:
+
+- **Steps** lists what it takes to make the bug happen. Type in **Add a step...**
+  and select **Add**. Turn on the switch beside a step when you have done it;
+  the heading counts "2 of 5 done". The remove button on a step deletes it.
+- **Reproduced** counts how often the bug showed up again. **Reproduced it**
+  adds one, and **Reset** sets the count back to zero.
+- **Note** holds free text. Select **Save note** to keep it; the button says
+  when there is nothing unsaved.
+- **What happened** lists the instance's history, oldest first: when it was
+  created, launched, and stopped, how the game exited, the errors its log
+  complained about, and each time you counted the bug again.
+
+<ThemeScreenshot state="client-case" alt="The Case tab of an instance with two of three steps done, a note, a reproduced count, and the history" />
+
+The host page also has a **Copy summary for the issue** card. **Copy summary**
+copies plain text for a bug report: the name, the issue link, the Minecraft
+version, loader, mod count, storage, linked server, your steps with their
+done marks, and how often the bug was seen again. It contains no paths from
+your computer.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Show, set, or remove the issue link:
+
+```bash
+ephervex instance issue INSTANCE_ID
+ephervex instance issue INSTANCE_ID https://github.com/owner/repo/issues/42
+ephervex instance issue INSTANCE_ID --clear
+```
+
+`instance show` prints it as `issue:`, and `--json` output reports it as
+`issue_link`.
+
+Without an action, `instance case` prints the steps, the note, and the
+reproduced count. Steps are named by the number printed beside them:
+
+```bash
+ephervex instance case INSTANCE_ID
+ephervex instance case INSTANCE_ID add-step "Place a belt and fill it"
+ephervex instance case INSTANCE_ID done 1
+ephervex instance case INSTANCE_ID undo 1
+ephervex instance case INSTANCE_ID remove-step 1
+ephervex instance case INSTANCE_ID note "The belt jams after a restart."
+ephervex instance case INSTANCE_ID note --clear
+ephervex instance case INSTANCE_ID reproduced
+ephervex instance case INSTANCE_ID reproduced --reset
+ephervex instance case INSTANCE_ID history
+```
+
+Add `--json` to get `steps` (each with `id`, `text`, and `done`), `note`, and
+`reproduced`. `history` lists what happened to the instance, oldest first;
+with `--json` it reports `events`, each with `at`, `kind`, `subject`, and
+`detail`.
+
+</TabItem>
+</Tabs>
+
+The history is removed with the instance's files, and it keeps only the newest
+events once it grows large. A game left running after Ephervex closed records
+its start but not its end.
+
+## Copy or keep an instance
+
+Duplicate an instance when you want a separate copy to change or test. The
+copy starts with the original's storage type. Make Persistent instead when you
+want to keep the same temporary instance without leaving a copy behind. Stop
+the game before either action. A copy keeps the original's group and icon, but
+is not a favorite.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open an instance card's menu and select **Duplicate** or **Make Persistent**.
+The latter is also available in the instance workspace's **Overview**. When
+making an instance persistent, choose which linked temporary servers to move
+with it. Duplicate asks whether to retain records of mods missing from the
+original's mods folder.
+
+<ThemeScreenshot state="instance-actions-menu" region="actions" alt="Instance context menu with Make Persistent, Duplicate, and Delete Instance actions" />
+
+<ThemeScreenshot state="instance-make-persistent-dialog" alt="Make Persistent dialog with the destination folder and a linked temporary server to move along" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance duplicate INSTANCE_ID
+ephervex instance persist INSTANCE_ID
+```
+
+`duplicate` uses the original's storage type. Add `--name "Copy Name"`,
+`--temporary`, or `--persistent` to choose a different name or storage type.
+By default the copy also records mods the original lists but no longer has in
+its mods folder; add `--drop-absent-mods` to leave those out.
+
+`persist` moves all linked temporary servers by default; use `--no-servers` to
+leave them in temporary storage, or repeat `--server SERVER_ID` to select
+specific servers.
+
+</TabItem>
+</Tabs>
+
+## Set Java and memory for one instance
+
+An instance normally follows the global Java, memory, and JVM settings. Pin
+values here only when this instance needs different ones. Memory values are
+in MiB. Stop the instance before changing these settings.
+
+The runtime's status is **Healthy** when Ephervex picks a runtime that fits or
+will download one at launch, **Valid, customized** when a pinned runtime fits,
+**Problem** when it cannot run this instance, or **Not checked** when the check
+could not run. The expected Java comes from the Minecraft release and loader,
+such as `Java 21` or `Java 8, update 320 or older (Forge)`.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the instance workspace, then **Settings**, or select the Java pill in the
+workspace header. The **Java runtime** card shows the runtime in use, its
+path, how it is chosen, the Java the instance expects, and the status.
+
+<ThemeScreenshot state="client-java-runtime" alt="Java runtime card of an instance that pins a fitting runtime, above the available runtimes" />
+
+When a pinned runtime cannot run the instance, the card shows **Problem** and a
+refused launch says why.
+
+<ThemeScreenshot state="client-java-problem" alt="Failed launch notice naming the pinned Java 25 and the expected Java 17, above the Java runtime card marked Problem" />
+
+Under **Available runtimes**, select **Use** on a runtime, or on **Automatic**
+to let Ephervex choose. When Settings > Java names a preferred executable, that
+entry is **Launcher preference** instead. Runtimes that do not fit are
+disabled and say why. To use a runtime Ephervex has not found, enter its path
+under **Another Java executable**, select **Check**, then **Use**. Each choice
+opens a review of the current and new runtime; nothing changes until you
+select **Apply**.
+
+<ThemeScreenshot state="client-java-review" alt="Review of switching an instance from its pinned Java 25 to automatic selection" />
+
+If no installed runtime fits, **Install Java N** installs the Temurin build the
+instance expects, even when automatic downloads are off. It does not change the
+instance's Java setting. If the instance would not use the new runtime on its
+own, a review offers to pin it.
+
+<ThemeScreenshot state="client-java-install" alt="Legacy Forge instance offering Install Java 8 because no installed runtime meets its update ceiling" />
+
+Under **Java and memory**, enter the memory or JVM argument values to override
+and select **Save Runtime Settings**. Empty fields follow the global settings.
+**Follow Global Settings** removes these overrides; it does not change the Java
+runtime choice.
+
+<ThemeScreenshot state="client-settings" alt="Instance Settings with memory and JVM argument overrides" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+View the current overrides and Java status, set the ones you need, or clear
+them:
+
+```bash
+ephervex instance runtime INSTANCE_ID
+ephervex instance runtime INSTANCE_ID --java /path/to/java --min-memory 1024 --max-memory 4096
+ephervex instance runtime INSTANCE_ID --clear
+```
+
+Without options, `runtime` also prints the runtime the instance would use, the
+Java it expects, the status, and any problem. Each option changes only its own
+override and keeps the other pinned values. If you specify `--jvm-arg ARG`,
+that option replaces the pinned JVM argument list; repeat it for every argument
+you want in the list. `--clear` removes every override, including the Java
+path.
+
+Install the Java the instance expects without pinning it:
+
+```bash
+ephervex java install --instance INSTANCE_ID
+```
+
+If the instance would not use the new runtime on its own, the command prints
+the `instance runtime` command that pins it.
+
+</TabItem>
+</Tabs>
+
+## Change a loader build
+
+For a Forge or NeoForge instance, open its workspace **Overview** and select
+**Change Build**. Choose another offered build of the same loader for the
+instance's Minecraft release, then select **Install and Switch**. Installed
+mods are left in place, so check their compatibility with the new build. Stop
+the game first: the button stays available, but the change is refused while the
+instance is running.
+
+<ThemeScreenshot state="instance-change-loader-dialog" alt="Change Loader Build dialog with the current build, the build to move to, and a note that installed mods are left as they are" />
+
+Changing a loader build is currently available in the desktop app. It does
+not switch between Vanilla, Forge, and NeoForge.
+
+## Inspect a retained pack recipe
+
+An imported instance retains its pack recipe. The CLI can show the client file
+plan or the server plan used when creating a linked server. This reads the
+retained recipe in the instance; it does not change files or need the original
+archive.
+
+```bash
+ephervex instance recipe INSTANCE_ID
+ephervex instance recipe INSTANCE_ID --side server
+```
+
+Optional files that were not selected during import are left out of the
+default plan. Add `--all-optional` to include them in the displayed plan. A
+manually created instance has no pack recipe; the command reports that without
+failing.
+
+## Delete an instance
+
+:::warning
+Deleting an instance also removes its linked servers from Ephervex. Decide
+whether to keep their directories before confirming. **Delete Files** also
+removes saves and server worlds in those directories, and the retained
+snapshots of the instance and its servers.
+:::
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Stop the game, open the instance card's menu, and select **Delete Instance**.
+The dialog lists affected linked servers and offers two cards. **Keep files**
+removes the instance from Ephervex and leaves its folder on disk. **Delete
+files** deletes the folder, including worlds, mods, and logs. While linked
+servers are running, the card buttons read **Stop and Keep Files** and **Stop
+and Delete Files**, and they stop those servers first.
+
+<ThemeScreenshot state="instance-delete-confirmation" alt="Delete Instance dialog listing the linked server it affects, with Cancel, Stop and Keep Files, and Stop and Delete Files" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex instance delete INSTANCE_ID
+```
+
+The command asks for confirmation before deleting files and names every
+linked server. Use `--keep-files` to remove the records while leaving the
+directories on disk. In a noninteractive command, use `--yes` to confirm file
+deletion. Running linked servers block deletion unless you add
+`--stop-linked-servers`.
+
+</TabItem>
+</Tabs>

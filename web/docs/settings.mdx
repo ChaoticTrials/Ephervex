@@ -1,0 +1,307 @@
+---
+title: Settings
+description: Change Ephervex defaults, Java selection, provider options, and storage.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Settings
+
+Open **Settings** with the gear beside the account chip at the bottom of the
+host list. A category list on the left has **General**, **Minecraft**,
+**Java**, **Accounts**, **Providers & APIs**, **Server Properties**,
+**Storage**, **Diagnostics**, and **About & Licenses**. Back returns to the
+host you had open.
+
+Settings change Ephervex-wide behavior. An instance's or server's
+own Java and memory overrides live in its workspace **Settings**
+([instances](./instances.mdx#set-java-and-memory-for-one-instance),
+[servers](./servers.mdx#set-the-servers-java-and-memory)).
+Account management has its [own guide](./accounts.mdx). The sections below
+cover the remaining settings pages, including **About & Licenses**, and the
+CLI commands available for them.
+
+## General
+
+**General** controls where linked servers appear, whether a compatible
+default account becomes an operator on new servers, and that operator's
+permission level. It also controls Ephervex's theme, which you pick from cards
+drawn in each theme's colors, and interface text size; the separate
+**Diagnostics and console text** size affects technical views. While a
+[seasonal theme](./themes.mdx#seasonal-themes) is on, **Seasonal themes** also
+appears there.
+These display settings do not change Minecraft's interface. See [Themes](./themes.mdx)
+to add your own colors and logo.
+
+The page also lets you choose whether mod switches follow dependencies and
+whether to ask before changing other mods. You can remove trusted pack hosts
+there. Favorite Minecraft releases appear first in version selectors; star a
+release when creating an instance, then remove it here if needed.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > General**. Changes to the linked-server, display, and mod
+switch controls save when selected. Use **Forget** beside a trusted pack host
+to remove its remembered approval. Use the star beside a favorite release to
+remove it from the favorites.
+
+<ThemeScreenshot state="settings-general" alt="General settings with linked-server defaults and interface display controls" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+The CLI can show the effective configuration and list trusted pack hosts:
+
+```bash
+ephervex config show
+ephervex config pack-hosts
+```
+
+To forget one trusted host, run `ephervex config pack-hosts --forget HOST`
+(repeat the option for more hosts), or `ephervex config pack-hosts --forget-all`
+to forget every host. The other General controls are managed in the desktop app.
+
+</TabItem>
+</Tabs>
+
+## Minecraft defaults
+
+**Minecraft** manages game preferences applied to new client instances and
+imports. Existing instances keep their own settings. Preferences can include
+gameplay, video, sound, controls, language, and accessibility options.
+Ephervex writes a preference only when it knows how that exact Minecraft
+release stores the selected value. The
+[Minecraft options coverage](/minecraft-options/) page lists the releases and
+settings it knows.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Minecraft**. Choose a category or filter for a setting.
+**Show advanced** reveals less common options, and **Only overridden** narrows
+the list to your choices. Choose a release under **Compatibility preview** to
+see which choices it supports; the preview does not change the saved defaults.
+Edit the preferences you want. A bar shows how many changes are unsaved; select
+**Save Changes** to keep them or **Discard Changes** to abandon them. **Reset**
+on one preference stops overriding it, and is disabled with an explanation on a
+preference that is not overridden.
+
+To change a key binding, select its control, or focus it and press Enter or
+Space, then press the new key or mouse button. Escape leaves the binding as
+it was, and Delete or Backspace unbinds it.
+
+<ThemeScreenshot state="settings-minecraft-defaults" alt="Minecraft defaults with categories, preference controls, and compatibility preview" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+List managed preferences and their accepted values, then set or unmanage a
+specific preference:
+
+```bash
+ephervex preferences show
+ephervex preferences set gui_scale 2
+ephervex preferences unmanage gui_scale
+```
+
+`unmanage` stops applying that preference to new instances while retaining
+its value for later. These commands do not change existing instances.
+
+</TabItem>
+</Tabs>
+
+## Server property defaults
+
+**Server Properties** sets `server.properties` values for new servers. When a
+server is created or first installed, it gets each default its file does not
+already hold. Values from a pack's server files stay, and existing servers are
+not changed. A key without a default is left to Minecraft. Network settings
+and the EULA are not part of these defaults.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Server Properties**. It has the same cards as a server's
+**Properties**; turn on **Show advanced** for the **Advanced** card. A row
+without a default says what a new server gets. Edit the values you want and
+select **Save Changes** in the bar that shows the unsaved changes, or **Discard
+Changes** to drop them. **Reset** on a row removes its default.
+
+<ThemeScreenshot state="settings-server-defaults" alt="Settings Server Properties page with defaults for new servers, where Spawn protection has a default and a Reset button" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Defaults are set in the desktop app. `ephervex config show` lists saved
+defaults under `server_defaults.properties`.
+
+</TabItem>
+</Tabs>
+
+## Java
+
+Ephervex can detect installed Java runtimes and download a managed Temurin
+runtime when a compatible version is missing. **Preferred Java executable**
+applies to every instance and server without its own runtime choice; they show
+it as pinned by the launcher preference. The minimum and maximum memory values
+are defaults for every instance and server; each can override them
+([instances](./instances.mdx#set-java-and-memory-for-one-instance),
+[servers](./servers.mdx#set-the-servers-java-and-memory)).
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Java**. Set runtime detection, managed downloads, memory,
+and an optional preferred Java path, then select **Save Java Settings**.
+Memory values are in MiB, digits only, and must be greater than zero; the
+minimum cannot exceed the maximum, and Ephervex refuses to save other values.
+**Refresh Runtimes** rescans installed runtimes. The list shows each
+runtime's version, vendor, architecture, path, and origin, and which instances,
+servers, or the launcher preference pin it. Only runtimes Ephervex downloaded
+offer a remove action. Removing one that is still pinned lists those settings
+first; afterwards Diagnostics reports a Java problem for each host that pins it.
+
+<ThemeScreenshot state="settings-java" alt="Java settings with detection, memory defaults, and discovered runtimes with the settings that pin them" />
+
+<ThemeScreenshot state="settings-java-remove-pinned" alt="Remove Java Runtime dialog warning that an instance still pins the runtime" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Use these commands to inspect Java availability and the runtime Ephervex
+would select for a Minecraft release:
+
+```bash
+ephervex java list
+ephervex java refresh
+ephervex java select 1.21.1
+ephervex java select --instance INSTANCE_ID
+ephervex java install 21
+```
+
+`java list` also names the settings that pin each runtime.
+`java select --instance INSTANCE_ID` shows the runtime that instance would
+launch with, for its own Minecraft version, loader, and Java override; use
+`--server SERVER_ID` for a server. A version given with a host must be that
+host's version. Add
+`--install` to download a managed runtime if no installed runtime is
+compatible. Without `--install`, `select` only reports the selection.
+`java install --instance INSTANCE_ID` or `--server SERVER_ID` installs the
+Java that host expects instead of a named major. Global detection, download,
+memory, and preferred path settings are edited in the desktop app.
+
+</TabItem>
+</Tabs>
+
+## Providers & APIs
+
+The preferred catalog controls which provider the mod browser opens first.
+Individual searches and installs can still select Modrinth or CurseForge.
+This build already includes a CurseForge API key, so using CurseForge requires
+no key setup or check. The Microsoft application Client ID and HTTP
+User-Agent are advanced overrides; leave them at their defaults unless you
+have a specific reason to change them.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Providers & APIs**. Choose **Modrinth** or **CurseForge**
+under **Preferred catalog**. An optional custom CurseForge key can override
+the key supplied with Ephervex. **Reset to Default** removes a custom
+Microsoft Client ID or User-Agent override; select **Save API Settings** after
+editing those fields.
+
+<ThemeScreenshot state="settings-providers" alt="Provider settings with preferred mod catalog and API overrides" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Inspect the effective provider identity settings with `ephervex api show`.
+Advanced overrides are available through `ephervex api set-client-id` and
+`ephervex api set-user-agent`; run either without a value to return to the
+build's default. The preferred mod catalog is selected in the desktop app.
+
+</TabItem>
+</Tabs>
+
+## Storage
+
+Temporary environments use the operating system's temporary directory.
+Ephervex does not remove them when Minecraft exits; operating-system cleanup
+controls their lifetime. The **Persistent instance root** determines where
+new persistent clients and servers are stored. Changing it does not move
+existing environments.
+
+The reusable artifact cache holds downloads for reuse. Its limit removes the
+oldest cached downloads when usage exceeds the limit. Clearing that cache
+does not remove installed instances or servers, but later operations may need
+to download files again. See [Files and Privacy](./files-and-privacy.mdx)
+for the resolved directory layout and data cleanup.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Storage**. Choose a directory and select **Save Storage
+Root**, or **Reset to Default** for the XDG location. Manage **Watched
+download folders** there for mod files that must be downloaded manually;
+Ephervex matches a file by hash. Under **Reusable artifact cache**, choose a
+limit and **Save Limit**, or select **Clear Reusable Cache** to remove reusable
+downloads.
+
+<ThemeScreenshot state="settings-storage" alt="Storage settings with persistent root, watched folders, and reusable cache limit" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Show or change the root for future persistent environments:
+
+```bash
+ephervex config instance-root
+ephervex config instance-root /path/to/persistent-environments
+ephervex paths
+```
+
+Use `ephervex config instance-root --clear` to return to the default. The
+CLI does not expose the desktop's watched-folder or cache controls.
+
+</TabItem>
+</Tabs>
+
+## Disk usage
+
+The **Disk usage** card in **Settings > Storage** measures Ephervex's instances, servers, snapshots,
+logs, caches, shared game files, Java runtimes, and recovery state. Select
+**Measure** or **Measure again** to update the figures; measuring changes no
+files. The page groups space by how long it is retained and lets you open
+some locations. If a directory could not be read, its size is omitted and
+the page identifies it.
+
+The figures add file lengths, so reflinked snapshots and sparse files can
+occupy less physical disk space than shown. The CLI has no equivalent full
+disk-usage view.
+
+<ThemeScreenshot state="settings-disk-usage" alt="Disk usage view with measured categories and retention groups" />
+
+## Launcher log
+
+**Settings > Diagnostics** offers Ephervex's own log, which records its
+downloads, launches, and errors. Select **Save launcher log bundle...** to save
+it as a ZIP file. The files are copied as they are and never uploaded. On the
+CLI, `ephervex logs bundle --launcher` does the same; see
+[Diagnostics](./diagnostics.mdx#prepare-a-report-or-bundle).
+
+## About & Licenses
+
+**Settings > About & Licenses** shows the open-source packages Ephervex is
+built on and the license each is under. It also lists the three fonts Ephervex
+bundles, Pixelify Sans, Space Grotesk, and IBM Plex Mono, marked "(font)" and
+licensed under the SIL Open Font License 1.1. Select a package to read its
+license text. The list is built into the release, so viewing it contacts
+nothing.
+
+On the CLI, `ephervex licenses` shows a count per license, `--all` lists every
+package, and `--text LICENSE` prints the full text for one license identifier,
+such as `MIT`.

@@ -1,0 +1,118 @@
+---
+title: Getting Started
+description: Install Ephervex and create your first Minecraft environment.
+---
+
+import Link from '@docusaurus/Link';
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {createInstanceCallouts} from '@site/src/components/screenshot-callouts';
+import styles from './getting-started.module.css';
+
+# Getting Started
+
+Install Ephervex, add an account, and create a disposable Minecraft environment.
+The desktop app and CLI share the same accounts and instances.
+
+<div className={styles.installCard}>
+  <div className={styles.installCopy}>
+    <span className={styles.eyebrow}>Start here</span>
+    <h2>Install Ephervex for Linux</h2>
+    <p>Choose an AppImage or a package for Debian, Ubuntu, Fedora, or openSUSE. The installation page shows the download and commands for your architecture.</p>
+    <Link className={styles.installButton} to="/install">Choose an installation method <span aria-hidden="true">→</span></Link>
+  </div>
+  <div className={styles.installMethods} aria-hidden="true"><span>AppImage</span><span>APT</span><span>DNF</span><span>Zypper</span></div>
+</div>
+
+## Check the installation
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Ephervex** from your application menu. If you chose the AppImage, run
+the downloaded file instead. A new installation opens to Home with an empty
+host list that says "No client instances yet" and offers **New Instance** and
+**Import Modpack**.
+
+<ThemeScreenshot state="instances-empty" alt="Home with an empty host list and the New Instance and Import Modpack actions" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+For a package installation, check the local setup:
+
+```bash
+ephervex doctor
+```
+
+For an AppImage, run its `doctor` command from the folder containing the file.
+Replace `x86_64` with `aarch64` if you downloaded the ARM build:
+
+```bash
+./Ephervex-x86_64.AppImage doctor
+```
+
+`doctor` checks local storage, credentials, bundled data, and Java. It does not
+download or launch Minecraft.
+
+</TabItem>
+</Tabs>
+
+## Create and launch an instance
+
+An offline account is enough for a local test. For authenticated servers, sign
+in with Microsoft instead; the [Accounts guide](./accounts.mdx) explains both.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Settings > Accounts** and add an offline account. It appears in the list
+as an offline account with no credential.
+
+<ThemeScreenshot state="accounts-settings" region="offline-profile" alt="Offline account row marked Default and No credential" />
+
+Return to the host list, select **New Instance**, and enter a name. In the
+dialog shown below:
+
+1. Choose the exact Minecraft release.
+2. Choose Vanilla, or choose Forge or NeoForge and an exact loader build. The
+   example shows Forge.
+3. Leave **Store persistently** off for a disposable test, or turn it on to
+   keep the instance.
+
+<ThemeScreenshot state="create-instance-dialog" region="dialog" callouts={createInstanceCallouts} alt="New Instance dialog: 1 marks the Minecraft release, 2 marks the Forge loader build, and 3 marks the persistent storage choice" />
+
+Select **Launch** on the new instance card. The first launch downloads any
+missing game files and may need a compatible Java runtime.
+
+<ThemeScreenshot state="instance-launching" alt="Selected instance showing Starting while Ephervex installs and launches Minecraft" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Add an offline account and create a temporary Vanilla instance. Replace
+`VERSION` with the exact Minecraft release you want:
+
+```bash
+ephervex account add-offline ExamplePlayer
+ephervex instance create "First Test" --minecraft VERSION
+ephervex instances list
+```
+
+Use the instance ID from the list to launch it:
+
+```bash
+ephervex launch INSTANCE_ID
+```
+
+The first launch downloads missing game files and may need a compatible Java
+runtime. Add `--persistent` when creating an instance you want to keep.
+
+</TabItem>
+</Tabs>
+
+The [interface tour](./interface-tour.mdx) shows where to find mods, servers,
+logs, diagnostics, and snapshots once your instance is ready.
+The [Instances guide](./instances.mdx) covers storage, copies, per-instance
+settings, and deletion.

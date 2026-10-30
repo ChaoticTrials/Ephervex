@@ -1,0 +1,345 @@
+---
+title: Servers
+description: Create, configure, run, and recover local Minecraft servers.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import {serverAccessCallouts, serverOnlineModeCallouts, serverEulaCallouts} from '@site/src/components/screenshot-callouts';
+
+# Servers
+
+Use a standalone server for its own exact Minecraft and loader selection. Use
+a linked server when a client instance needs a matching server for a test.
+Creating either server installs it but does not start it. Servers use temporary
+storage by default; choose persistent storage if you need to keep one.
+
+## Create a server
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+For a standalone server, select **New Server** in the host list. Choose a
+name, Minecraft release, loader, and exact loader build if applicable. For a
+linked server, select **Create Linked Server** in the **Linked servers** card
+beside the client instance's page. It inherits the client's Minecraft and
+loader versions.
+
+Choose **Store persistently** if needed. **Automatic port** starts at 25565
+and picks the next locally available port when necessary; turn it off to enter
+a port yourself. If a modpack publishes separate server files, choose its
+archive under **Server files (optional)**. For a standalone server, the
+dialog fills in the Minecraft release, loader, and build the archive's file
+names state, and **Create Server** stays unavailable while the selection
+disagrees with the archive, for example Vanilla for an archive that carries
+mods. A linked server keeps its client's versions, and server files that do
+not fit them are refused when you create it. Select **Create Server** and wait
+for the installation to finish.
+
+<ThemeScreenshot state="servers-overview" alt="Server list with a standalone server and a New Server action" />
+
+<ThemeScreenshot state="create-server-standalone" alt="New Server dialog for a standalone server with Minecraft release, loader, and loader build choices" />
+
+<ThemeScreenshot state="create-server-linked" alt="New Server dialog for a linked server, which has no version or loader choice because it inherits the client's" />
+
+You can also select **Also create a linked server** while [creating an
+instance](./instances.mdx#create-an-instance) or [importing a
+modpack](./import-modpacks.mdx). New servers start with the
+[server property defaults](./settings.mdx#server-property-defaults).
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Create a standalone server with an exact game version. Forge and NeoForge
+also require an exact `--loader-version`:
+
+```bash
+ephervex server create "Test Server" --minecraft 1.21.1 --persistent
+ephervex server create "Modded Server" --minecraft 1.21.1 --loader neoforge --loader-version EXACT_BUILD
+```
+
+To derive the exact Minecraft and loader selection from a client, find its ID
+with `ephervex instances list`, then create the linked server:
+
+```bash
+ephervex server create "Pack Server" --client INSTANCE_ID --persistent
+ephervex servers list
+```
+
+Omit `--persistent` to use temporary storage. Both forms accept
+`--server-pack FILE` when the pack author publishes a server archive. Ephervex
+uses that archive's content and installs the loader and its libraries; it does
+not run the archive's installer or start script. The archive must fit the
+server's selection: one that carries mods needs a loader, and one that names a
+Minecraft release, loader, or build is refused for any other.
+
+</TabItem>
+</Tabs>
+
+A linked server is rebuilt from the client's retained pack recipe. JARs added
+manually to the client afterward are not copied automatically. A mod change
+made through the desktop app's mod dialogs can be carried to the linked servers
+you select; see [Mods](./mods.mdx). Any Forge or NeoForge server, linked or
+standalone, can also take catalog mods directly and change or remove its own;
+see [Install mods on a server](./mods.mdx#install-mods-on-a-server). Pack files
+whose server side is undeclared are included by default; the CLI can narrow
+them with repeated `--include-unknown PATH` flags or omit them with
+`--skip-unknown`. Review the server's **Mods** tab before starting a test.
+
+## Review the Minecraft EULA
+
+Server starts require explicit Minecraft Server EULA consent. Creating a
+server, importing a pack, and launching a client do not grant it. Consent is
+recorded for Ephervex's servers, rather than separately for each server.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server's **Properties** tab. In the **Minecraft Server EULA** card,
+select **Review & Accept**, read the agreement, and confirm if you agree.
+The card shows the recorded status.
+
+<ThemeScreenshot state="server-eula-review" alt="Minecraft Server EULA dialog with Open Minecraft EULA and Accept EULA" />
+
+**1** marks the EULA action on the server's Properties page.
+
+<ThemeScreenshot state="server-properties" region="eula" callouts={serverEulaCallouts} alt="Minecraft Server EULA card: 1 marks Review and Accept" />
+
+Starting a server without consent is refused before anything runs. The notice
+says **The server was not started** and offers **Review Minecraft EULA**,
+which opens the agreement. **Diagnostics** also checks for consent.
+
+<ThemeScreenshot state="server-eula-refused" alt="Server overview with The server was not started, Review Minecraft EULA, and Dismiss" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex server eula status
+ephervex server eula accept
+```
+
+`accept` requires an interactive terminal and asks you to review the EULA
+before recording consent. Use `ephervex server eula revoke` to revoke it.
+
+</TabItem>
+</Tabs>
+
+## Change server properties
+
+**Localhost** limits the server to this computer. Choose **LAN** for other
+devices on the local network, or **Custom** to bind to a specific IP address.
+Custom bind addresses must be IP addresses, not hostnames.
+
+:::warning
+Keep **Online mode** on when exposing a server beyond localhost. Ephervex
+flags an exposed offline-mode server as unsafe.
+:::
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Properties**. The **Network** card holds **Access**, **Port**, and
+**Online mode**. Under **Server settings**, the **World**, **Gameplay**,
+**Players**, and **Performance** cards list most other `server.properties`
+keys, each with a short description; turn on **Show advanced** for the
+**Advanced** card. A key the file does not hold shows the value the server
+uses instead. Once the server has written its full file, keys its release
+does not read are hidden. Keys without a row, such as remote administration
+settings, keep what the file holds.
+
+An edited row shows **Changed**, and a value the server would not accept
+shows why. The bar at the bottom counts unsaved changes. Select **Save
+Changes** to save them or **Discard Changes** to drop them.
+
+You can also save while the server runs under Ephervex. Saving does not
+restart it: until it restarts, the header, **Overview**, and each saved row
+show **Restart required**. Network settings can be changed only while the
+server is stopped.
+
+<ThemeScreenshot state="server-properties" alt="A server's Properties page with the Network and Minecraft Server EULA cards above the grouped World settings" />
+
+<ThemeScreenshot state="server-properties-running" alt="Properties of a running server marked Restart required in the header and above its locked network settings" />
+
+**1** marks **Access**, where you choose who can connect.
+
+<ThemeScreenshot state="server-properties" region="access" callouts={serverAccessCallouts} alt="Server Access setting: 1 marks the LAN access selector" />
+
+**1** marks **Online mode**. The example warns because it is off while LAN
+access is selected.
+
+<ThemeScreenshot state="server-properties" region="online-mode" callouts={serverOnlineModeCallouts} alt="Server Online mode setting: 1 marks the switch beside the offline access warning" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Use the typed network command for access, port, and online mode. Use
+`properties` for other `server.properties` keys:
+
+```bash
+ephervex server network SERVER_ID --access localhost --port 25565
+ephervex server properties show SERVER_ID
+ephervex server properties set SERVER_ID motd "Bug reproduction"
+```
+
+For a custom bind, add `--access custom --address 192.0.2.10`. The `network`
+command also accepts `--online-mode=false`, but use it only for a localhost
+server. `properties set` refuses the managed network and EULA keys, and a
+value its key does not accept, such as a `view-distance` outside 2 to 32.
+Other keys are stored as written. On a running server, `properties set` saves
+the value for the next start and says so, and `ephervex server status
+SERVER_ID` lists the keys waiting for a restart. `server network` is refused
+while the server runs.
+
+</TabItem>
+</Tabs>
+
+:::note
+Values saved while the server runs are written again just before it next
+starts. An edit made to those keys in `server.properties` outside Ephervex in
+the meantime, or by the server itself, is replaced.
+:::
+
+## Set the server's Java and memory
+
+A server picks its Java, memory, and JVM arguments the same way an instance
+does; see [Set Java and memory for one instance](./instances.mdx#set-java-and-memory-for-one-instance).
+Stop the server before changing them.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server's **Settings** tab, or select the Java pill in the workspace
+header. **Java and memory** and the **Java runtime** card work as they do in
+an instance's **Settings**. The same tab holds
+[Independent mod changes](./mods.mdx#change-or-remove-a-managed-mod).
+
+<ThemeScreenshot state="server-settings" alt="Server Settings with its own memory, Independent mod changes turned on, and the Java runtime card" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex server runtime SERVER_ID
+ephervex server runtime SERVER_ID --java /path/to/java --min-memory 2048 --max-memory 4096
+ephervex java install --server SERVER_ID
+```
+
+`server runtime` takes the same options as `instance runtime`, including
+repeated `--jvm-arg ARG` and `--clear`.
+
+</TabItem>
+</Tabs>
+
+## Run the server and use its console
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server workspace from the host list or its linked client. Select
+**Start**. The header shows its address and port, and the **Overview** shows
+its runtime state. Open
+**Console** to watch output and send a command. Use **Stop** for a graceful
+shutdown or **Restart** to stop and start it again. **Force Kill** is available
+if it cannot stop normally. The console starts over with only the new run's
+output whenever the server starts, including **Launch Client & Connect**, a
+paired launch, and **Restart**. Quitting the desktop app stops every server it
+started: it requests a graceful stop first and kills a server that does not
+exit.
+
+<ThemeScreenshot state="server-console" alt="Running server console with live output and a command field" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Find the server ID with `ephervex servers list`. `start` runs in the
+foreground and streams output. Ctrl-C, a terminal hangup, or a termination
+signal requests a graceful stop; a second Ctrl-C or signal kills the server.
+From another terminal, you can inspect it or send a console command:
+
+```bash
+ephervex server start SERVER_ID
+ephervex server status SERVER_ID
+ephervex server console SERVER_ID "say Test starting"
+ephervex server output SERVER_ID --lines 100
+ephervex server stop SERVER_ID
+```
+
+`stop` requests a graceful shutdown and waits up to 30 seconds. Use
+`ephervex server restart SERVER_ID` to restart, or `ephervex server kill
+SERVER_ID` only when forced termination is needed.
+
+</TabItem>
+</Tabs>
+
+## Launch a linked client and connect
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+On a client's page, find its linked server in the **Linked servers** card and
+select **Launch Client & Connect**. Ephervex starts the server if needed, waits for it to accept
+connections, then launches the client and connects it. The server remains
+running after the client exits; stop it separately when the test is done.
+
+<ThemeScreenshot state="client-overview-linked-server" alt="Client overview with its linked server and Launch Client & Connect action" />
+
+**Start together** is a separate pairing option for a client and server. Use
+**Launch Client & Connect** when the client should join the linked server
+directly.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex launch INSTANCE_ID --server SERVER_ID
+```
+
+The server must be linked to that client. The command starts or reuses it,
+waits for readiness, and connects the client. If this command started the
+server, it stops that server when the command ends. A server that was already
+running is left running.
+
+</TabItem>
+</Tabs>
+
+## Mark a favorite or set an icon
+
+Favorites are listed first in the host list. Select the star beside a server's
+name, or use **Add to favorites** and **Choose icon...** in its card menu.
+On the command line, use `server favorite SERVER_ID`,
+`server unfavorite SERVER_ID`, and `server icon SERVER_ID IMAGE_FILE` or
+`--clear`. Icons follow the
+[instance icon limits](./instances.mdx#mark-favorites-and-set-icons).
+
+## Recover a server after an interruption
+
+If Ephervex or the machine stops unexpectedly, the server may have recorded
+runtime state that needs review. Check its status before trying to start it
+again. Ephervex clears that state only when it can prove every recorded
+process has stopped; it will not take over a possibly live server process.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server's **Overview**. If it says the server needs attention, select
+**Repair**. If repair is refused because a process may still be running,
+inspect and stop that process before trying again. The server can be started
+after stale state is cleared.
+
+<ThemeScreenshot state="server-needs-recovery" alt="Server overview showing Needs recovery with a Repair button" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex server recover status SERVER_ID
+ephervex server recover clear SERVER_ID
+```
+
+`clear` refuses when a recorded process is live or cannot be verified as
+stopped. It clears runtime records; it does not kill a process.
+
+</TabItem>
+</Tabs>

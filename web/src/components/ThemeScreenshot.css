@@ -1,0 +1,88 @@
+.themeScreenshot,
+.themeScreenshot picture,
+.themeScreenshot img {
+  display: block;
+}
+
+.themeScreenshot {
+  width: 100%;
+  background: var(--ifm-background-surface-color);
+}
+
+.themeScreenshot img {
+  max-width: 100%;
+  height: auto;
+}
+
+.themeScreenshotZoomable {
+  position: relative;
+  padding: 0;
+  border: 0;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+.themeScreenshotZoomable:disabled { cursor: default; }
+.themeScreenshotZoomable:focus-visible { outline: 3px solid var(--ifm-color-primary); outline-offset: 3px; }
+.themeScreenshotZoomable img { transition: transform 180ms ease; }
+.themeScreenshotZoomable:hover:not(:disabled) img { transform: scale(1.015); }
+
+.themeScreenshotCallout {
+  position: absolute;
+  box-sizing: border-box;
+  border: 2px solid #bd3f2b;
+  border-radius: 0.35rem;
+  box-shadow: 0 0 0 2px #fff, 0 2px 10px rgb(0 0 0 / 0.25);
+  pointer-events: none;
+}
+
+.themeScreenshotCalloutNumber {
+  position: absolute;
+  top: 50%;
+  left: -1.4rem;
+  display: grid;
+  width: 1.4rem;
+  height: 1.4rem;
+  place-items: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  color: #fff;
+  background: #a72f1e;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.75rem;
+  font-weight: 700;
+  line-height: 1;
+  transform: translateY(-50%);
+}
+
+.themeScreenshotCalloutRight .themeScreenshotCalloutNumber { right: -1.4rem; left: auto; }
+
+.themeScreenshotZoomHint {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 999px;
+  color: #fff;
+  background: rgb(6 12 15 / 0.82);
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(0.3rem);
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.themeScreenshotZoomable:hover .themeScreenshotZoomHint,
+.themeScreenshotZoomable:focus-visible .themeScreenshotZoomHint {
+  opacity: 1;
+  transform: none;
+}
+
+@media (hover: none) {
+  .themeScreenshotZoomHint { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .themeScreenshotZoomable img, .themeScreenshotZoomHint { transition: none; }
+}

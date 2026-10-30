@@ -18,16 +18,14 @@
 //!
 //! # Hosting
 //!
-//! Today the document is a public Gist, read through GitHub's stable Gist API
-//! endpoint for a fixed id rather than a revision-specific raw URL, so the feed
-//! keeps working when it is edited. GitHub truncates large file bodies in that
-//! response and supplies a `raw_url` for the full content; that fallback is
-//! followed, with the URL checked against an explicit host allowlist because it
-//! arrived inside remote JSON.
+//! The document is a plain JSON file on the documentation site, published from
+//! the committed dataset (see [`DEFAULT_FEED_URL`]). The host allowlist is
+//! derived from the feed's own URL, so reading the feed never lets remote JSON
+//! name another host.
 //!
-//! Nothing above the transport knows any of that. [`OptionsFeed`] takes a
-//! [`FeedSource`], and replacing the Gist with a plain static JSON endpoint is
-//! a different `FeedSource`, not a change to anything that reads the dataset.
+//! The site is not a dependency of anything that works offline. When it is
+//! unreachable, answers with something that is not a dataset, or serves an older
+//! revision, the cached document or the compiled-in baseline keeps answering.
 //! No credentials are involved: this is a public read-only document.
 
 use ephervex_download::{
@@ -35,100 +33,51 @@ use ephervex_download::{
     MetadataCache, MetadataCacheError, MetadataKey, OperationReporter, UrlPolicyError, redacted,
 };
 use reqwest::Url;
-use serde::Deserialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
-use tokio_util::sync::CancellationToken as Cancel;
 
 use crate::dataset::{DatasetError, OptionsDataset};
 
 /// The cache key the validated feed document is stored under.
 pub const OPTIONS_FEED_CACHE_KEY: &str = "ephervex-minecraft-options";
 
-/// The Gist holding the published compatibility dataset.
-pub const DEFAULT_GIST_ID: &str = "84f4b9229c20bb0fcda74215aabe3e76";
-
-/// GitHub's stable Gist API root.
+/// Where the published compatibility dataset is served.
 ///
-/// The API endpoint for a fixed id rather than a revision-specific raw URL: the
-/// raw URL stops serving the current document the moment the feed is edited,
-/// which is the one thing a feed has to survive.
-pub const GIST_API_BASE: &str = "https://api.github.com";
+/// A fixed, unversioned path: the file is replaced in place whenever the
+/// dataset changes, so the URL never names a revision.
+pub const DEFAULT_FEED_URL: &str =
+    "https://ephervex.chaotictrials.de/assets/minecraft-options.json";
 
-/// The file inside that Gist.
-pub const FEED_FILE_NAME: &str = "minecraft-options.json";
-
-/// Hosts the feed may be read from.
-///
-/// Exact-match and deliberately short. `api.github.com` serves the Gist
-/// document; `gist.githubusercontent.com` serves the raw body GitHub points at
-/// when it truncates a file. Every addition widens what remote JSON can make
-/// the launcher talk to.
-pub const FEED_HOSTS: &[&str] = &["api.github.com", "gist.githubusercontent.com"];
-
-/// Where the compatibility dataset is published.
-///
-/// Two shapes rather than a plugin system: a Gist, which needs one indirection
-/// through GitHub's API, and a plain document at a URL, which does not. A
-/// future move to static hosting is the second variant.
+/// Where the compatibility dataset is published: one document at one URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FeedSource {
-    /// A public Gist, addressed by its stable id through the Gist API.
-    Gist {
-        /// The API root. A field rather than a constant so the offline tests
-        /// can point it at a loopback server; production uses
-        /// [`GIST_API_BASE`].
-        api_base: String,
-        id: String,
-        file: String,
-    },
-    /// A document served directly at one URL.
-    Document { url: String },
+pub struct FeedSource {
+    url: String,
 }
 
 impl Default for FeedSource {
     fn default() -> Self {
-        Self::gist(DEFAULT_GIST_ID, FEED_FILE_NAME)
+        Self::document(DEFAULT_FEED_URL)
     }
 }
 
 impl FeedSource {
-    /// A Gist read through GitHub's public API.
+    /// A document served directly at `url`.
     #[must_use]
-    pub fn gist(id: &str, file: &str) -> Self {
-        Self::Gist {
-            api_base: GIST_API_BASE.to_owned(),
-            id: id.to_owned(),
-            file: file.to_owned(),
+    pub fn document(url: &str) -> Self {
+        Self {
+            url: url.to_owned(),
         }
     }
 
-    /// The same Gist, read through another API root.
-    #[must_use]
-    pub fn through(mut self, api_base: &str) -> Self {
-        if let Self::Gist { api_base: base, .. } = &mut self {
-            base.clear();
-            base.push_str(api_base.trim_end_matches('/'));
-        }
-        self
-    }
-
-    /// The URL the refresh starts from.
+    /// The URL the refresh reads.
     pub fn entry_url(&self) -> Result<Url, UrlPolicyError> {
-        let raw = match self {
-            Self::Gist { api_base, id, .. } => format!("{api_base}/gists/{id}"),
-            Self::Document { url } => url.clone(),
-        };
-        Url::parse(&raw).map_err(|_| UrlPolicyError::Malformed)
+        Url::parse(&self.url).map_err(|_| UrlPolicyError::Malformed)
     }
 
     /// A short stable description for logs. Never a credential-bearing URL.
     #[must_use]
     pub fn describe(&self) -> String {
-        match self {
-            Self::Gist { id, file, .. } => format!("gist {id}/{file}"),
-            Self::Document { url } => describe_document(url),
-        }
+        describe_document(&self.url)
     }
 }
 
@@ -148,14 +97,10 @@ pub enum FeedError {
         #[source]
         source: Box<MetadataCacheError>,
     },
-    /// The URL policy refused something, including a `raw_url` the response
-    /// supplied that does not point at an allowed host.
+    /// The URL policy refused the feed's location.
     #[error("the Minecraft options feed named a location that is not permitted")]
     Location(#[from] UrlPolicyError),
-    /// The Gist response did not contain the expected file.
-    #[error("the Minecraft options feed response has no `{file}`")]
-    FileMissing { file: String },
-    /// The response was not the shape the hosting expects.
+    /// The response could not be stored as the document it was read as.
     #[error("the Minecraft options feed response is not well formed")]
     Response {
         #[source]
@@ -187,22 +132,6 @@ impl FeedError {
     pub const fn message_id(&self) -> &'static str {
         "error-options-feed-unavailable"
     }
-}
-
-/// The shape of GitHub's Gist document, reduced to what the feed needs.
-#[derive(Debug, Deserialize)]
-struct GistResponse {
-    files: std::collections::BTreeMap<String, GistFile>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GistFile {
-    /// Absent when GitHub omits the body entirely.
-    content: Option<String>,
-    /// Set when the body was cut short and `raw_url` must be followed.
-    #[serde(default)]
-    truncated: bool,
-    raw_url: Option<String>,
 }
 
 /// Decides whether `incoming` may replace the cached document.
@@ -259,14 +188,9 @@ impl OptionsFeed {
         layout: CacheLayout,
         source: FeedSource,
     ) -> Result<Self, UrlPolicyError> {
-        let allowlist = match &source {
-            FeedSource::Gist { .. } => DomainAllowlist::new(FEED_HOSTS.iter().copied()),
-            FeedSource::Document { .. } => {
-                let entry = source.entry_url()?;
-                let host = entry.host_str().ok_or(UrlPolicyError::Malformed)?;
-                DomainAllowlist::new([host])
-            }
-        };
+        let entry = source.entry_url()?;
+        let host = entry.host_str().ok_or(UrlPolicyError::Malformed)?;
+        let allowlist = DomainAllowlist::new([host]);
         Ok(Self {
             cache: MetadataCache::new(layout),
             key: MetadataKey::new(OPTIONS_FEED_CACHE_KEY).map_err(|_| UrlPolicyError::Malformed)?,
@@ -346,11 +270,7 @@ impl OptionsFeed {
         let entry = self.source.entry_url()?;
         self.allowlist.validate_url(&entry)?;
 
-        let body = self.read(&entry, reporter, cancel).await?;
-        let text = match &self.source {
-            FeedSource::Document { .. } => body,
-            FeedSource::Gist { file, .. } => self.gist_body(&body, file, reporter, cancel).await?,
-        };
+        let text = self.read(&entry, reporter, cancel).await?;
 
         let dataset = OptionsDataset::parse(&text)?;
         // Cached only now, after the document has been read and validated in
@@ -378,42 +298,6 @@ impl OptionsFeed {
             "refreshed the Minecraft options compatibility feed"
         );
         Ok(dataset)
-    }
-
-    /// Extracts the document from a Gist response, following `raw_url` when
-    /// GitHub says the inline body was cut short.
-    async fn gist_body(
-        &self,
-        response: &str,
-        file: &str,
-        reporter: &OperationReporter,
-        cancel: &Cancel,
-    ) -> Result<String, FeedError> {
-        let parsed: GistResponse =
-            serde_json::from_str(response).map_err(|source| FeedError::Response { source })?;
-        let entry = parsed
-            .files
-            .get(file)
-            .ok_or_else(|| FeedError::FileMissing {
-                file: file.to_owned(),
-            })?;
-
-        if !entry.truncated {
-            if let Some(content) = entry.content.as_ref() {
-                return Ok(content.clone());
-            }
-        }
-
-        let raw = entry
-            .raw_url
-            .as_deref()
-            .ok_or_else(|| FeedError::FileMissing {
-                file: file.to_owned(),
-            })?;
-        // The URL came out of a remote document, so it is checked against the
-        // allowlist exactly like any other untrusted location.
-        let url = self.allowlist.validate(raw)?;
-        self.read(&url, reporter, cancel).await
     }
 
     /// Fetches one document through staging private to this call and reads it
@@ -451,51 +335,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_default_source_is_the_stable_gist_endpoint_rather_than_a_revision() {
-        // A revision-specific raw URL stops serving the current document the
-        // moment the feed is edited, which is the one thing a feed must do.
+    fn the_default_source_is_one_unversioned_https_document_on_the_site() {
+        // A path that names a revision stops serving the current document the
+        // moment the dataset changes, which is the one thing a feed must do.
         let entry = FeedSource::default().entry_url().expect("valid url");
-        assert_eq!(
-            entry.as_str(),
-            "https://api.github.com/gists/84f4b9229c20bb0fcda74215aabe3e76"
-        );
-        assert!(
-            DomainAllowlist::new(FEED_HOSTS.iter().copied())
-                .validate_url(&entry)
-                .is_ok()
-        );
+        assert_eq!(entry.as_str(), DEFAULT_FEED_URL);
+        assert_eq!(entry.scheme(), "https");
+        assert_eq!(entry.host_str(), Some("ephervex.chaotictrials.de"));
+        assert_eq!(entry.path(), "/assets/minecraft-options.json");
     }
 
     #[test]
-    fn the_feed_allowlist_permits_only_the_two_hosts_it_needs() {
-        let allowlist = DomainAllowlist::new(FEED_HOSTS.iter().copied());
-        assert!(
-            allowlist
-                .validate("https://api.github.com/gists/abc")
-                .is_ok()
-        );
-        assert!(
-            allowlist
-                .validate(
-                    "https://gist.githubusercontent.com/user/abc/raw/x/minecraft-options.json"
-                )
-                .is_ok()
-        );
-        for refused in [
-            "https://evil.example/minecraft-options.json",
-            "http://api.github.com/gists/abc",
-            "https://api.github.com.evil.example/gists/abc",
-            "file:///etc/passwd",
-        ] {
-            assert!(allowlist.validate(refused).is_err(), "{refused}");
-        }
-    }
-
-    #[test]
-    fn a_document_source_needs_no_gist_indirection() {
-        let source = FeedSource::Document {
-            url: "https://example.invalid/minecraft-options.json".to_owned(),
-        };
+    fn a_document_source_reads_exactly_its_url() {
+        let source = FeedSource::document("https://example.invalid/minecraft-options.json");
         assert_eq!(
             source.entry_url().expect("valid url").as_str(),
             "https://example.invalid/minecraft-options.json"
@@ -505,18 +357,16 @@ mod tests {
 
     #[test]
     fn a_document_description_omits_userinfo_query_and_fragment() {
-        let source = FeedSource::Document {
-            url: "https://user:hunter2@example.invalid/data.json?token=FAKE_REVIEW_VALUE#part"
-                .to_owned(),
-        };
+        let source = FeedSource::document(
+            "https://user:hunter2@example.invalid/data.json?token=FAKE_REVIEW_VALUE#part",
+        );
         assert_eq!(source.describe(), "https://example.invalid/data.json");
     }
 
     #[test]
     fn an_unparsable_document_url_is_not_echoed_by_its_description_or_error() {
-        let source = FeedSource::Document {
-            url: "https://exa mple.invalid/data.json?token=FAKE_REVIEW_VALUE".to_owned(),
-        };
+        let source =
+            FeedSource::document("https://exa mple.invalid/data.json?token=FAKE_REVIEW_VALUE");
         assert!(!source.describe().contains("FAKE_REVIEW_VALUE"));
         let error = source.entry_url().expect_err("unparsable url");
         assert!(matches!(error, UrlPolicyError::Malformed));
@@ -525,9 +375,7 @@ mod tests {
 
     #[test]
     fn a_cannot_be_a_base_document_url_is_described_without_its_query() {
-        let source = FeedSource::Document {
-            url: "mailto:someone@example.invalid?token=FAKE_REVIEW_VALUE".to_owned(),
-        };
+        let source = FeedSource::document("mailto:someone@example.invalid?token=FAKE_REVIEW_VALUE");
         assert!(!source.describe().contains("FAKE_REVIEW_VALUE"));
     }
 }

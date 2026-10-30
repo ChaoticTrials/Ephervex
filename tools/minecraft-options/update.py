@@ -12,15 +12,15 @@ This is the one maintainer workflow for this subsystem.
 It reads Mojang's published version manifest, selects a release (never a
 snapshot), fetches and hash-verifies that release's official client JAR into an
 untracked development cache, analyzes the JAR statically without ever executing Minecraft, folds the result
-into the committed dataset, and writes the exact JSON to publish to the remote
-options feed.
+into the committed dataset. Merging that file to main is the whole publication:
+the documentation site serves it as the options feed.
 
 Exactly one of --latest, --version and --from-analysis selects the input.
 --check writes nothing and never uses the network: it reads the cached manifest
 and the release's existing analysis in the cache.
 
-Nothing here needs GitHub credentials and nothing here publishes anything. The
-generated feed file is written locally and its path is printed.
+Nothing here needs GitHub credentials and nothing here publishes anything; the
+dataset takes effect as the feed once it is merged.
 """
 
 from __future__ import annotations
@@ -477,10 +477,8 @@ def main() -> int:
         print(f"[update] {error}", file=sys.stderr)
         return 1
 
-    feed = cache / "feed" / "minecraft-options.json"
     try:
         write_atomic(BUNDLED_DATASET, text)
-        write_atomic(feed, text)
     except OSError as error:
         print(f"[update] could not write the generated dataset: {error}", file=sys.stderr)
         return 1
@@ -488,7 +486,6 @@ def main() -> int:
     for line in summary:
         print(line)
     print(f"bundled dataset: {BUNDLED_DATASET}")
-    print(f"remote feed to publish: {feed}")
     return 0
 
 

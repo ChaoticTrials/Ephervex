@@ -1,0 +1,209 @@
+---
+title: Interface tour
+---
+
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Interface tour
+
+These captures show Ephervex with synthetic sample data. The images follow the
+site's color mode, so switch it to see the matching Ephervex theme. Every
+captured screen is on the [screenshots page](/screenshots).
+
+Ephervex is not affiliated with or endorsed by Mojang or Microsoft.
+
+## The window
+
+The window has three columns.
+
+- The left column is the host list. It holds the Ephervex logo with the
+  version and a **Refresh** button, a **Home** button, a search field with a
+  **Filters** button, a card for every instance and server, and the default
+  account chip. The gear beside the chip opens **Settings**.
+- The middle column shows Home, the instance or server you opened, or
+  Settings.
+- The right column appears beside Home only. It counts your temporary and
+  persistent instances and your servers, shows how full the shared download
+  cache is, and lists a few tips.
+
+In a narrow window the host list and the right column leave the row. A button
+at the edge of the page opens either one over the page, and choosing a host or
+pressing the dimmed page closes it again.
+
+<ThemeScreenshot state="home-page" alt="Ephervex Home with the host list on the left and storage and tips on the right" />
+
+Home lists what is running, anything that needs your attention, the hosts you
+ran last, and recent activity. See [Running and activity](#running-and-activity).
+
+<ThemeScreenshot state="instances-overview" alt="Ephervex host list with instance and server cards" />
+
+Each card shows the host's name, a colored square and strip for its state, a
+favorite star, its group, chips for the Minecraft version and loader, and one
+state line: **Ready**, **Not yet**, **Last run** with how long ago, or **Needs
+fix**. A badge counts the problems recorded for the host. Press a card to open
+that host. Search, filters, and groups narrow a long list; see
+[Instances](./instances.mdx#search-filter-and-sort-instances).
+
+<ThemeScreenshot state="instances-overview" region="client-card" alt="An instance card" />
+
+The **Quick view** button on a card shows that host over the window without
+leaving the page you are on. **Open as page** opens it in the middle column,
+**Fullscreen** enlarges it, and **Close quick view** returns to where you were.
+
+<ThemeScreenshot state="quick-view" alt="A quick view of an instance shown over the window" />
+
+## Creating and importing
+
+Create an instance by choosing an exact Minecraft release, a loader (Vanilla,
+Forge, or NeoForge), and a loader version.
+
+<ThemeScreenshot state="create-instance-dialog" alt="The create instance dialog" />
+
+Import a Modrinth or CurseForge pack from a file, a link, or by dropping it on
+the window. The dialog shows what the pack contains before anything is
+installed. Optional files stay off unless you choose them.
+
+<ThemeScreenshot state="import-modpack-ready" alt="A modpack ready to import" />
+
+Some CurseForge authors disable third-party downloads. Ephervex shows the
+blocked file with an **Open in Browser** action so you can download it manually.
+
+<ThemeScreenshot state="import-modpack-manual-download" region="blocked-file" alt="A blocked CurseForge file with an Open in Browser action" />
+
+While an import runs, the instance appears as a card with progress. Activity
+shows the current operation and recent results while Ephervex stays open.
+
+<ThemeScreenshot state="import-modpack-running" alt="An import in progress" />
+
+See [Import Modpacks](./import-modpacks.mdx) for archive and link imports,
+optional files, CurseForge access, and manual downloads.
+
+## Case
+
+An instance's header can show a link to the issue it reproduces. The **Case**
+tab next to **Overview** keeps the steps that trigger the bug, a note, how often
+the bug showed up again, and a history of what happened to the instance.
+
+<ThemeScreenshot state="client-case" alt="The Case tab of an instance with steps, a note, a reproduced count, and the history" />
+
+See [Track the bug you are reproducing](./instances.mdx#track-the-bug-you-are-reproducing)
+for the steps, the issue summary you can copy into a bug report, and the
+matching CLI commands.
+
+## Mods
+
+The Mods surface lists every mod of an instance in one table and marks where
+each came from: the pack, a dependency, your own addition, or a jar you placed
+by hand. **Add Mods** opens a catalog dialog that only offers versions that fit
+the instance's exact Minecraft version and loader.
+
+<ThemeScreenshot state="client-mods" alt="Managed mods in one table with the Add Mods button" />
+
+Turning a mod off shows what depends on it first.
+
+<ThemeScreenshot state="mod-impact" alt="What turning a mod off affects" />
+
+When a problem appears with a large mod set, mod isolation narrows it down by
+enabling and disabling groups of mods between test launches.
+
+<ThemeScreenshot state="mod-isolation-round" alt="A mod isolation round" />
+
+See [Mods](./mods.mdx) for installation, switches, version changes,
+dependencies, and file repair.
+The [Mod Isolation guide](./mod-isolation.mdx) walks through each test round.
+
+## Servers
+
+A server can stand alone or be linked to a client instance. The server page
+shows its address and state and offers start, stop, restart, and console
+access.
+
+<ThemeScreenshot state="servers-overview" alt="Ephervex server list" />
+
+<ThemeScreenshot state="server-console" alt="The server console" />
+
+**Properties** groups most `server.properties` settings into cards and shows
+the state of the Minecraft EULA. The server's **Settings** holds its Java,
+memory, and JVM arguments. The workspace header shows the host's Java and its
+status; select it to open **Settings**.
+
+<ThemeScreenshot state="server-properties" alt="Server properties" />
+
+A Forge or NeoForge server's **Mods** page can also search the catalog,
+leaving out client-only mods.
+
+<ThemeScreenshot state="server-mods" alt="A server's mods and a catalog search" />
+
+See [Servers](./servers.mdx) for creation, EULA consent, network settings,
+console controls, linked client launches, and recovery.
+
+## Split view
+
+Select the split view button beside **Open Folder** in a workspace header to
+show a second pane, for example a client's log beside its server's console. Select the host's name in
+a pane's header to choose what it shows; **Show in this pane** can search
+every instance and server. Beside each pane's tabs, the folder button opens
+that host's folder, and the other buttons add a pane below or close the pane.
+
+<ThemeScreenshot state="split-workspace" alt="Split view with a client's live log beside its linked server's console, each pane with its folder, add pane, and close buttons" />
+
+## Running and activity
+
+The **Running now** card on Home lists the client instances and servers
+Ephervex currently supervises. You can open their logs, stop a game, or open a
+server console from it. **Needs your attention** lists hosts with a recorded
+problem and opens the host that explains it, and **Continue where you left
+off** lists the hosts you ran last.
+
+<ThemeScreenshot state="running-page" alt="Home with a running client instance and server and their process controls" />
+
+The **Activity** card shows running, queued, completed, failed, and canceled
+operations. You can cancel work that is still running or queued. Activity is
+cleared when Ephervex exits.
+
+<ThemeScreenshot state="activity-import-in-progress" alt="Activity with an import in progress and recent operation results" />
+
+## When something goes wrong
+
+The live log can filter by level and search. Crash reports are listed beside
+it.
+
+<ThemeScreenshot state="client-logs-live" alt="The live game log" />
+
+Diagnostics checks a host for known problems and shows a preview of any fix.
+Nothing changes until you apply it.
+
+<ThemeScreenshot state="client-diagnostics-result" alt="A diagnosis with problems found" />
+
+See [Diagnostics](./diagnostics.mdx) for logs, crash reports, fix previews,
+and local bundles.
+
+Snapshots keep a restorable copy of an instance's state.
+
+<ThemeScreenshot state="snapshots" alt="Snapshots of an instance" />
+
+See [Snapshots](./snapshots.mdx) to capture, restore, rename, and delete local
+saved states.
+
+## Accounts and settings
+
+Offline and Microsoft accounts are managed in Settings.
+
+<ThemeScreenshot state="accounts-settings" alt="Ephervex accounts" />
+
+See [Accounts](./accounts.mdx) to add an account, sign in, or choose one for a
+launch.
+
+<ThemeScreenshot state="settings-general" alt="General settings" />
+
+See [Settings](./settings.mdx) for Minecraft defaults, Java, providers,
+storage, and disk usage.
+
+## Keyboard and accessibility
+
+Buttons, switches, filter chips, and navigation entries take keyboard focus
+with Tab and show a focus ring. Enter or Space activates the focused control.
+Sliders move one step at a time with the arrow keys, by ten steps with Page Up
+and Page Down, and to either end with Home and End. Icon-only buttons show a
+tooltip naming their action. A disabled button explains on hover why it is
+unavailable, and keyboard focus skips it.

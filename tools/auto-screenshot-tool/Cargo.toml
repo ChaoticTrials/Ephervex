@@ -1,0 +1,38 @@
+[package]
+name = "ephervex-screenshots"
+description = "Deterministic documentation captures of the Ephervex desktop UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# Documentation captures are drawn by Skia, which renders item transforms and
+# rounded clips that Slint's software renderer ignores. It is a feature, off by
+# default, so Skia stays out of the resolved graph that the license inventory and
+# `cargo deny` read for default features. generate.sh turns it on.
+[features]
+skia = ["i-slint-backend-testing/renderer-skia"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+ephervex-core.workspace = true
+ephervex-gui = { path = "../../crates/gui" }
+ephervex-i18n.workspace = true
+hex.workspace = true
+i-slint-backend-testing.workspace = true
+image.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+slint.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

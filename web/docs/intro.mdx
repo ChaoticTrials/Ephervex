@@ -1,0 +1,71 @@
+---
+title: Introduction
+description: What Ephervex does, what it supports, and where its limits are.
+---
+
+import Link from '@docusaurus/Link';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+import styles from './intro.module.css';
+
+# Ephervex
+
+<p className={styles.lead}>Ephervex is a Linux Minecraft launcher and developer
+tool for disposable bug-reproduction environments. Create an instance with
+exact Minecraft and loader versions, reproduce a problem, then discard the
+environment or keep it for later.</p>
+
+The desktop application and command-line interface use the same instance and
+server storage. Shared downloads, game assets, libraries, and managed Java
+runtimes can be reused across environments.
+
+<div className={styles.quickLinks}>
+  <Link className={styles.primaryLink} to="/install">Install Ephervex <span aria-hidden="true">→</span></Link>
+  <Link className={styles.secondaryLink} to="./getting-started">Follow Getting Started <span aria-hidden="true">→</span></Link>
+</div>
+
+## What you can do
+
+<div className={styles.pathGrid}>
+  <Link to="./instances"><span>01 / INSTANCES</span><strong>Start with exact versions</strong><p>Create a temporary or persistent Vanilla, Forge, or NeoForge environment.</p></Link>
+  <Link to="./import-modpacks"><span>02 / MODPACKS</span><strong>Import a pack</strong><p>Review Modrinth or CurseForge files, optional mods, and manual downloads.</p></Link>
+  <Link to="./mod-isolation"><span>03 / INVESTIGATE</span><strong>Narrow down a failure</strong><p>Use mod isolation, logs, diagnostics, and snapshots to find the cause.</p></Link>
+  <Link to="./servers"><span>04 / SERVERS</span><strong>Test with a server</strong><p>Create a standalone or linked server and inspect its console.</p></Link>
+</div>
+
+<figure className={styles.preview}>
+  <ThemeScreenshot state="instances-overview" alt="Ephervex instance list with game versions, storage types, and launch controls" />
+  <figcaption>See the <Link to="/docs/v1/interface-tour">interface tour</Link>, or browse the <Link to="/docs/v1/feature-list">Feature List</Link> for a specific task.</figcaption>
+</figure>
+
+## Supported scope
+
+Ephervex supports Linux on `x86_64` and `aarch64`. On `x86_64`, it supports Minecraft
+**release versions 1.12.2 and newer** with Vanilla, Forge, or NeoForge. A loader
+must support the exact Minecraft release you choose. Ephervex does not
+substitute a different version when a selection is unsupported. For Minecraft
+1.12.2, Forge builds older than 14.23.5.2851 use an older installer format. They
+are left out of build lists and refused when selected. On ARM, a
+Minecraft version also needs compatible native libraries; see
+[installation](/install).
+
+Fabric, Quilt, Minecraft snapshots, pre-releases, and release candidates are
+not supported. Windows and macOS are not supported. Prism and MultiMC exports
+are recognized but refused. The desktop interface is currently English only.
+
+## Current limitations
+
+- Pack files whose authors disable third-party downloads must be downloaded
+  manually.
+- Resource packs, shader packs, and datapacks in imported packs are not yet
+  preserved.
+- Quitting Ephervex stops running clients and servers.
+- Avoid simultaneous mod changes on the same instance or server, including
+  changes during an active mod isolation session.
+- Session-only Microsoft sign-in does not retain credentials. Persistent
+  credential storage needs a working Secret Service provider, such as GNOME
+  Keyring or KWallet.
+
+For common failures and recovery steps, see
+[Limitations and Troubleshooting](./troubleshooting.mdx).
+
+Ephervex is not affiliated with or endorsed by Mojang or Microsoft.

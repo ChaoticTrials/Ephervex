@@ -1,0 +1,66 @@
+{
+  "name": "web",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "docusaurus": "docusaurus",
+    "prestart": "npm run cli:reference:sync",
+    "start": "docusaurus start",
+    "prebuild": "npm run screenshots:check && npm run cli:reference:sync",
+    "build": "docusaurus build",
+    "swizzle": "docusaurus swizzle",
+    "deploy": "docusaurus deploy",
+    "clear": "docusaurus clear",
+    "serve": "docusaurus serve",
+    "write-translations": "docusaurus write-translations",
+    "write-heading-ids": "docusaurus write-heading-ids",
+    "typecheck": "tsc",
+    "archive:test": "tsx --test src/archive/archive.test.ts",
+    "archive:exporter:test": "python3 -m unittest discover -s scripts/forgejo-archive/tests -v",
+    "options:test": "tsx --test src/options/coverage.test.ts",
+    "archive:check": "node scripts/archive-check.mjs",
+    "screenshots:sync": "node scripts/screenshots.mjs sync",
+    "screenshots:check": "node scripts/screenshots.mjs check",
+    "screenshots:contact-sheet": "node scripts/screenshots.mjs contact-sheet",
+    "cli:reference:sync": "node scripts/cli-reference.mjs sync",
+    "cli:reference:check": "node scripts/cli-reference.mjs check"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/faster": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "@docusaurus/theme-common": "^3.10.2",
+    "@easyops-cn/docusaurus-search-local": "0.55.3",
+    "@mdx-js/react": "^3.0.0",
+    "clsx": "^2.0.0",
+    "prism-react-renderer": "^2.3.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "devDependencies": {
+    "@docusaurus/module-type-aliases": "3.10.2",
+    "@docusaurus/tsconfig": "3.10.2",
+    "@docusaurus/types": "3.10.2",
+    "@types/react": "^19.0.0",
+    "sharp": "^0.35.5",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2"
+  },
+  "browserslist": {
+    "production": [
+      ">0.5%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 3 chrome version",
+      "last 3 firefox version",
+      "last 5 safari version"
+    ]
+  },
+  "engines": {
+    "node": ">=20.0"
+  }
+}

@@ -16,16 +16,14 @@ use ephervex_download::{
     CacheLayout, DomainAllowlist, DownloadManager, DownloaderConfig, HttpConfig, OperationReporter,
 };
 use ephervex_options::{
-    CompatibilitySource, FeedError, FeedSource, OPTIONS_FEED_CACHE_KEY, OptionsCompatibility,
-    OptionsDataset, OptionsFeed,
+    CompatibilitySource, DEFAULT_FEED_URL, FeedError, FeedSource, OPTIONS_FEED_CACHE_KEY,
+    OptionsCompatibility, OptionsDataset, OptionsFeed,
 };
 use tokio_util::sync::CancellationToken;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const GIST_PATH: &str = "/gists/84f4b9229c20bb0fcda74215aabe3e76";
-const RAW_PATH: &str = "/raw/minecraft-options.json";
-const FEED_FILE: &str = "minecraft-options.json";
+const DOC_PATH: &str = "/assets/minecraft-options.json";
 
 fn manager() -> DownloadManager {
     DownloadManager::new(DownloaderConfig {
@@ -39,7 +37,7 @@ fn feed(server: &MockServer, cache: &tempfile::TempDir) -> OptionsFeed {
     OptionsFeed::from_source(
         manager(),
         CacheLayout::new(cache.path()),
-        FeedSource::gist("84f4b9229c20bb0fcda74215aabe3e76", FEED_FILE).through(&server.uri()),
+        FeedSource::document(&format!("{}{DOC_PATH}", server.uri())),
     )
     .expect("feed builds")
     .with_allowlist(DomainAllowlist::for_loopback_tests("127.0.0.1"))
@@ -65,39 +63,10 @@ fn published_revision(revision: u32) -> String {
     )
 }
 
-/// GitHub's Gist response with the document inline.
-fn gist_with_content(body: &str) -> String {
-    serde_json::json!({
-        "files": {
-            FEED_FILE: {
-                "filename": FEED_FILE,
-                "truncated": false,
-                "content": body,
-            }
-        }
-    })
-    .to_string()
-}
-
-/// GitHub's Gist response for a file it cut short, pointing at the full body.
-fn gist_truncated(server: &MockServer) -> String {
-    serde_json::json!({
-        "files": {
-            FEED_FILE: {
-                "filename": FEED_FILE,
-                "truncated": true,
-                "content": "{\"format_ver",
-                "raw_url": format!("{}{RAW_PATH}", server.uri()),
-            }
-        }
-    })
-    .to_string()
-}
-
-async fn mount(server: &MockServer, route: &str, body: String) {
+async fn mount(server: &MockServer, route: &str, body: impl Into<String>) {
     Mock::given(method("GET"))
         .and(path(route))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.into()))
         .mount(server)
         .await;
 }
@@ -105,7 +74,7 @@ async fn mount(server: &MockServer, route: &str, body: String) {
 #[tokio::test]
 async fn a_published_document_is_validated_then_cached_then_used() {
     let server = MockServer::start().await;
-    mount(&server, GIST_PATH, gist_with_content(&published())).await;
+    mount(&server, DOC_PATH, &published()).await;
     let cache = tempfile::tempdir().expect("temp dir");
     let feed = feed(&server, &cache);
 
@@ -125,61 +94,12 @@ async fn a_published_document_is_validated_then_cached_then_used() {
 }
 
 #[tokio::test]
-async fn a_truncated_gist_body_is_completed_from_the_raw_url_the_response_supplies() {
-    // GitHub cuts long file bodies out of the Gist document and points at the
-    // full one. Following that pointer is the difference between a feed that
-    // works and a feed that silently stops updating once it grows.
-    let server = MockServer::start().await;
-    mount(&server, GIST_PATH, gist_truncated(&server)).await;
-    mount(&server, RAW_PATH, published()).await;
-    let cache = tempfile::tempdir().expect("temp dir");
-
-    let refreshed = feed(&server, &cache)
-        .refresh(&reporter(), &CancellationToken::new())
-        .await
-        .expect("the raw body completes the document");
-    assert_eq!(refreshed.revision, OptionsDataset::bundled().revision + 1);
-}
-
-#[tokio::test]
-async fn a_raw_url_pointing_off_the_allowlist_is_refused_rather_than_followed() {
-    // `raw_url` arrives inside remote JSON, so it is untrusted input like any
-    // other location a document names.
-    let server = MockServer::start().await;
-    mount(
-        &server,
-        GIST_PATH,
-        serde_json::json!({
-            "files": {
-                FEED_FILE: {
-                    "truncated": true,
-                    "content": "{",
-                    "raw_url": "https://evil.example/minecraft-options.json",
-                }
-            }
-        })
-        .to_string(),
-    )
-    .await;
-    let cache = tempfile::tempdir().expect("temp dir");
-
-    let error = feed(&server, &cache)
-        .refresh(&reporter(), &CancellationToken::new())
-        .await
-        .expect_err("an unlisted host must not be fetched");
-    assert!(
-        error.to_string().contains("not permitted"),
-        "unexpected failure: {error}"
-    );
-}
-
-#[tokio::test]
 async fn a_bad_publish_never_replaces_the_last_known_good_cache() {
     // The whole point of validating before caching. Four different ways of
     // being wrong, and after every one of them the good document is still
     // what a reader gets.
     let good = MockServer::start().await;
-    mount(&good, GIST_PATH, gist_with_content(&published())).await;
+    mount(&good, DOC_PATH, &published()).await;
     let cache = tempfile::tempdir().expect("temp dir");
     feed(&good, &cache)
         .refresh(&reporter(), &CancellationToken::new())
@@ -224,7 +144,7 @@ async fn a_bad_publish_never_replaces_the_last_known_good_cache() {
         ),
     ] {
         let bad = MockServer::start().await;
-        mount(&bad, GIST_PATH, gist_with_content(&body)).await;
+        mount(&bad, DOC_PATH, &body).await;
         let feed = feed(&bad, &cache);
 
         assert!(
@@ -263,9 +183,57 @@ async fn a_feed_host_that_cannot_be_reached_leaves_the_launcher_with_what_it_has
 }
 
 #[tokio::test]
+async fn a_site_error_response_never_replaces_the_cached_document() {
+    // The documentation site is a static host: when it is down or the file is
+    // missing it answers with an error page, not with a dataset.
+    let good = MockServer::start().await;
+    mount(&good, DOC_PATH, published()).await;
+    let cache = tempfile::tempdir().expect("temp dir");
+    feed(&good, &cache)
+        .refresh(&reporter(), &CancellationToken::new())
+        .await
+        .expect("the good publish is cached");
+
+    for status in [404, 500, 503] {
+        let failing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(DOC_PATH))
+            .respond_with(ResponseTemplate::new(status).set_body_string("<html>error</html>"))
+            .mount(&failing)
+            .await;
+        let feed = feed(&failing, &cache);
+
+        assert!(
+            feed.refresh(&reporter(), &CancellationToken::new())
+                .await
+                .is_err(),
+            "HTTP {status} must not count as a publish"
+        );
+        let cached = feed.cached().await.expect("the good document survives");
+        assert_eq!(
+            cached.revision,
+            OptionsDataset::bundled().revision + 1,
+            "HTTP {status} replaced the cache"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_default_feed_reads_only_the_documentation_site() {
+    let cache = tempfile::tempdir().expect("temp dir");
+    let feed = OptionsFeed::new(manager(), CacheLayout::new(cache.path())).expect("feed builds");
+
+    assert_eq!(feed.source(), &FeedSource::default());
+    assert_eq!(
+        feed.source().entry_url().expect("valid url").as_str(),
+        DEFAULT_FEED_URL
+    );
+}
+
+#[tokio::test]
 async fn a_cached_document_survives_the_host_disappearing_afterwards() {
     let server = MockServer::start().await;
-    mount(&server, GIST_PATH, gist_with_content(&published())).await;
+    mount(&server, DOC_PATH, &published()).await;
     let cache = tempfile::tempdir().expect("temp dir");
     feed(&server, &cache)
         .refresh(&reporter(), &CancellationToken::new())
@@ -288,60 +256,13 @@ async fn a_cached_document_survives_the_host_disappearing_afterwards() {
 }
 
 #[tokio::test]
-async fn a_gist_without_the_expected_file_is_refused_rather_than_guessed_at() {
-    let server = MockServer::start().await;
-    mount(
-        &server,
-        GIST_PATH,
-        serde_json::json!({
-            "files": {
-                "something-else.json": {"truncated": false, "content": "{}"}
-            }
-        })
-        .to_string(),
-    )
-    .await;
-    let cache = tempfile::tempdir().expect("temp dir");
-
-    let error = feed(&server, &cache)
-        .refresh(&reporter(), &CancellationToken::new())
-        .await
-        .expect_err("no file, no dataset");
-    assert!(error.to_string().contains(FEED_FILE), "{error}");
-}
-
-#[tokio::test]
-async fn a_document_source_refreshes_from_its_exact_configured_host() {
-    let server = MockServer::start().await;
-    mount(&server, RAW_PATH, published()).await;
-    let cache = tempfile::tempdir().expect("temp dir");
-    let feed = OptionsFeed::from_source(
-        manager(),
-        CacheLayout::new(cache.path()),
-        FeedSource::Document {
-            url: format!("{}{RAW_PATH}", server.uri()),
-        },
-    )
-    .expect("document feed builds")
-    .with_allowlist(DomainAllowlist::for_loopback_tests("127.0.0.1"));
-
-    let refreshed = feed
-        .refresh(&reporter(), &CancellationToken::new())
-        .await
-        .expect("the direct document is adopted");
-    assert_eq!(refreshed.revision, OptionsDataset::bundled().revision + 1);
-}
-
-#[tokio::test]
 async fn a_plaintext_document_source_is_refused_before_any_request() {
     let server = MockServer::start().await;
     let cache = tempfile::tempdir().expect("temp dir");
     let feed = OptionsFeed::from_source(
         manager(),
         CacheLayout::new(cache.path()),
-        FeedSource::Document {
-            url: format!("{}{RAW_PATH}", server.uri()),
-        },
+        FeedSource::document(&format!("{}{DOC_PATH}", server.uri())),
     )
     .expect("the URL is syntactically valid");
 
@@ -358,12 +279,7 @@ async fn refresh_revision(
     revision: u32,
 ) -> Result<OptionsDataset, String> {
     let server = MockServer::start().await;
-    mount(
-        &server,
-        GIST_PATH,
-        gist_with_content(&published_revision(revision)),
-    )
-    .await;
+    mount(&server, DOC_PATH, &published_revision(revision)).await;
     feed(&server, cache)
         .refresh(&reporter(), &CancellationToken::new())
         .await
@@ -425,7 +341,7 @@ async fn different_content_cannot_reuse_a_cached_revision() {
     );
     assert_ne!(changed, published_revision(3));
     let server = MockServer::start().await;
-    mount(&server, GIST_PATH, gist_with_content(&changed)).await;
+    mount(&server, DOC_PATH, &changed).await;
     let error = feed(&server, &cache)
         .refresh(&reporter(), &CancellationToken::new())
         .await
@@ -527,7 +443,7 @@ async fn feeds_sharing_a_cache_each_adopt_only_the_response_of_their_own_source(
     let slow_revision = OptionsDataset::bundled().revision + 1;
     let fast_revision = OptionsDataset::bundled().revision + 2;
     Mock::given(method("GET"))
-        .and(path(RAW_PATH))
+        .and(path(DOC_PATH))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_string(published_revision(slow_revision))
@@ -535,16 +451,14 @@ async fn feeds_sharing_a_cache_each_adopt_only_the_response_of_their_own_source(
         )
         .mount(&slow)
         .await;
-    mount(&fast, RAW_PATH, published_revision(fast_revision)).await;
+    mount(&fast, DOC_PATH, published_revision(fast_revision)).await;
 
     let cache = tempfile::tempdir().expect("temp dir");
     let document_feed = |server: &MockServer| {
         OptionsFeed::from_source(
             manager(),
             CacheLayout::new(cache.path()),
-            FeedSource::Document {
-                url: format!("{}{RAW_PATH}", server.uri()),
-            },
+            FeedSource::document(&format!("{}{DOC_PATH}", server.uri())),
         )
         .expect("document feed builds")
         .with_allowlist(DomainAllowlist::for_loopback_tests("127.0.0.1"))
@@ -598,12 +512,7 @@ async fn a_refresh_never_replaces_a_newer_revision_published_by_another_process_
     let server = MockServer::start().await;
     let downloaded = OptionsDataset::bundled().revision + 1;
     let published_elsewhere = downloaded + 1;
-    mount(
-        &server,
-        GIST_PATH,
-        gist_with_content(&published_revision(downloaded)),
-    )
-    .await;
+    mount(&server, DOC_PATH, &published_revision(downloaded)).await;
     let cache = tempfile::tempdir().expect("temp dir");
     let refreshing = feed(&server, &cache);
 

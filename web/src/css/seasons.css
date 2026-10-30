@@ -1,0 +1,355 @@
+html[data-season='pride'] {
+  --ifm-color-primary: #6432a0;
+  --ifm-color-primary-dark: #592d8f;
+  --ifm-color-primary-darker: #542a87;
+  --ifm-color-primary-darkest: #45236f;
+  --ifm-color-primary-light: #6f37b1;
+  --ifm-color-primary-lighter: #7439ba;
+  --ifm-color-primary-lightest: #8b54ca;
+  --ifm-font-color-base: #28283d;
+  --ifm-heading-color: #202136;
+  --ifm-navbar-background-color: #fffdf9;
+  --ifm-navbar-link-color: #202136;
+  --ifm-navbar-link-hover-color: #6432a0;
+  --site-bg: #f8f7fc;
+  --site-surface: #fffdf9;
+  --site-surface-alt: #f0edfa;
+  --site-image-bg: #e6e3f4;
+  --site-border: #d9d4e7;
+  --site-muted: #55566e;
+  --site-accent: #6432a0;
+  --site-shadow: rgba(44, 32, 69, 0.09);
+  --site-hero-bg: #f6ebf7;
+  --site-hero-text: #202136;
+  --site-hero-muted: #4f5068;
+  --site-button-bg: #6432a0;
+  --site-button-hover: #512687;
+  --site-button-text: #fff;
+  --docs-sidebar-bg: #f0edfa;
+  --docs-sidebar-text: #3c3b59;
+  --docs-sidebar-accent: #6432a0;
+  --docs-note-bg: #e8f5ee;
+  --docs-warning-bg: #fff3d7;
+  --docs-warning-border: #a66116;
+}
+
+html[data-theme='dark'][data-season='pride'] {
+  --ifm-color-primary: #d3a7ff;
+  --ifm-color-primary-dark: #c48aff;
+  --ifm-color-primary-darker: #bd7aff;
+  --ifm-color-primary-darkest: #a94aff;
+  --ifm-color-primary-light: #e2c4ff;
+  --ifm-color-primary-lighter: #e9d3ff;
+  --ifm-color-primary-lightest: #f7edff;
+  --ifm-font-color-base: #edebf5;
+  --ifm-heading-color: #faf5ff;
+  --ifm-navbar-background-color: #1c1a2b;
+  --ifm-navbar-link-color: #f0ecf8;
+  --ifm-navbar-link-hover-color: #d3a7ff;
+  --site-bg: #171725;
+  --site-surface: #222234;
+  --site-surface-alt: #2d2b42;
+  --site-image-bg: #1d1d2d;
+  --site-border: #4b4965;
+  --site-muted: #c7c4d9;
+  --site-accent: #d3a7ff;
+  --site-shadow: rgba(0, 0, 0, 0.22);
+  --site-hero-bg: #302740;
+  --site-hero-text: #faf5ff;
+  --site-hero-muted: #d7d1e2;
+  --site-button-bg: #d3a7ff;
+  --site-button-hover: #e3c7ff;
+  --site-button-text: #21152d;
+  --docs-sidebar-bg: #1c1a2b;
+  --docs-sidebar-text: #e1dbf0;
+  --docs-sidebar-accent: #d3a7ff;
+  --docs-note-bg: #203b34;
+  --docs-warning-bg: #443520;
+  --docs-warning-border: #ffc66d;
+}
+
+/* Shared surfaces include docs, local search, mobile navigation, and archive pages. */
+html[data-season] {
+  --season-viewer-bg: color-mix(in srgb, var(--site-surface) 94%, transparent);
+  --season-viewer-text: var(--site-hero-text);
+  --season-viewer-muted: var(--site-muted);
+  --season-viewer-border: var(--site-border);
+  --ifm-background-color: var(--site-bg);
+  --ifm-background-surface-color: var(--site-surface);
+  --ifm-footer-background-color: var(--docs-sidebar-bg);
+  --ifm-footer-color: var(--docs-sidebar-text);
+  --ifm-footer-link-color: var(--docs-sidebar-accent);
+  --ifm-menu-color: var(--docs-sidebar-text);
+  --ifm-menu-color-active: var(--docs-sidebar-accent);
+  --ifm-code-background: var(--site-surface-alt);
+  --ifm-table-stripe-background: var(--site-surface-alt);
+}
+html[data-season] .navbar__title,
+html[data-season] .navbar__toggle,
+html[data-season] .navbar .clean-btn { color: var(--site-hero-text); }
+html[data-season] .archive-root {
+  --archive-text: var(--site-hero-text);
+  --archive-hero-start: var(--site-hero-bg);
+  --archive-hero-end: var(--site-surface-alt);
+  --archive-hero-accent: var(--site-accent);
+  --archive-hero-muted: var(--site-muted);
+  --archive-hero-foreground: var(--site-hero-text);
+  --archive-hero-line: var(--site-border);
+  --archive-hero-card: var(--site-surface);
+  --archive-hero-glow: color-mix(in srgb, var(--site-accent) 18%, transparent);
+}
+html[data-season='pride'] {
+  --season-ribbon: linear-gradient(90deg, #df425d 0 16.66%, #f18c39 16.66% 33.33%, #edc94f 33.33% 50%, #45aa77 50% 66.66%, #468bc9 66.66% 83.33%, #9760c6 83.33%);
+}
+html[data-season='pride'] .navbar { border-image: var(--season-ribbon) 1; border-bottom-width: 5px; }
+html[data-season='pride'] .theme-doc-markdown > header:first-child {
+  background:
+    linear-gradient(90deg, #df425d, #f18c39, #edc94f, #45aa77, #468bc9, #9760c6) top / 100% 7px no-repeat,
+    linear-gradient(110deg, #ffe2e8, #fff0cd 22%, #e0f3e8 46%, #deecfb 72%, #eee2f9);
+}
+html[data-theme='dark'][data-season='pride'] .theme-doc-markdown > header:first-child {
+  background:
+    linear-gradient(90deg, #df425d, #f18c39, #edc94f, #45aa77, #468bc9, #9760c6) top / 100% 7px no-repeat,
+    linear-gradient(110deg, #5a2c3c, #58452e 22%, #2c4e40 46%, #2c435d 72%, #49365d);
+}
+html[data-season='pride'] .theme-doc-markdown {
+  background:
+    radial-gradient(ellipse at 93% 13%, color-mix(in srgb, #9760c6 11%, transparent), transparent 43%),
+    radial-gradient(ellipse at 8% 54%, color-mix(in srgb, #45aa77 8%, transparent), transparent 35%),
+    var(--site-surface);
+}
+html[data-season='pride'] .theme-doc-markdown > h2::before { background: var(--season-ribbon); }
+html[data-season='pride'] .theme-doc-sidebar-menu::before {
+  border-bottom: 4px solid transparent;
+  border-image: var(--season-ribbon) 1;
+}
+html[data-season='pride'] .theme-doc-sidebar-menu .menu__link--active:not(.menu__link--sublist) {
+  background: linear-gradient(90deg, color-mix(in srgb, #df425d 16%, var(--docs-sidebar-bg)), color-mix(in srgb, #9760c6 17%, var(--docs-sidebar-bg)));
+  box-shadow: inset 3px 0 #df425d;
+}
+
+html[data-season='christmas'] {
+  --ifm-color-primary: #a62535;
+  --ifm-color-primary-dark: #94212f;
+  --ifm-color-primary-darker: #8b1f2c;
+  --ifm-color-primary-darkest: #721924;
+  --ifm-color-primary-light: #b8293b;
+  --ifm-color-primary-lighter: #c42c3e;
+  --ifm-color-primary-lightest: #d94b5c;
+  --ifm-font-color-base: #22382e;
+  --ifm-heading-color: #153829;
+  --ifm-navbar-background-color: #fffdf6;
+  --ifm-navbar-link-color: #173b2b;
+  --ifm-navbar-link-hover-color: #a62535;
+  --site-bg: #f4f8f2;
+  --site-surface: #fffdf6;
+  --site-surface-alt: #e5f0e8;
+  --site-image-bg: #d2e2d9;
+  --site-border: #c5d8ca;
+  --site-muted: #526a5e;
+  --site-accent: #a62535;
+  --site-shadow: rgba(18, 55, 37, 0.1);
+  --site-hero-bg: #dfede2;
+  --site-hero-text: #153829;
+  --site-hero-muted: #486355;
+  --site-button-bg: #a62535;
+  --site-button-hover: #831b29;
+  --site-button-text: #fffdf6;
+  --docs-sidebar-bg: #e5f0e8;
+  --docs-sidebar-text: #2c4a38;
+  --docs-sidebar-accent: #a62535;
+  --docs-note-bg: #e1f1e5;
+  --docs-warning-bg: #fff1e4;
+  --docs-warning-border: #a62535;
+}
+
+html[data-theme='dark'][data-season='christmas'] {
+  --ifm-color-primary: #ff9aa1;
+  --ifm-color-primary-dark: #ff7d87;
+  --ifm-color-primary-darker: #ff6e79;
+  --ifm-color-primary-darkest: #ff4453;
+  --ifm-color-primary-light: #ffb7bb;
+  --ifm-color-primary-lighter: #ffc6c9;
+  --ifm-color-primary-lightest: #ffeff0;
+  --ifm-font-color-base: #e4f1e8;
+  --ifm-heading-color: #f2faf0;
+  --ifm-navbar-background-color: #0e271b;
+  --ifm-navbar-link-color: #e6f5e9;
+  --ifm-navbar-link-hover-color: #ff9aa1;
+  --site-bg: #10251a;
+  --site-surface: #1b3426;
+  --site-surface-alt: #254332;
+  --site-image-bg: #142c20;
+  --site-border: #41664e;
+  --site-muted: #c2d7c9;
+  --site-accent: #ff9aa1;
+  --site-shadow: rgba(0, 0, 0, 0.24);
+  --site-hero-bg: #21412e;
+  --site-hero-text: #f1faed;
+  --site-hero-muted: #d1e4d3;
+  --site-button-bg: #e96e78;
+  --site-button-hover: #ff9299;
+  --site-button-text: #291517;
+  --docs-sidebar-bg: #0e271b;
+  --docs-sidebar-text: #d5eadb;
+  --docs-sidebar-accent: #ff9aa1;
+  --docs-note-bg: #284936;
+  --docs-warning-bg: #493126;
+  --docs-warning-border: #ff9aa1;
+}
+
+html[data-season='christmas'] {
+  --season-ribbon: repeating-linear-gradient(135deg, #b52b3d 0 13px, #fff5de 13px 26px, #24744c 26px 39px, #fff5de 39px 52px);
+}
+html[data-season='christmas'] .navbar { border-image: var(--season-ribbon) 1; border-bottom-width: 5px; }
+html[data-season='christmas'] .theme-doc-markdown > header:first-child {
+  background:
+    linear-gradient(90deg, #a62535 0 20%, #fff5de 20% 40%, #24744c 40% 60%, #fff5de 60% 80%, #a62535 80%) top / 100% 7px no-repeat,
+    linear-gradient(110deg, #174b34, #246543 48%, #962f3a);
+  color: #fffdf6;
+}
+html[data-season='christmas'] .theme-doc-markdown > header:first-child::before { color: #f4d09a; }
+html[data-season='christmas'] .theme-doc-markdown > header:first-child + p {
+  color: #fff5e7;
+  background: linear-gradient(110deg, #225338, #285d3e 47%, #7b2933);
+}
+html[data-season='christmas'] .theme-doc-markdown {
+  background:
+    radial-gradient(ellipse at 94% 31%, color-mix(in srgb, #a62535 15%, transparent), transparent 44%),
+    var(--site-surface);
+}
+html[data-season='christmas'] .theme-doc-markdown > h2::before {
+  background: repeating-linear-gradient(135deg, #b52b3d 0 6px, #fff5de 6px 12px, #24744c 12px 18px);
+}
+html[data-season='christmas'] .theme-doc-sidebar-menu::before {
+  border-bottom: 4px solid transparent;
+  border-image: var(--season-ribbon) 1;
+}
+html[data-season='christmas'] .theme-doc-sidebar-menu .menu__link--active:not(.menu__link--sublist) {
+  background: color-mix(in srgb, #a62535 16%, var(--docs-sidebar-bg));
+  box-shadow: inset 3px 0 #b52b3d;
+}
+
+html[data-season='april-fools'] {
+  --ifm-color-primary: #a4146b;
+  --ifm-color-primary-dark: #93125f;
+  --ifm-color-primary-darker: #8b115a;
+  --ifm-color-primary-darkest: #720e49;
+  --ifm-color-primary-light: #b51677;
+  --ifm-color-primary-lighter: #be177c;
+  --ifm-color-primary-lightest: #dd2c99;
+  --ifm-font-color-base: #302645;
+  --ifm-heading-color: #29203f;
+  --ifm-navbar-background-color: #fffaf6;
+  --ifm-navbar-link-color: #29203f;
+  --ifm-navbar-link-hover-color: #a4146b;
+  --site-bg: #fff9f3;
+  --site-surface: #fffefd;
+  --site-surface-alt: #f2eafa;
+  --site-image-bg: #dff2f4;
+  --site-border: #ded3e9;
+  --site-muted: #615773;
+  --site-accent: #a4146b;
+  --site-shadow: rgba(61, 28, 80, 0.1);
+  --site-hero-bg: #fce8ed;
+  --site-hero-text: #29203f;
+  --site-hero-muted: #574768;
+  --site-button-bg: #a4146b;
+  --site-button-hover: #810d53;
+  --site-button-text: #fff;
+  --docs-sidebar-bg: #f1e7fb;
+  --docs-sidebar-text: #423257;
+  --docs-sidebar-accent: #a4146b;
+  --docs-note-bg: #dcf4f1;
+  --docs-warning-bg: #fff0cc;
+  --docs-warning-border: #a56609;
+}
+
+html[data-theme='dark'][data-season='april-fools'] {
+  --ifm-color-primary: #ffd66b;
+  --ifm-color-primary-dark: #ffcb48;
+  --ifm-color-primary-darker: #ffc637;
+  --ifm-color-primary-darkest: #f2b00c;
+  --ifm-color-primary-light: #ffe18e;
+  --ifm-color-primary-lighter: #ffe69f;
+  --ifm-color-primary-lightest: #fff3d2;
+  --ifm-font-color-base: #f2eafa;
+  --ifm-heading-color: #fff5ff;
+  --ifm-navbar-background-color: #211a36;
+  --ifm-navbar-link-color: #f5e9ff;
+  --ifm-navbar-link-hover-color: #ffd66b;
+  --site-bg: #1c1830;
+  --site-surface: #29213f;
+  --site-surface-alt: #35294e;
+  --site-image-bg: #211b35;
+  --site-border: #594a71;
+  --site-muted: #d2c4e1;
+  --site-accent: #ffd66b;
+  --site-shadow: rgba(0, 0, 0, 0.24);
+  --site-hero-bg: #3d2851;
+  --site-hero-text: #fff5ff;
+  --site-hero-muted: #e0d3ea;
+  --site-button-bg: #ffd66b;
+  --site-button-hover: #ffe493;
+  --site-button-text: #2c2038;
+  --docs-sidebar-bg: #211a36;
+  --docs-sidebar-text: #edddfa;
+  --docs-sidebar-accent: #ffd66b;
+  --docs-note-bg: #224349;
+  --docs-warning-bg: #4d3850;
+  --docs-warning-border: #ffd66b;
+}
+
+html[data-season='april-fools'] {
+  --season-ribbon: repeating-linear-gradient(110deg, #ed3b9a 0 18px, #ffd447 18px 36px, #25b6c3 36px 54px, #874ed5 54px 72px);
+}
+html[data-season='april-fools'] .navbar { border-image: var(--season-ribbon) 1; border-bottom-width: 5px; }
+html[data-season='april-fools'] .theme-doc-markdown > header:first-child {
+  background:
+    var(--season-ribbon) top / 100% 7px no-repeat,
+    radial-gradient(circle at 87% 24%, #ffd447 0 7px, transparent 8px),
+    radial-gradient(circle at 77% 71%, #25b6c3 0 4px, transparent 5px),
+    linear-gradient(115deg, #f8d8ed, #ffeacb 37%, #d8f4f2 72%, #e9dcfa);
+}
+html[data-theme='dark'][data-season='april-fools'] .theme-doc-markdown > header:first-child {
+  background:
+    var(--season-ribbon) top / 100% 7px no-repeat,
+    radial-gradient(circle at 87% 24%, #ffd447 0 7px, transparent 8px),
+    radial-gradient(circle at 77% 71%, #25b6c3 0 4px, transparent 5px),
+    linear-gradient(115deg, #653052, #6a3e50 38%, #28566b 72%, #523a70);
+}
+html[data-season='april-fools'] .theme-doc-markdown > header:first-child + p {
+  background: linear-gradient(110deg, #fce0ed, #e4f4f5 58%, #fff0bf);
+}
+html[data-theme='dark'][data-season='april-fools'] .theme-doc-markdown > header:first-child + p {
+  background: linear-gradient(110deg, #523052, #284658 58%, #584528);
+}
+html[data-season='april-fools'] .theme-doc-markdown {
+  background:
+    radial-gradient(ellipse at 94% 25%, color-mix(in srgb, #25b6c3 13%, transparent), transparent 42%),
+    radial-gradient(ellipse at 8% 70%, color-mix(in srgb, #ed3b9a 9%, transparent), transparent 39%),
+    var(--site-surface);
+}
+html[data-season='april-fools'] .theme-doc-markdown > h2::before { background: var(--season-ribbon); }
+html[data-season='april-fools'] .theme-doc-sidebar-menu::before {
+  border-bottom: 4px solid transparent;
+  border-image: var(--season-ribbon) 1;
+}
+html[data-season='april-fools'] .theme-doc-sidebar-menu .menu__link--active:not(.menu__link--sublist) {
+  background: linear-gradient(90deg, color-mix(in srgb, #ed3b9a 19%, var(--docs-sidebar-bg)), color-mix(in srgb, #874ed5 18%, var(--docs-sidebar-bg)));
+  box-shadow: inset 3px 0 #ed3b9a;
+}
+
+@keyframes april-barrel-roll {
+  to { transform: rotate(1turn); }
+}
+html[data-season='april-fools'] .themeScreenshotZoomable:is(:hover, :focus-visible),
+html[data-season='april-fools'] .navbar__brand:is(:hover, :focus-visible) .navbar__logo img,
+html[data-season='april-fools'] footer a:is(:hover, :focus-visible) img {
+  animation: april-barrel-roll 900ms ease-in-out 1 both;
+}
+@media (prefers-reduced-motion: reduce) {
+  html[data-season='april-fools'] .themeScreenshotZoomable:is(:hover, :focus-visible),
+  html[data-season='april-fools'] .navbar__brand:is(:hover, :focus-visible) .navbar__logo img,
+  html[data-season='april-fools'] footer a:is(:hover, :focus-visible) img { animation: none; }
+}

@@ -11,7 +11,7 @@ and:
 > the product understand and present it?
 
 The first answer lives in a generated dataset (`dataset.py`) that ships with
-the application and can also be published to a remote feed, so a new Minecraft
+the application and is also served as a remote feed once merged to `main`, so a new Minecraft
 release does not require a new Ephervex release just to become configurable.
 The second answer lives in a bundled product catalog (`preferences.py`) that
 has no remote form at all: growing the set of exposed preferences always
@@ -32,8 +32,9 @@ python3 tools/minecraft-options/update.py --version 26.2
 That single command reads Mojang's version manifest, picks a **release** (never
 a snapshot or release candidate), downloads and SHA-1 verifies the official
 client JAR and version metadata into an untracked development cache, analyzes
-the JAR statically, folds the result into the committed dataset, and writes the
-exact JSON to publish to the remote feed. It prints a short summary of what actually changed.
+the JAR statically, and folds the result into the committed dataset. It prints a
+short summary of what actually changed. Merging the dataset to `main` publishes
+it: the documentation site serves the committed file as the remote feed.
 
 A build counts as a release only when its `version.json` `name` and `id` agree
 on a release identifier (`1.N`, `1.N.P`, or `YY.N[.P]` from 26.1). A
@@ -82,8 +83,10 @@ JARs it did not analyze, so the output holds exactly that run's analysis, and
 one release. The analyzer writes `inventory.json`, `raw/` and `normalized/` and nothing
 else; `normalized/` is the only part the rest of the tooling reads.
 
-Publication is manual and deliberate. `update.py` never edits the remote feed
-and never needs GitHub credentials; it writes the file and prints its path.
+The committed dataset is the feed: the documentation site publishes
+`crates/options/data/minecraft-options.json` from `main` at
+`/assets/minecraft-options.json`, so there is no second file to publish and no
+separate publication step. `update.py` never needs GitHub credentials.
 
 The feed covers the settings the current build offers and nothing else. An
 already-released build adopts any feed with a higher revision than its bundled
@@ -98,7 +101,7 @@ the application applies when it loads a dataset (codec parameters, option keys,
 representation positions, schema and release references), and requires the
 canonical release to support every setting Ephervex's own preference model needs.
 A dataset that fails either check is refused with an error, and neither the
-bundled file nor the feed file is touched.
+bundled file is not touched.
 
 `update.py` also prints, without writing anything, whenever a current
 manageable setting is not yet covered by the bundled product catalog:
@@ -174,7 +177,7 @@ compiled into the binaries and are never fetched at build time. See
 | `preferences.py` | Turns the compatibility dataset (plus optional analyzer enrichment) into the bundled product preference catalog, and validates it |
 | `update.py` | The maintainer workflow: fetches, analyzes, folds into the compatibility dataset, and reports whether the product catalog needs review |
 | `tests/` | Offline tests for all of the above, one `test_*.py` per subject: `python3 -m unittest discover -s tools/minecraft-options`, or one module with `python3 -m unittest tests.test_dataset` from this directory |
-| `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output, generated feed |
+| `.cache/` | Untracked development cache: JARs, Mojang metadata, analysis output |
 
 Analyzer output is the input to every fingerprint in the committed dataset, so
 changes to extraction must be evidence-driven and followed by regeneration and
@@ -341,8 +344,8 @@ proven default code, never a catalog.
 ## Adding a release, and when an application release is needed
 
 For a typical hotfix the meaningful output is that the release maps to a family
-that already exists. Publishing the regenerated feed is then enough - no
-Ephervex build is involved.
+that already exists. Merging the regenerated dataset is then enough: the
+site republishes it as the feed and no Ephervex build is involved.
 
 A new application release is needed only when:
 

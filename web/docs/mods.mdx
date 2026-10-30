@@ -1,0 +1,375 @@
+---
+title: Mods
+description: Find, install, manage, and check mods in an instance or server.
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+import ThemeScreenshot from '@site/src/components/ThemeScreenshot';
+
+# Mods
+
+Each instance has its own mods folder. Ephervex shows which mods came from an
+imported pack, which were installed as dependencies or added later, and which
+JARs you placed there yourself. Search results and offered releases are checked
+against that instance's exact Minecraft release and loader.
+
+Stop the game before changing its mods. If you are narrowing down a crash,
+turning a mod off keeps its file and recorded release so you can turn it back
+on without another download.
+For a guided search across many mods, see [Mod Isolation](./mod-isolation.mdx).
+
+## Find and install a mod
+
+An install includes required dependencies. Optional dependencies are left out
+unless you choose them. Review the plan before installing when you need to
+know exactly what will be added.
+
+The game does not start with two copies of one mod. Ephervex reads the mod id
+in each JAR and refuses an install or version change that would leave a
+second enabled JAR with the same id, for example another release of the mod
+from the other catalog. The refusal names the JAR already there, and nothing
+is changed. If the other catalog's file is identical, the mod counts as
+installed and is not downloaded again.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the instance workspace and select **Mods**. The tab lists every mod in one
+table; type in **Filter mods...** to narrow it. Select **Add Mods** to open the
+catalog dialog, choose **Modrinth** or **CurseForge** under **Catalog**, search
+for a project, and select **Install**. Each result shows the project's download
+count. **Results** sets how many results a page holds, and **Add JARs...** adds
+files you downloaded yourself. The mod and its required dependencies install
+directly. When the instance has
+linked servers, the install plan opens first so you can choose which ones
+receive the mod. If an author requires a browser download, Ephervex opens a
+manual acquisition dialog and watches your configured download folders for the
+verified file.
+
+<ThemeScreenshot state="client-mods" alt="Instance Mods surface with one table of installed mods and the Add Mods button" />
+
+<ThemeScreenshot state="client-mods-catalog" alt="The Add Mods dialog with a compatible catalog search and download counts" />
+
+<ThemeScreenshot state="mod-install-plan" alt="Install plan showing the selected mod and its dependencies" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Use the ID from `ephervex instances list`. Search and inspect the available
+releases for a project:
+
+```bash
+ephervex mod search --instance INSTANCE_ID QUERY --provider modrinth
+ephervex mod show --instance INSTANCE_ID PROJECT_ID --provider modrinth
+```
+
+Add `--include-incompatible` to `mod search` or `mod show` to also list
+results that do not fit the instance, each with the reason. They still cannot
+be installed. `--limit` shows 1 to 25 results per page; a larger number
+shows 25. When more results may follow, `mod search` ends with the `--offset`
+that starts the next page. A page can hold fewer results than `--limit`, so
+use that value instead of counting.
+
+Plan and install an exact release, or omit `--version` to choose the newest
+compatible one. Ephervex refuses a named release that does not fit the
+instance.
+
+```bash
+ephervex mod plan --instance INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
+ephervex mod install --instance INSTANCE_ID PROJECT_ID --provider modrinth --version VERSION
+```
+
+Repeat `--optional PROJECT_ID` to include an optional dependency. If you omit
+`--provider`, commands use your preferred catalog. Set that preference with
+`ephervex mod catalog modrinth` or `ephervex mod catalog curseforge`.
+
+The CLI does not run the desktop's manual browser download flow. If a release
+cannot be downloaded automatically, install it through the desktop app.
+
+</TabItem>
+</Tabs>
+
+## Install mods on a server
+
+A Forge or NeoForge server can take catalog mods directly, with or without a
+linked client. It changes only that server; a linked client is not touched. A
+running server picks up the change the next time it starts. The server's own
+**Mods** list can then [change or remove](#change-or-remove-a-managed-mod) its
+mods.
+
+Results are checked against the server's exact Minecraft release and loader,
+and mods declared client-only are left out. A mod whose catalog does not state
+whether it runs on a server is still offered, but installing it, or a mod that
+needs it, requires your confirmation once. A mod already on the server is not
+asked about again. A required dependency declared client-only is installed
+with a warning, because the mod that needs it cannot load without it. CurseForge cannot filter by side, so a CurseForge page can
+hold fewer results than the page size.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open the server workspace, select **Mods**, select **Add Mods**, and search in
+the dialog. A **?** above **Install** marks a result that does not state server
+support. **Add Mods** is hidden for a Vanilla server and for a server whose
+installation has not finished.
+
+<ThemeScreenshot state="server-mods" alt="Server Mods surface with a Modrinth search where Golem Magicka is marked with a question mark" />
+
+Turn on **Show incompatible mods** to also list client-only mods, marked
+**Client only**; they cannot be installed.
+
+<ThemeScreenshot state="server-mods-curseforge" alt="Server CurseForge search with Show incompatible mods on, where Default World Type is marked Client only" />
+
+**Install** opens a confirmation only when the install includes a mod with
+unstated server support or a client-only dependency.
+
+<ThemeScreenshot state="server-mod-install-confirm" alt="Install confirmation for a running server naming a mod whose server support is not stated" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Use the ID from `ephervex servers list`:
+
+```bash
+ephervex mod search --server SERVER_ID QUERY --provider modrinth
+ephervex mod plan --server SERVER_ID PROJECT_ID --provider modrinth
+ephervex mod install --server SERVER_ID PROJECT_ID --provider modrinth
+```
+
+`mod search` notes each result that does not state server support, and
+`mod show --server` says when a mod runs only on a client or does not state
+server support. `--include-incompatible` also lists client-only mods, which
+still cannot be installed. `mod install` refuses an install that includes a
+mod with unstated server support and names it; repeat the command with
+`--accept-unknown-server-support` to install it anyway.
+
+</TabItem>
+</Tabs>
+
+## Use an installed JAR for a dependency
+
+A JAR already in the mods folder, such as your own build of a library or its
+release from the other catalog, can stand in for a dependency that provides
+the same mod. Ephervex still downloads and checks the dependency first. The
+JAR stands in only if it declares every mod id the dependency does, and never
+for the mod you chose. A dependency it stands in for is not installed or
+recorded.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+When an install, update, or version change needs a dependency an installed JAR
+provides, Ephervex asks **Use an Installed Jar?** Select **Use Installed Jar**
+to continue without that dependency, or **Cancel** to change nothing. For
+linked servers, it asks again for each selected server with such a JAR.
+
+<ThemeScreenshot state="mod-stand-in" alt="Use an Installed Jar? dialog naming a hand-placed Puzzles Lib JAR that already provides a dependency" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+`mod install` refuses such an install and names the option to repeat it with:
+
+```bash
+ephervex mod install --instance INSTANCE_ID PROJECT_ID --use-installed DEPENDENCY_ID
+```
+
+Repeat `--use-installed` for each dependency. The result names each JAR used
+in place of a dependency. On a server, such a dependency needs no
+`--accept-unknown-server-support`.
+
+</TabItem>
+</Tabs>
+
+## Add a JAR yourself
+
+A JAR placed by hand has no verified provider release for Ephervex to restore.
+Keep your own copy if you may need it again. Adding a JAR with the same name as
+an existing one needs an explicit replacement decision.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In the instance's **Mods** surface, select **Add JARs...** or drop JAR files
+onto the mods list. Ephervex copies them into this instance's mods folder and
+reloads the list. Files that are not JARs are left out.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Open the mods folder in your file manager and copy your JAR into it:
+
+```bash
+ephervex instance open INSTANCE_ID --folder mods
+```
+
+Use `--print` to get the folder path without opening a file manager. The CLI's
+`mod list` shows provider-managed mods; it does not list JARs you placed by
+hand. Use the desktop mods list or inspect the folder to see those files.
+
+</TabItem>
+</Tabs>
+
+## Enable, disable, or put aside a mod
+
+Disabling a mod leaves its JAR and record in place, but keeps the loader from
+loading it. While **Independent mod changes** is off, deleting a recorded mod's
+JAR puts it aside: Ephervex keeps a copy and the record, so **Restore** brings
+it back without a download while that copy is intact. A hand-placed JAR cannot
+be restored by Ephervex after deletion.
+
+Dependencies matter: turning off a mod may also require turning off mods that
+need it; turning one on may require other mods first. Ephervex shows the impact
+before a desktop change. Turning a mod on or restoring it is refused when
+another enabled JAR already provides the same mod id, and a repair skips such
+a file and names the JAR in the way.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+In **Mods**, use the switch on a mod card to turn it off or on. The impact
+dialog names affected mods and can apply the dependent changes together. Use
+the card's delete action to put a recorded JAR aside; its row then offers
+**Restore**. This applies while **Independent mod changes** is off, as it is
+for an imported pack or a server built from a pack or server files. When it is
+on, as it is for an instance or server created in Ephervex, the card action
+opens a removal plan instead. The plan removes the mod and any dependencies
+nothing else needs, and offers no **Restore**.
+Deleting a JAR you added by hand removes that file.
+
+<ThemeScreenshot state="mod-missing-file" alt="Mods list where a deleted pack mod shows Deleted and a Restore button" />
+
+<ThemeScreenshot state="mod-impact" alt="Impact dialog listing mods affected when another mod is turned off" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+`mod list` shows only provider-managed mods, by file name. To get the
+`mods/...` path of every mod, including JARs you placed by hand, use
+`mod dependencies`, then pass that path, such as `mods/example.jar`:
+
+```bash
+ephervex mod list INSTANCE_ID
+ephervex mod dependencies --instance INSTANCE_ID
+ephervex mod disable --instance INSTANCE_ID mods/example.jar
+ephervex mod enable --instance INSTANCE_ID mods/example.jar
+ephervex mod delete --instance INSTANCE_ID mods/example.jar
+```
+
+With the default dependency policy, a command that would affect other mods
+reports the impact, exits with an error, and leaves files unchanged. Repeat it
+with `--with-dependents` for `disable` or `delete`, or
+`--with-dependencies` for `enable`, to apply the related changes. Use
+`--only-this` when you intentionally want to change only the named mod; this
+may leave other mods unable to load. `mod delete` keeps the recorded mod and
+does not permanently remove it from the instance's recipe. Restore a
+put-aside mod from the desktop **Mods** list or **Diagnostics**; `mod repair`
+leaves it aside.
+
+</TabItem>
+</Tabs>
+
+## Change or remove a managed mod
+
+Select a mod in an instance's or server's **Mods** list to open **Manage
+Mod**, which shows compatible releases, what the mod requires, and what
+requires it. **Change Version** chooses a specific offered release; **Update**
+selects the newest compatible release. **Remove...** removes the mod from the
+host's managed set and can also remove dependencies that nothing else needs.
+
+An imported pack starts with **Independent mod changes** off, and so does a
+server built from a pack or from server files. While it is off, you can
+inspect a pack-declared mod, turn it off, or put its JAR aside, but cannot
+change its recorded release or remove it from the pack's recipe. To allow
+those changes, open the workspace **Settings** and enable **Let me change and
+remove this instance's mods** or **Let me change and remove this server's
+mods**. A server created in Ephervex always allows them. **Reset to Pack's
+Version** remains available if you change a pack mod and want the declared
+release back.
+
+<ThemeScreenshot state="mod-manager" alt="Manage Mod dialog showing compatible releases and dependency relations" />
+
+<ThemeScreenshot state="mod-update-available" alt="Manage Mod dialog for an added mod with a newer release, offering Update and Change Version" />
+
+<ThemeScreenshot state="server-mod-manager" alt="Manage Mod dialog opened from a server's Mods list, with releases, Remove..., Update, and Change Version" />
+
+On a server, **Change Version** and **Update** apply at once; a running server
+gets the change the next time it starts. A change that would add a mod whose
+catalog does not state server support is refused. Install that mod from **Add
+Mods** first, which asks you to confirm it.
+
+Changing an installed mod's release and permanently removing a managed mod
+are currently desktop actions. The CLI's `mod install --version` installs a
+new project at an exact release; it does not replace a different release of a
+project already installed. The CLI's `mod delete` removes a JAR but keeps its
+record.
+
+In the desktop app, the install plan, the change and remove dialogs, and
+**Apply Mod Change** show a **Linked servers** panel when the instance has
+linked servers. Select the servers that should receive the same change. Every
+selected server gets the exact release the client settles on. A server that
+cannot take it is marked **Unavailable** with the reason, for example an
+unsupported Minecraft version or loader, or a mod the server's own pack
+declares. Each server has its own result. A running server receives the change
+the next time it starts. To change one server only, work in that server's own
+**Mods**; see [Install mods on a server](#install-mods-on-a-server).
+
+## Review dependency information
+
+Ephervex records dependencies when it installs a mod and when it imports a
+CurseForge pack. Some imported mods have no recorded relations yet. **Manage
+Mod** then says "Nothing has asked its catalog what it needs.", which does not
+mean the mod needs nothing. For a JAR Ephervex cannot identify, it says
+"Ephervex cannot tell what this JAR is, so no catalog can be asked what it
+needs."
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Open **Manage Mod** to see **Requires** and **Required by**. If the relations
+can be refreshed, select **Refresh Dependencies** there, or use the refresh
+button above the mods list to update names, artwork, and dependencies.
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+```bash
+ephervex mod dependencies --instance INSTANCE_ID --of mods/example.jar
+ephervex mod refresh --instance INSTANCE_ID
+```
+
+`dependencies` reads local records and works offline. `refresh` asks the
+catalogs for current relation information and stores the answers it gets. If a
+catalog cannot be reached, `refresh` still records the answers from the
+catalogs that responded, then exits with an error naming the ones that did not.
+
+</TabItem>
+</Tabs>
+
+## Verify and repair recorded files
+
+Verification checks whether recorded files are present and match their saved
+checksums. It changes nothing and uses no network. A file with no recorded
+checksum is reported as unproven, rather than healthy or damaged, and a mod
+you put aside is reported as put aside, not missing. Repair
+checks first, then replaces missing or damaged files it can download. It
+leaves sound files alone and cannot recreate files that have no recorded
+download address.
+
+```bash
+ephervex mod verify --instance INSTANCE_ID
+ephervex mod repair --instance INSTANCE_ID
+```
+
+`mod verify` exits with an error when it finds a fault. `mod repair` requires
+the game to be stopped and no mod isolation session to be active. Re-import
+the pack if a file came only from the original archive and no replacement
+address was recorded. For an instance, add `--shared` to `mod verify` to check
+the Minecraft client JAR and shared libraries too; those files must already
+have cached metadata, usually from a previous launch. `mod repair` does not
+replace shared launch files.
+
+Full recorded-file verification and repair are currently CLI commands. The
+desktop **Diagnostics** surface checks for known problems and offers fixes
+for some findings, but it is not the same full file check.
