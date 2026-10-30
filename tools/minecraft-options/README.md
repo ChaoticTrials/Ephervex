@@ -34,7 +34,7 @@ a snapshot or release candidate), downloads and SHA-1 verifies the official
 client JAR and version metadata into an untracked development cache, analyzes
 the JAR statically, and folds the result into the committed dataset. It prints a
 short summary of what actually changed. Merging the dataset to `main` publishes
-it: the documentation site serves the committed file as the remote feed.
+it: the Pages workflow serves the committed file from `main` as the remote feed.
 
 A build counts as a release only when its `version.json` `name` and `id` agree
 on a release identifier (`1.N`, `1.N.P`, or `YY.N[.P]` from 26.1). A
@@ -44,9 +44,10 @@ ordered as if its non-numeric parts were zero.
 
 Exactly one of `--latest`, `--version` and `--from-analysis` selects the input.
 `--latest` always re-reads the manifest, and a `--version` the cached manifest
-does not list re-reads it once before failing. Every downloaded document and
-file is checked against the SHA-1 Mojang published for it; a mismatch or a
-missing hash stops the run. The version metadata and the client JAR both come
+does not list re-reads it once before failing. The version metadata and the
+client JAR are each checked against the SHA-1 Mojang published for them; a
+mismatch or a missing hash stops the run. Mojang publishes no hash for the
+manifest itself, so it is checked for shape only. The version metadata and the client JAR both come
 from that one manifest.
 
 Two supporting modes:
@@ -100,8 +101,8 @@ Before anything is written, `dataset.validate` applies the same structural check
 the application applies when it loads a dataset (codec parameters, option keys,
 representation positions, schema and release references), and requires the
 canonical release to support every setting Ephervex's own preference model needs.
-A dataset that fails either check is refused with an error, and neither the
-bundled file is not touched.
+A dataset that fails either check is refused with an error, and the bundled
+file is not touched.
 
 `update.py` also prints, without writing anything, whenever a current
 manageable setting is not yet covered by the bundled product catalog:
@@ -295,8 +296,8 @@ The committed catalog lives at `crates/options/data/minecraft-preferences.json`
 and is embedded in the application (`ephervex_options::MinecraftPreferenceCatalog`).
 It is generated, but from the *canonical* release's own analysis plus a small,
 narrow, reviewed policy in `preferences.py` - the exclusions, the Window Size
-composition, and the stable id overrides for the seven preferences that predate
-this catalog. Nothing here duplicates the compatibility dataset's own
+composition, and the stable id overrides for the other six preferences that
+predate this catalog. Nothing here duplicates the compatibility dataset's own
 per-release mappings.
 
 Every current canonical setting the compatibility dataset knows about is
@@ -321,7 +322,7 @@ disposable instance opens without first-launch screens or hints in the way:
 (true opens the accessibility setup screen at the next start),
 `joinedFirstServer` (false shows the social interactions hint on the first
 multiplayer join) and `skipMultiplayerWarning` (true opens Multiplayer without
-the safety warning). `startedCleanly` stays excluded: it is crash-recovery state,
+the safety warning). `startedCleanly` is never offered: it is crash-recovery state,
 not something to set. The markers are listed in `ONBOARDING_SETTINGS`, and the
 settings screen shows a one-line description for each.
 
@@ -355,26 +356,29 @@ A new application release is needed only when:
   preference.
 
 The second case is always a maintainer decision, never a side effect of an
-ordinary update. `update.py` reports it as a read-only notice (see
-[The workflow](#the-workflow) above) instead of writing anything. Turning the
-notice into an exposed preference means:
+ordinary update. A newly recovered setting is not carried by the dataset until
+its canonical id is added to `OFFERED_SETTINGS` in `preferences.py`, and
+`update.py` reports a setting the catalog has not accounted for as a read-only
+notice (see [The workflow](#the-workflow) above) instead of writing anything.
+Turning one into an exposed preference means:
 
-1. deciding whether the setting belongs on a settings screen at all, and if
-   not, adding it to `preferences.py`'s `EXCLUSIONS` with a durable reason;
-2. otherwise doing nothing beyond that - `preferences.py`'s accounting is
-   automatic, so a manageable setting that is not explicitly excluded and has
-   a canonical codec is exposed the next time the catalog is regenerated;
+1. adding its canonical id to `OFFERED_SETTINGS`, analyzing every cached release
+   again, and folding the complete analysis with `update.py --from-analysis`;
+2. deciding whether the setting belongs on a settings screen at all, and if not,
+   adding it to `EXCLUSIONS` with a durable reason; otherwise a manageable
+   setting with a canonical codec is exposed the next time the catalog is
+   regenerated;
 3. running `preferences.py --from-analysis <analysis dir>` and reviewing the
    diff to `crates/options/data/minecraft-preferences.json` like any other
    source change;
 4. shipping that change in an Ephervex release. Until then, the bundled
-   catalog - and therefore the settings screen - does not change, however far
-   ahead the compatibility dataset's own `current_canonical_setting_ids` gets.
+   catalog - and therefore the settings screen - does not change.
 
 ## Regenerating from scratch
 
-The dataset is cumulative. Committed families and release mappings are never
-rewritten by a later run, so the historical client JARs are only needed to
+The dataset is cumulative. Committed families and release mappings are kept as they are unless a release's
+own extracted representations change or the offered set shrinks (families are
+content-addressed, so a pruned family gets a new id), so the historical client JARs are only needed to
 establish a release the first time. A key introduced after a release was
 analyzed stays *unknown* for that older release rather than being retroactively
 declared unsupported, which is the honest state and is never written.
