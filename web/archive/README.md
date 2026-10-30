@@ -64,16 +64,29 @@ are represented by a missing asset note instead of being fetched.
 
 ## Replace the site export
 
+The Forgejo instance is archived and read-only, and the project continues on
+GitHub. The committed `archive-data.json` was exported once and then edited:
+commit-hash text in issue and comment bodies was translated to the hashes of the
+GitHub history, and one comment was changed to drop a merge hash. Running the
+exporter again reproduces neither change, so regenerate the file only if you can
+repeat those edits. Edit the committed file in place for small corrections and
+update the digest in `publication.json`.
+
 1. Choose private export and review directories outside this checkout. From
-   `web/`, run `forgejo_archive.py export`, `verify`, and `prepare-public` in
-   that order, passing the chosen directories with `--out` and `--input`.
-   The exporter is at `scripts/forgejo-archive/forgejo_archive.py`. Supply
-   `FORGEJO_TOKEN` through your local shell. Keep the token, private snapshot,
-   assets, and API responses out of the repository.
+   `web/`, run `forgejo_archive.py export --out DIR` to write the private
+   snapshot (add `--forgejo` and `--repo` if the instance is not at the
+   defaults, and `--force` to replace an existing snapshot), then
+   `verify --input DIR`, then `prepare-public --input DIR --out REVIEW_DIR`.
+   `prepare-public` needs an empty `REVIEW_DIR` and stops on export warnings
+   unless `--allow-incomplete` is given after review. The exporter is at
+   `scripts/forgejo-archive/forgejo_archive.py`. Supply `FORGEJO_TOKEN` through
+   your local shell. Keep the token, private snapshot, assets, and API responses
+   out of the repository.
 2. Review the public candidate's issue and PR text, comments, reviews, links,
    people, hostnames, licenses, warnings, and missing API capabilities.
-   `prepare-public` generates a candidate and checklist; it does not complete
-   the manual review. The exporter keeps Forgejo releases in the private
+   `prepare-public` writes the candidate `archive-data.json`, a
+   `REVIEW-BEFORE-PUBLISHING.md` checklist, and `PUBLIC-DATA-SHA256.txt`; it does
+   not complete the manual review. The exporter keeps Forgejo releases in the private
    snapshot and writes `releases: []` to the site export.
 3. Copy only the candidate's `archive-data.json` into this directory. Calculate
    its SHA-256 and update `publication.json` with the exact digest. Use
@@ -84,21 +97,29 @@ are represented by a missing asset note instead of being fetched.
    `npm run archive:check`. Inspect the generated routes, sitemap, pages, and
    search results. For a nonroot deployment, build with
    `DOCUSAURUS_BASE_URL=/preview/` and run
-   `npm run archive:check -- /preview/`.
+   `npm run archive:check -- /preview/`. `archive:check` expects specific
+   records from the current export (issues #13, #295, and #424, and at least one
+   pull request); update `scripts/archive-check.mjs` when replacing the data with
+   an export that lacks them. `npm run archive:exporter:test` covers the
+   exporter.
 
-The build checks for a file named `snapshot.json` or `snapshot.backup.*.json`
-under the website source and fails if one appears. Git also ignores those
-names. This is a guardrail, not a substitute for reviewing all public text:
+The road-to-v1 plugin fails the build if a file named `snapshot.json` or
+`snapshot.backup.<stamp>.json` exists directly in `web/` or anywhere under
+`archive/`, `src/`, `static/`, `docs/`, `plugins/`, `scripts/`, or `build/`. Git
+also ignores those names. This is a guardrail, not a substitute for reviewing all public text:
 the site export is shipped in build HTML and search bundles.
 
 ## Portable public download
 
 There is currently **no download link or published ZIP**. The exporter's
-`package-public` command can build a reproducible ZIP from a reviewed public
-candidate by requiring its exact SHA-256 with `--approve-sha256`. The ZIP
-contains JSON, Markdown exports, a manifest, and `SHA256SUMS`; it is not a
-Forgejo server backup. After setting `archive_review_dir` and `archive_zip`
-to paths outside this checkout, run from `web/`:
+`package-public` command can build a reproducible ZIP from a reviewed
+`archive-data.json` by requiring its exact SHA-256 with `--approve-sha256`. The
+ZIP contains `archive-data.json`, a `README.md`, one Markdown file per issue and
+pull request, `manifest.json`, and `SHA256SUMS`; it is not a Forgejo server
+backup. Package the file the site actually publishes: use a directory that holds
+an identical `archive-data.json`, such as `web/archive`, as `archive_review_dir`
+and pass the digest from `publication.json`. After setting `archive_zip` to a
+path outside this checkout, run from `web/`:
 
 ```bash
 sha256sum "$archive_review_dir/archive-data.json"
@@ -116,6 +137,7 @@ SHA-256 have all been verified. Never link to `snapshot.json` or automatically
 copy the private backup into the site.
 
 Original attachments, Forgejo release records, and release binaries are omitted.
-Links to files on the retiring Forgejo instance may no longer work. The site
-export may also omit Forgejo API features unavailable on that server. Retain
-private backups and the Git mirror separately from the public website.
+Links to files on the archived Forgejo instance may no longer work, and links
+with a `.lan` host are not rendered. The site export may also omit Forgejo API
+data that the server did not provide. Keep the private snapshot and backups
+separate from the public website.
