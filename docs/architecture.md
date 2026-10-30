@@ -21,11 +21,14 @@ cli ─┘
 - Domain and provider crates depend on the model and on lower-level domains
   only when their behavior requires it.
 - `ephervex-core` composes storage, authentication, Java selection, loader,
-  Minecraft, options, and pack services into frontend-facing operations.
+  Minecraft, options, pack, mod catalog, download, and server services into
+  frontend-facing operations.
 - `ephervex-cli` and `ephervex-gui` depend on `ephervex-core`; neither frontend
   depends on the other.
 
-The frontend manifests intentionally omit provider crates. `App` also keeps its
+The frontend manifests intentionally omit provider crates from
+`[dependencies]`; only test-only `[dev-dependencies]` reach below core. `App`
+also keeps its
 `Registry` private and exposes only the records, requests, and structured error
 details a frontend needs. This makes the boundary visible in manifests and
 prevents UI code from acquiring storage or provider policy accidentally.
@@ -35,7 +38,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | Crate | Responsibility |
 |---|---|
 | `ephervex-model` | Typed IDs, account and instance values, loader selections, hashes, storage classes, and operation progress |
-| `ephervex-storage` | XDG paths, versioned configuration, SQLite migrations and registry, instance metadata, reconciliation, launch locks, duplication, folder layout, and bounded diagnostic-file discovery and reading |
+| `ephervex-storage` | XDG paths, versioned configuration, SQLite migrations and registry, instance metadata, the favorites, groups, and icons organization file, instance case notes, reconciliation, launch locks, duplication, folder layout, and bounded diagnostic-file discovery and reading |
 | `ephervex-i18n` | Fluent resources, locale selection, typed arguments, and message lookup |
 | `ephervex-download` | HTTP policy, bounded concurrency, retry classification, cancellation, hash verification, atomic publication, metadata caching, and shared cache layout |
 | `ephervex-minecraft` | Mojang/Piston metadata, per-release language catalogs, rule evaluation, artifact planning, Vanilla installation, command construction, process control, and log parsing |
@@ -44,7 +47,7 @@ prevents UI code from acquiring storage or provider policy accidentally.
 | `ephervex-loaders` | Vanilla, Forge, and NeoForge metadata resolution and client/server installation |
 | `ephervex-options` | Line-preserving `options.txt` parsing, the generated per-release compatibility dataset and its remote feed, and version-aware application of global preferences |
 | `ephervex-pack` | Format detection, hardened archive handling, provider-neutral recipes, Modrinth and CurseForge manifest parsing, optional selection, materialization, and managed-mod installation |
-| `ephervex-mod-platform` | Modrinth and CurseForge project/version catalogs behind one provider trait, the authenticated CurseForge third-party API transport, compatibility verdicts, and provider-neutral dependency resolution |
+| `ephervex-mod-platform` | Modrinth and CurseForge project/version catalogs behind one provider trait, the CurseForge third-party API transport (a user-supplied key, with nothing persisted), compatibility verdicts, and provider-neutral dependency resolution |
 | `ephervex-server` | Dedicated-server properties, EULA enforcement, process identity, foreground supervision, control channel, and bounded capture |
 | `ephervex-core` | Application services and error classification shared by frontends |
 | `ephervex-cli` | Command-line frontend and human/JSON rendering |
@@ -68,10 +71,10 @@ release, because the headless tests find elements by it.
 | `app.slint` | `AppWindow`: the properties and callbacks Rust reads and invokes, the three-column shell, the settings pages, and its modals |
 | `theme.slint` | The `Theme` global: the color tokens every surface reads, text sizes, and shared measurements |
 | `palettes.slint` | `ThemePalette` and the built-in palettes, the one place colors are written |
-| `globals.slint` | `GuiI18n` and `PropertyRules`, globals whose answers Rust supplies |
+| `globals.slint` | `GuiI18n` and the rule and hint globals (`PropertyRules`, `NameRules`, `ServerPackRules`, `ServerHints`, `HostIcons`), globals whose answers Rust supplies |
 | `models.slint` | The row and view structs Rust fills models with |
 | `components/` | Text primitives, controls, surfaces (the hard-shadow `Plate` and the `GridFloor` grid), and artwork shared by every surface |
-| `workspace/` | A host workspace's chrome and its surfaces: mods, packs, logs, isolation, diagnostics, snapshots, and host settings |
+| `workspace/` | A host workspace's chrome and its surfaces: overview, case, mods and the mod browser, packs, logs, isolation, diagnostics, snapshots, host settings, and server tools |
 | `shell/` | The window frame: the grid floor and three columns, the brand bar, the account chip, and the right column's container |
 | `host-list/` | The host list: its search and filter panel, the client, server, and pending cards, and the scrolling list that holds them |
 | `home/` | The Home page: its running, problem, resume, and activity cards and the face they share |
@@ -80,7 +83,9 @@ release, because the headless tests find elements by it.
 The window has three columns: the host list, the page, and a right column that
 stands beside Home only; the settings and a host take its width and its gap. The
 list lists every instance and server; pressing a card opens that host in the
-workspace. `AppShell` exposes the geometry: a window narrower than
+workspace. A card's quick-view button shows the host in an overlay pane over the
+page instead; the overlay can go fullscreen, be opened as the page, or be closed
+with Escape or the scrim, and it is never part of a split. `AppShell` exposes the geometry: a window narrower than
 `shell-list-inline-width` turns the list into a drawer, and one narrower than
 `shell-side-inline-width` does the same for the right column. A drawer leaves
 the row, a button on a rail beside the page opens it over a scrim, and choosing
@@ -302,7 +307,8 @@ file lock. Each change first keeps the file as it was in
 overwritten, and that copy takes its place; the launcher starts with an empty
 organization only when the copy cannot be used either.
 
-Core owns the whole feature. Setting a favorite, a group or an icon only reads
+`ephervex-storage` owns the file and the case bounds, and core owns the
+services, icon handling, and the host-existence check. Setting a favorite, a group or an icon only reads
 the registry to check the host exists. It takes no host claim and does not touch
 `updated_at`, so it works while a host is running, restoring or moving. Entries
 for hosts that no longer exist are dropped by the next change, but only when the
@@ -382,9 +388,9 @@ of retained snapshots that deleting its files also removes.
 The desktop represents an installed client or local server with one reusable
 host workspace. The workspace owns the host header, running status, launch or
 process actions, data-driven surface navigation, and a small persistent area
-for a long-running host workflow. Overview, Mods, Isolation, Logs, Snapshots,
-and Diagnostics remain independent surfaces beneath that boundary; server-only
-surfaces are entries in the server's surface model rather than a separate
+for a long-running host workflow. Overview, Case, Mods, Packs, Isolation, Settings, Snapshots, Logs, and
+Diagnostics remain independent surfaces beneath that boundary; server-only
+surfaces (Console and Properties) are entries in the server's surface model rather than a separate
 container. Adding another host tool means adding a surface entry and its body,
 not another host header or navigation structure. More than one host workspace
 can therefore be composed by a parent without teaching its surfaces about that
@@ -536,7 +542,7 @@ choice is written as its position, which every release reads, while servers
 before Minecraft 1.14 replace a name with their own default; a choice the file
 already stores as a name stays a name.
 
-Settings has a Server Properties page with the same controls, for defaults: a
+Settings has a Server defaults page with the same controls, for defaults: a
 sparse set of catalog values written into a new server's `server.properties`
 for every key it does not already hold, at creation or first installation.
 Existing servers and values a pack's server files set are left alone (ADR
@@ -706,7 +712,7 @@ governed by this limit.
 
 Loader installs and server creation build in scratch directories: processor
 workspaces under `installer-cache/work/`, loader staging beside a server's
-`game/`, and hidden `.staging-` roots beside a new server. Each is claimed by an
+`server/` directory, and hidden `.staging-` roots beside a new server. Each is claimed by an
 exclusive `flock` on a sibling `.owner` marker, taken before the directory
 exists and removed after it is gone. The kernel drops the lock when the holder
 exits however it exits, so a directory whose marker is unlocked is abandoned
@@ -817,7 +823,8 @@ A category's folders are the directories it has of its own. One spread through
 every host, such as Mods, Snapshots, or Recovery, has none, and a frontend asks
 core to open a folder by category and position rather than by path.
 
-The desktop shows it as a Settings page rather than a host surface, because it
+The desktop shows it on the Storage page of Settings rather than as a host
+surface, because it
 measures the launcher's roots, not one host. Opening the page measures nothing;
 Measure runs the walk as an ordinary cancelable operation that reports how many
 files it has counted. A result is a snapshot with the time it was taken, and
@@ -990,7 +997,8 @@ is added beside the other where there is room, a server on its Console.
 The pair belongs to the hosts, not to panes, so closing or retargeting a pane,
 leaving the workspace, and coming back never change it.
 
-A pair can start together. Launch or Start on either side then asks core what
+A pair can start together when its Start together option is on (off by
+default). Launch or Start on either side then asks core what
 a fresh start means: with the client stopped it is one Launch & Connect run
 (the server is started or reused, and the client launches once the server
 accepts connections), and with the client already running only the server
@@ -1066,7 +1074,7 @@ official client JAR
    ▼
 stable setting registry + current canonical ids + schema families + release mapping
    ├── committed at crates/options/data/minecraft-options.json, compiled in
-   └── published to the remote options feed
+   └── served by the documentation site as the remote options feed
               │ validated whole, then cached atomically
               ▼
    valid newer cached feed ──▶ else bundled baseline
@@ -1452,8 +1460,9 @@ artwork are enrichment over that state: they are served through the metadata
 cache, and failing to fetch them costs a label rather than a mod. A recorded mod
 whose jar is absent from `mods/` is marked absent rather than forgotten: the
 recipe still wants it, so a repair still fetches it and a server built from the
-recipe still contains it, but the mod list leaves it out, because a row for a
-file that is not there names nothing a reader can act on. Anything built out of
+recipe still contains it, but the mod list leaves it out, except a row for a jar the list itself
+deleted, which stays so it can be put back, because a row for a file that is not
+there otherwise names nothing a reader can act on. Anything built out of
 an instance asks what to do with those records instead of deciding: duplicating
 a client offers to keep or drop them, and keeps them unless told otherwise.
 The frontends consume one snapshot from the application service and never read a
@@ -1470,7 +1479,7 @@ application service refuses the download unless the host is agreed to, so a
 frontend cannot reach it by forgetting to ask.
 
 Registering the scheme itself is an installation step, not a preference: the
-Debian package ships the desktop entry that claims it, the AppImage is
+Debian and RPM packages ship the desktop entry that claims it, the AppImage is
 registered from the command line, and the desktop application offers no control
 over either (ADR 0028). A desktop scheme handler starts a fresh process for every
 link, so the launcher claims one name per user through a Unix socket under
@@ -1495,9 +1504,10 @@ CLI reads it wherever `--provider` is left off. It decides how a future choice i
 presented and nothing else: it never rewrites the catalog identity of an
 installed mod, is never consulted for a retained recipe, and naming a catalog
 explicitly bypasses it entirely. Nothing about reaching a catalog lives there.
-A CurseForge API key remains a keyring credential (ADR 0004, ADR 0022), so
-preferring CurseForge is answerable offline and with no key stored, and the key
-is still checked by the request that needs it.
+A CurseForge API key a user saves stays a keyring credential and always wins;
+a build-time default key is used only when none is saved (ADR 0004, ADR 0022,
+ADR 0030). Preferring CurseForge is therefore answerable offline, and the key is
+still checked by the request that needs it.
 
 An explicit mod decision can be carried from a client to its linked servers
 (ADR 0021). The exact release the client settles on is the release every
@@ -1540,12 +1550,14 @@ records the side it was placed on, so that host's mod list, verification, repair
 and dependency graph count it as installed while the catalog's statement stays
 visible. Nothing else reads an unsupported side as installed.
 
-Installing a mod through a catalog records them, because the resolver already
+Installing a mod through a catalog records its declared relations, because the resolver already
 has the release's declared dependencies in hand and used to drop them; the same
 entry, and the same relations, is what a linked server's own recipe receives.
-A relation the catalog states by file name alone carries no project to key on and
-is left out rather than given an invented one, which loses no requirement: the
-resolver refuses a required dependency shaped that way rather than skipping it.
+A relation the catalog states by file name alone is recorded under that name and
+matched against installed jars by name. Only a relation that names neither a
+project nor a jar is left out, since nothing could be matched against it. The
+resolver still refuses a required dependency that names only a file rather than
+skipping it.
 
 Importing a CurseForge pack records them too. The exact-file document the import
 already fetches to learn a file's name, address and digest carries its relations
@@ -1682,7 +1694,7 @@ or unverifiable. A file put aside is one the user took out of `mods/` through
 the mod list, whose jar is kept in `.launcher/put-aside/` under its logical path
 until it is restored (ADR 0019). It is a deliberate state, not a fault, and a
 restore takes the kept copy back with no network, verified against the recorded
-digests when there are any. The last is not a fault: a mod a pack shipped inside its own
+digests when there are any. An unverifiable file is not a fault: a mod a pack shipped inside its own
 override tree has no published hash and never will, so nothing about it is
 proven either way, and it is reported as unproven rather than counted sound or
 broken. A disabled jar is checked under the name it actually has, because
@@ -1727,16 +1739,17 @@ replacement is renamed back out of the loader's way, and a failed repair puts
 the broken copy back under the name it had. A canceled verification is reported
 as canceled rather than as a shorter report that reads as complete.
 
-The desktop exposes both on each host workspace's Diagnostics surface.
-Verification runs as an ordinary cancellable operation and shows its current
-file; the result separates what a repair replaces, what nothing can fetch again,
-and what has no checksum to prove it either way. Repair shows those lists before
-it runs, claims the host-change state while it runs, and checks the host again
+The desktop runs verification as part of Diagnose on each host workspace's
+Diagnostics surface. Diagnose is manual, cancelable, and shows its current file;
+its result separates what a fix would restore, what nothing can fetch again, and
+what has no checksum to prove it either way. A repair is a previewed fix: the
+preview lists every file it will replace, Apply performs exactly those changes
+while claiming the host-change state, and the host is diagnosed again
 afterwards, so what the surface shows is what is on disk. When a failed rollback
 leaves files in launcher scratch, the surface names them and the host keeps its
 recorded attention. Shared launch files are checked for clients only, because
-core checks them against a client's release metadata; a server's surface says
-so.
+core checks them against a client's release metadata. Repair does not replace
+them; the Disk usage page in Settings can fetch damaged ones again (ADR 0043).
 
 
 ## Diagnostic bundles
@@ -2024,11 +2037,14 @@ and CurseForge mod browsing with dependency resolution, direct mod installation
 onto a server, and linked-server reconstruction from retained recipes, plus launching a linked client directly
 into a local managed server. Logs, crash reports, and launcher diagnostics are
 inspectable through `ephervex-core`, the CLI, and the GUI. CurseForge pack
-import and CurseForge browsing need a user-supplied API key and cannot obtain a
+import and CurseForge browsing use the key saved in Settings (official release
+builds fall back to a built-in key, and a build without one needs the user's
+own; ADR 0022, ADR 0030) and cannot obtain a
 file whose author has turned off third-party distribution. CurseForge browsing
 offers Minecraft's Mods class only, and its version lists are scoped to the
 instance's exact Minecraft release and loader family because the provider pages
-its file listings. Mod updates and removal are unavailable. Dropping a modpack
+its file listings. Mods are updated and removed one at a time; automatic update management is
+outside the supported scope (ADR 0008). Dropping a modpack
 archive onto the desktop window works on X11 and XWayland only: the windowing
 layer implements file drops there and not on Wayland, and Slint's own
 drag-and-drop carries text and images between elements of one application rather
