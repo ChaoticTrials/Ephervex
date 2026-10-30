@@ -109,7 +109,13 @@ file name.
 
 Each mod row and search result names its project logo by address and by the
 SHA-256 of the bytes Modrinth served. The generator fetches them into `artwork/`
-and refuses any file that does not match. They are not part of the repository.
+and leaves out any logo that cannot be fetched or does not match, with a warning
+that names it. They are not part of the repository.
+
+When the CDN serves different bytes for an address, the warning names it. Check
+that the picture is still that project's logo, then replace the digest in
+`data/hosts.json` or `data/server_mods.json` with the SHA-256 of the bytes now
+served.
 
 ## Presentation state that is not recorded
 

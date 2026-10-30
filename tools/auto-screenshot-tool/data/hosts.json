@@ -237,7 +237,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/uy4Cnpcm/002e73d916fb63c9c85e212ac47fde4ef9c4a65f.png",
-    "sha256": "f2e36a799b7a7d6696c117727a2afe0cbd22c5548402719e0dc8a4c9b26c3c51"
+    "sha256": "cd3f981206ae3ad6892e57290907a08622485803be245f41f70bb920f181c0ad"
    }
   },
   {
@@ -349,7 +349,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/WrpuIfhw/032925a79197e9e23be2c6a07d994b17e3363912.png",
-    "sha256": "a6e166b31ecaf94d9d697d03cc63b2e6b85e91b96483837617b38f6088bf08d3"
+    "sha256": "a3900111c3087076a6c0c22683cf16a716fb53b0d642c4a7c25db5474a32ce6b"
    }
   },
   {
@@ -405,7 +405,7 @@
    "compatibility": "Minecraft 1.20, 1.20.1 | forge, neoforge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/vvuO3ImH/2a7323ca80849de0bcb50299e18acdf8bf394682.png",
-    "sha256": "bfbf68cecb3a33282d88a623406777cb87d42e9dc54d189c50380a5e6e0ffc0f"
+    "sha256": "126c0dd8bb81afd991b4313e5f5875f97f8bbc4ae7c72ad8bcc14e1fe60b40d0"
    }
   },
   {
@@ -517,7 +517,7 @@
    "compatibility": "Minecraft 1.20.1 | forge, neoforge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/R2OftAxM/8e7aa38ab94d94bb0a2894a218b69beb49002b34.png",
-    "sha256": "3fde0c230f0538e952ca96be3de0483cca355c39d13652a79218f5f302e1dedb"
+    "sha256": "88845bd1d8a568538223fec49c64110be3f817527ebc082627d09d7b828fb587"
    }
   },
   {
@@ -629,7 +629,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/qEH6GYul/icon.png",
-    "sha256": "dbeab8935c88b6a150f40604f09bbc1d7ba4bce2fc3d91fae0dbc0f19ee77c81"
+    "sha256": "e49b981a4953df9097fd0ccafc66f8da716a8d94bd7a868a61527773276e77b6"
    }
   },
   {
@@ -685,7 +685,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/fPetb5Kh/95e4110a4cf600843c4ba9d545cc1b60e2c00eaa.png",
-    "sha256": "75b16d9bd0cba554a1c15b567ef17414b62fdc5d4141609c750ad6426ce21310"
+    "sha256": "0969bb0aaac88820d8a804d953cfd2519677c6d13a59be0b154cc2ee87571f56"
    }
   },
   {
@@ -699,7 +699,7 @@
    "compatibility": "Minecraft 1.20 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/K8pn1qHf/icon.png",
-    "sha256": "870ee1742c0023949fc7db88979e18be8476ce5e73801004a4e52948915d535d"
+    "sha256": "39a1373b3ac6a93446f0a0d129145307b31091870c6bf2e5016a1bfd02b826dd"
    }
   },
   {
@@ -825,7 +825,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/jSQXzmcf/28ed2eb0092505ae07c68c4064a514ec942a57ef.png",
-    "sha256": "718f9295940fb27ac003a549bfd297f4091eec1898b5a2bfff6c00c89f7c3476"
+    "sha256": "e4a44707b71f0fe05bf03a18b016d26b7235560c0f9a33e1d1b7e48e2c51fcbf"
    }
   },
   {
@@ -895,7 +895,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/QlvIRpDN/0585c61c00cbb9af482f71b9370705f677366b0e.png",
-    "sha256": "4d44676814d0beebd071059094db29e06fdb3edf80191bc1a51ac433726b42bb"
+    "sha256": "38022b5988ba617eb133f9f6abf043bad7f78f690d08928ce349f791672d09af"
    }
   },
   {
@@ -937,7 +937,7 @@
    "compatibility": "Minecraft 1.20.1 | forge, neoforge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/3Gdi7Qgq/8e8cd5272905cad666577501f9044a5f866cfab7.png",
-    "sha256": "43bb88bc4b0ca29e6852a3b0f9342a73b54787bb7d9c49cb2010658f2acdc981"
+    "sha256": "c349b4a44117c54257dc2b5618a7cd80c8d7b5a1e84d28a91a02463ed2b1bc2d"
    }
   },
   {
@@ -965,7 +965,7 @@
    "compatibility": "Minecraft 1.20.1 | forge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/u1aDdOsQ/6974ef9aa27c23ddfab557c6b59e15ac8aec51a5.png",
-    "sha256": "250f71bf5217ddf693d6f9e35eea12643f1db1235dbf00753ff778c82ae16793"
+    "sha256": "fca5d9f2a07babb90d5c4fe7646e34c471b5b918214014f85d1e184278364051"
    }
   },
   {
@@ -979,7 +979,7 @@
    "compatibility": "Minecraft 1.20.1 | forge, neoforge",
    "icon": {
     "url": "https://cdn.modrinth.com/data/guitPqEi/58b4229c52876eff66c9f98a5d2a1e9b9f648501.png",
-    "sha256": "9a053ebee9fb62dddfb09ab8533650ad894c88a66391d71cf4d363865e535381"
+    "sha256": "4eed57c3ce938ada4585f4a99eaf42609691fb9212dd7d1eb8dfec664fdbf68f"
    }
   },
   {

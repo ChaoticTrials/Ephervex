@@ -2,8 +2,9 @@
 //!
 //! The fixtures name each logo by address and by the SHA-256 of the bytes the
 //! catalog served. A full run fetches the missing ones into a local cache,
-//! refuses any file whose digest differs, and decodes them once. The logos are
-//! not stored in the repository.
+//! decodes them once, and leaves out, with a warning naming the address, any
+//! logo it cannot fetch or whose digest differs: a project changing its logo
+//! must not stop a build. The logos are not stored in the repository.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -52,7 +53,8 @@ pub(crate) fn logo(url: &str) -> Image {
 }
 
 /// Loads every logo the recorded rows name, fetching missing ones into `cache`
-/// unless `offline`. An offline run leaves unavailable logos empty.
+/// unless `offline`. A logo that is unavailable, cannot be fetched, or does not
+/// match its recorded digest is left empty.
 pub(crate) fn prepare(cache: &Path, offline: bool) -> Result<()> {
     let wanted = recorded::logo_sources();
     if !offline {
@@ -78,13 +80,16 @@ pub(crate) fn prepare(cache: &Path, offline: bool) -> Result<()> {
                             .context("start the logo download runtime")?,
                     ),
                 };
-                let bytes = runtime.block_on(download(&url)).with_context(
-                    || "fetching logos failed; run again, or pass --offline to leave them empty",
-                )?;
-                ensure!(
-                    digest(&bytes) == sha256,
-                    "the logo at {url} no longer matches the recorded digest; record the fixtures again"
-                );
+                let bytes = match runtime.block_on(download(&url)) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        eprintln!("warning: leaving the logo {url} empty: {error:#}");
+                        continue;
+                    }
+                };
+                if !matches_recorded(&url, &bytes, &sha256) {
+                    continue;
+                }
                 publish(&file, &bytes)?;
                 bytes
             }
@@ -112,6 +117,19 @@ fn publish(target: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::write(&staged, bytes)
         .with_context(|| format!("stage the logo {}", staged.display()))?;
     std::fs::rename(&staged, target).with_context(|| format!("store the logo {}", target.display()))
+}
+
+/// Whether the bytes served for `url` are the ones the fixtures recorded. A
+/// difference is reported, not fatal, so the logo is left out and the rest of
+/// the run goes on.
+fn matches_recorded(url: &str, bytes: &[u8], sha256: &str) -> bool {
+    let matches = digest(bytes) == sha256;
+    if !matches {
+        eprintln!(
+            "warning: leaving the logo {url} empty: it no longer matches the recorded digest; update the digest in data/ when the new logo is right"
+        );
+    }
+    matches
 }
 
 fn digest(bytes: &[u8]) -> String {
@@ -175,4 +193,24 @@ fn decode(bytes: &[u8]) -> Result<Pixels> {
         height: scaled.height(),
         rgba: scaled.into_raw(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_logo_whose_bytes_changed_is_left_out_instead_of_stopping_the_run() {
+        let recorded = digest(b"the recorded logo");
+        assert!(matches_recorded(
+            "https://cdn.modrinth.com/x.png",
+            b"the recorded logo",
+            &recorded
+        ));
+        assert!(!matches_recorded(
+            "https://cdn.modrinth.com/x.png",
+            b"a re-encoded logo",
+            &recorded
+        ));
+    }
 }

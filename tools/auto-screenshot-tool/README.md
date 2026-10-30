@@ -28,9 +28,12 @@ are set in `src/fixtures.rs` and the modules under `src/fixtures/`.
 
 The only network access is fetching project logos from `cdn.modrinth.com`
 into `artwork/`, which is gitignored. Each recorded row names its logo by
-address and by the SHA-256 of the bytes the catalog served, and a logo whose
-bytes differ is refused. Pass `--offline` to fetch nothing and leave logos that
-are not cached empty, or `--artwork-cache DIR` to keep them elsewhere.
+address and by the SHA-256 of the bytes the catalog served. A logo that cannot
+be fetched, or whose bytes differ, is left empty with a warning that names its
+address, so a project changing its logo never stops a build; update the digest
+in `data/` when the new logo is right. Pass `--offline` to fetch nothing and
+leave logos that are not cached empty, or `--artwork-cache DIR` to keep them
+elsewhere.
 
 The default command writes Ephervex Light, Dark, Halloween, Christmas, Pride,
 and April Fools captures at 1920x1080. Pass `--size 2560x1440` for the larger
