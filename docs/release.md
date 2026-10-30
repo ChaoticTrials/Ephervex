@@ -44,7 +44,9 @@ Secret Service provider (GNOME Keyring, KWallet, or equivalent) is optional; see
 
 ## Installing
 
-Each release publishes three artifacts per architecture. On Debian, Ubuntu,
+Each release on the GitHub releases page
+(<https://github.com/ChaoticTrials/Ephervex/releases>) publishes three artifacts
+per architecture, each with a `.sha256` checksum file beside it. On Debian, Ubuntu,
 Linux Mint and their derivatives, the Debian package is the easier one:
 
 ```bash
@@ -65,8 +67,9 @@ the system menu. `sudo apt remove ephervex` or `sudo dnf remove ephervex` undoes
 it.
 
 To get upgrades through the package manager instead of downloading each
-release, add the ChaoticTrials repository once. The packages and the repository
-metadata are signed with the same key.
+release, add the ChaoticTrials repository once. The repository metadata and the
+RPM packages in it are signed with the same key; the apt repository is verified
+through its signed Release file.
 
 ```bash
 # Debian, Ubuntu, Linux Mint and derivatives
@@ -81,8 +84,9 @@ sudo dnf config-manager addrepo --from-repofile=https://repo.chaotictrials.de/rp
 sudo dnf install ephervex
 ```
 
-On dnf 4 the second command is `sudo dnf config-manager --add-repo` with the same
-address.
+On dnf 4 (which needs the `dnf-plugins-core` package), use
+`sudo dnf config-manager --add-repo https://repo.chaotictrials.de/rpm/chaotictrials.repo`
+instead of the `addrepo` command.
 
 Everywhere else, the AppImage runs without installing anything:
 
@@ -91,11 +95,13 @@ chmod +x Ephervex-x86_64.AppImage
 ./Ephervex-x86_64.AppImage
 ```
 
-That starts the desktop application. Nothing is installed, nothing runs as root,
-and nothing is written outside the directories listed under
-[Where Ephervex keeps things](#where-ephervex-keeps-things) -- which is also
-true of the packages, whose payload is the two binaries and their desktop data
-and nothing else.
+That starts the desktop application. Nothing is installed and nothing runs as
+root. Apart from the launcher socket, the keyring (see Credentials), and the
+optional link-handler entry you register yourself, nothing is written outside
+the directories listed under
+[Where Ephervex keeps things](#where-ephervex-keeps-things). The packages
+contain the two binaries, their desktop entries, icons, AppStream data, and the
+license files.
 
 An AppImage name is the same on every release, so a download address, a symlink,
 and a desktop integration all stay valid across upgrades. The packages carry
@@ -124,7 +130,8 @@ start and it works everywhere, including in a container.
 Prefer it over extracting by hand. A manual `--appimage-extract` produces a
 `squashfs-root` whose `AppRun` has no invoked name to read, so it falls back to
 the rule below: arguments reach the command-line interface and a bare run opens
-the window. `APPIMAGE_EXTRACT_AND_RUN=1` keeps the name, so either works.
+the window. `APPIMAGE_EXTRACT_AND_RUN=1` keeps the name, so either works. A
+single `ephervex://` link as the only argument opens the window.
 
 ### The command-line interface
 
@@ -237,11 +244,13 @@ for you.
 
 The artifact carries a desktop entry, an AppStream component, and icons at every
 size from 16x16 to 512x512. If you use an AppImage integration tool, it will
-pick those up and add Ephervex to your application menu. Ephervex does not write
-into `~/.local/share/applications` itself.
+pick those up and add Ephervex to your application menu. Apart from
+`ephervex url-handler register`, Ephervex does not write into
+`$XDG_DATA_HOME/applications` itself.
 
 The desktop entry deliberately declares no MIME associations. The desktop
-application takes no arguments, so a file association would open an empty
+application takes no file arguments (only `ephervex://` links), so a file
+association would open an empty
 launcher on a double-clicked pack. Imports are started from inside the
 application, or with `ephervex import`.
 
@@ -280,9 +289,9 @@ outside its season ([Themes](themes.md#previewing-a-seasonal-theme)).
 
 Microsoft refresh tokens and the CurseForge API key are stored in the system
 keyring through the Secret Service, never in `config.toml`
-([ADR 0004](adr/0004-keyring-for-secret-storage.md)). This is the one thing
-Ephervex writes outside the directories above, and it is written through the
-desktop's own credential service rather than to a file Ephervex owns.
+([ADR 0004](adr/0004-keyring-for-secret-storage.md)). Credentials are the only secrets
+kept outside the directories above, and they are written through the desktop's
+own credential service rather than to a file Ephervex owns.
 
 Without a Secret Service provider, Ephervex says so and offers a session-only
 sign-in that keeps the token in memory for that run. It never falls back to
@@ -291,8 +300,10 @@ reachable; it never reports what is stored.
 
 ## Upgrading
 
-Replace the AppImage. Configuration, instances, servers, and cached artifacts
-are untouched.
+Package installs upgrade through `apt upgrade` or `dnf upgrade` if you added the
+ChaoticTrials repository, or by installing the newer `.deb` or `.rpm` over the
+old one. An AppImage is upgraded by replacing the file. Configuration,
+instances, servers, and cached artifacts are untouched.
 
 Configuration is forward-compatible in both directions:
 
@@ -320,8 +331,12 @@ Two limits worth knowing:
 
 ## Uninstalling
 
-`sudo apt remove ephervex` if you installed the package, or delete the AppImage
-if you ran that. Either removes the application.
+`sudo apt remove ephervex` or `sudo dnf remove ephervex` if you installed a
+package, or delete the AppImage if you ran that. Any of these removes the
+application. If you added the ChaoticTrials repository, remove
+`/etc/apt/sources.list.d/chaotictrials.list` and
+`/usr/share/keyrings/chaotictrials.gpg` (apt), or the ChaoticTrials repository
+file under `/etc/yum.repos.d/` (dnf).
 
 Neither removes your data. To remove that as well:
 
@@ -353,7 +368,9 @@ Ephervex is usable without a network. What still works:
   checked before anything is fetched;
 - editing every global setting, including Minecraft preferences;
 - Minecraft preference compatibility, which falls back to the dataset compiled
-  into the build when the published feed has never been fetched;
+  into the build when the published options feed
+  (<https://ephervex.chaotictrials.de/assets/minecraft-options.json>) has never
+  been fetched;
 - measuring, configuring, and clearing the artifact cache;
 - reading logs and crash reports;
 - `ephervex doctor`.
@@ -416,7 +433,7 @@ the runtime (`runtime-x86_64` or `runtime-aarch64`) from
 `AppImage/type2-runtime`. Check what you install against that file before
 trusting it; the automated release checks it for you and refuses a mismatch.
 [`packaging/provision-host-tools.sh`](../packaging/provision-host-tools.sh) is the
-one place that fetches and checks them: the release workflows run its `provision`
+one place that fetches and checks them: the release workflow runs its `provision`
 mode, and `./prepare_release.sh` runs its `verify` mode.
 
 Both architectures are pinned from one upstream state, so a digest that stops
@@ -448,7 +465,8 @@ that reads the component.
 `build-deb.sh` and `build-rpm.sh` need neither host tool above. The first needs
 `dpkg-deb` (from `dpkg`) and `dpkg-shlibdeps` (from `dpkg-dev`); the second
 needs `rpmbuild` and `rpm` (both from `rpm`), and its smoke test also needs
-`rpm2cpio` and `cpio`. Each fails naming what is missing. It reads the package's dependencies off the built binaries rather than
+`rpm2cpio` and `cpio`. Each fails naming what is missing.
+Each script reads the package's dependencies off the built binaries rather than
 from a list kept by hand, so the relationships a package manager enforces and
 the allowlist in
 [`packaging/linux-shared-libraries`](../packaging/linux-shared-libraries) cannot
@@ -490,6 +508,12 @@ cross build.
 
 ### Building
 
+Save the Dockerfile above as `Dockerfile.baseline`; it is not kept in the
+repository. `$OUTPUT`, `$TARGET`, `$CARGO_CACHE`, and `$HOSTTOOLS` are empty
+directories you create. Fill `$HOSTTOOLS` on the host with
+`packaging/provision-host-tools.sh provision "$HOSTTOOLS"`, which prints the two
+paths the build needs.
+
 ```bash
 docker build -f Dockerfile.baseline -t ephervex-baseline:22.04 .
 
@@ -507,8 +531,8 @@ docker run --rm --network none \
   -e CARGO_HOME=/cargo \
   -e CARGO_TARGET_DIR=/target \
   -e CARGO_NET_OFFLINE=true \
-  -e APPIMAGETOOL=/hosttools/appimagetool/AppRun \
-  -e APPIMAGE_RUNTIME_FILE=/hosttools/runtime-x86_64 \
+  -e APPIMAGETOOL=/hosttools/squashfs-root/AppRun \
+  -e APPIMAGE_RUNTIME_FILE=/hosttools/runtime-$(uname -m) \
   -e SOURCE_DATE_EPOCH=0 \
   ephervex-baseline:22.04 \
   bash -c 'cd /src && packaging/build-appimage.sh /out'
@@ -790,7 +814,7 @@ not the analysis root. See
 ### The release gate
 
 ```bash
-python3 -m py_compile tools/minecraft-options/*.py
+python3 -m py_compile tools/minecraft-options/*.py tools/minecraft-options/tests/*.py tools/licenses/*.py
 python3 -m unittest discover -s tools/minecraft-options
 python3 -m unittest discover -s tools/licenses
 packaging/test-linux-architectures.sh
@@ -821,8 +845,10 @@ is published:
 ```
 
 It sets `[workspace.package] version`, updates `Cargo.lock` so a `--locked`
-build still works, regenerates the third-party license inventory, runs the gate
-above, commits exactly those four files as `chore: release <version>`, and tags
+build still works, regenerates the third-party license inventory, runs the source-level checks of
+the gate above (tooling tests, license policy, fmt, clippy, tests, CLI help;
+the baseline build and the desktop smoke test stay manual), commits exactly
+those four files as `chore: release <version>`, and tags
 `v<version>`. Before it edits anything it fetches the pinned host tools for every
 release architecture and stops if upstream has replaced one, because a release
 workflow would only find out after the tag is pushed. Then it prints the two
@@ -847,23 +873,23 @@ git tag -d v1.0.0 && git reset --hard HEAD~1
 
 ### Publishing from a tag
 
-[`.forgejo/workflows/release.yml`](../.forgejo/workflows/release.yml) runs the
-procedure above on a pushed `v*` tag and publishes the result as a Forgejo
-release. [`.github/workflows/release.yml`](../.github/workflows/release.yml) is
-the same procedure published through GitHub's API. Announcing a release is
-therefore `./prepare_release.sh <version>` above, followed by:
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs the
+procedure above on a pushed `v*` tag and publishes a GitHub release. Announcing
+a release is therefore `./prepare_release.sh <version>` above, followed by:
 
 ```bash
 git push origin main
 git push origin v1.0.0
 ```
 
-Each job refuses to continue when the tag and the `[workspace.package]` version
-disagree, runs the gate above, fetches the two host tools for the architecture
-it is building and checks them against `packaging/host-tools`, then builds and
-packages all three artifacts and publishes them with a `.sha256` beside each.
+Each build job refuses to continue when the tag and the `[workspace.package]`
+version disagree, runs the checks of the gate above (the license check on
+`x86_64` only), fetches the two host tools for the architecture it is building
+and checks them against `packaging/host-tools`, then builds and packages all
+three artifacts with a `.sha256` beside each. The `publish` job attaches them to
+the release.
 
-**GitHub builds both release architectures**, as a matrix with one job per
+**Both release architectures are built natively**, as a matrix with one job per
 architecture on a runner of that architecture -- `ubuntu-latest` and
 `ubuntu-24.04-arm` -- so nothing is cross-compiled and every check runs against
 a binary on its own machine. Six artifacts and six checksums:
@@ -878,21 +904,17 @@ Creating the release and attaching those is a separate job that builds nothing,
 so the two architectures cannot race to create the same release and the token
 that can write to the repository is held by one job rather than by every build.
 
-**Forgejo builds `x86_64` only**, and publishes the three artifacts for it. The
-runner is one self-hosted `x86_64` machine, so an aarch64 release from there
-would have to be cross-built and would arrive unverified. ARM releases come from
-GitHub; there is deliberately no ARM runner label, matrix entry, or setting in
-the Forgejo workflow to configure.
+The `.forgejo/workflows` files are left over from the archived Forgejo instance
+and no longer run.
 
-**Only the GitHub workflow publishes packages to the package repository**, as
+**The release workflow publishes packages to the package repository** as
 a third job, for both architectures. It adds the `.deb` files to the apt
 repository (`/deb`) and the `.rpm` files to the RPM repository (`/rpm`) and
 pushes both in one commit. It takes its files from the release rather than
 rebuilding them, and refuses a release that is missing either architecture. The `.deb` that lands
 in the repository is byte for byte what the release page offers; the `.rpm` is
 signed on the way in, so it differs from the release artifact by its signature
-alone (ADR 0044). The Forgejo workflow has no path into the repository and no
-credentials for it.
+alone (ADR 0044).
 
 > **One-time step when arm64 first ships.** `aptly` records a distribution's
 > architecture list when it is first published, and `aptly publish update`
@@ -902,37 +924,31 @@ credentials for it.
 > published repository shared with the organization's other projects is a
 > maintainer's decision, not a release job's.
 
-Nothing pins the Forgejo runner image to the baseline distribution, so there the
-glibc floor is held by the check the packaging scripts run against the binaries
-they produced: a runner too new to reach the floor fails the release instead of
-publishing a package that will not start. The GitHub jobs pin the baseline image
-instead, because their runners are well above the floor and their containers can
-run the actions a checkout needs.
+The release jobs pin the `ubuntu:22.04` baseline image, because their runners
+are well above the glibc floor. The check the packaging scripts run against the
+binaries they produced fails a release that would not start on the floor instead
+of publishing it.
 
-Publishing on Forgejo needs a `RELEASE_TOKEN` repository secret: a personal
-access token with repository write access, so the release is attributed to an
-account rather than to Forgejo's Ghost user. The GitHub job needs no secret; it
-uses the token that workflow is given.
+Publishing the GitHub release uses the token the workflow is given. The package
+repository job needs the repository secrets `APT_REPO_TOKEN` (write access to
+ChaoticTrials/package-repo), `GPG_PRIVATE_KEY`, `GPG_KEY_ID`, and
+`GPG_PASSPHRASE`, and refuses to publish without a signing key.
 
-Both workflows pick the files to ship, and write the `.sha256` beside each, with
-[`packaging/stage-release-assets.sh`](../packaging/stage-release-assets.sh).
-The Forgejo workflow's publish step is one call to
-[`packaging/publish-forgejo-release.sh`](../packaging/publish-forgejo-release.sh),
-which stages the artifacts, reuses or creates the release for the tag, and
-replaces any asset that already carries the same name. The GitHub job uploads
-through a different API and keeps its own publish step. Both scripts can be run
-locally; `packaging/test-release-assets.sh` checks them against dummy artifacts
-with no toolchain, build, or network.
+The release workflow picks the files to ship, and writes the `.sha256` beside
+each, with
+[`packaging/stage-release-assets.sh`](../packaging/stage-release-assets.sh);
+`packaging/test-release-assets.sh` checks that script against dummy artifacts
+with no toolchain, build, or network. The `publish` job then creates or reuses
+the release for the tag and replaces any asset that already carries the same
+name.
 
-Both jobs read an optional `CURSEFORGE_API_KEY` repository secret and bake it
+The build jobs read an optional `CURSEFORGE_API_KEY` repository secret and bake it
 into the release binaries as the default CurseForge API key (ADR 0030). Leave
 it unset and the release ships with no built-in key, same as any other build:
 CurseForge features wait on the user's own key, entered through settings.
 
-No Forgejo job caches cargo, release or CI: an entry for this workspace is
-gigabytes a self-hosted runner keeps on its own disk, and nothing can replace
-the entry it supersedes, so they accumulate. The GitHub jobs do cache, because
-there the storage is GitHub's.
+The build jobs cache the cargo registry and target directory with
+`Swatinem/rust-cache`.
 
 **It does not replace the desktop smoke test.** A container has neither
 `/dev/fuse` nor a display, so the two steps that exercise the mounted artifact
@@ -949,8 +965,8 @@ before telling anyone the release is there.
 - A package installed from a downloaded file has no repository to upgrade
   from. Add the ChaoticTrials repository (see [Installing](#installing)) to get
   upgrades through `apt` or `dnf`.
-- `aarch64` releases are built only by GitHub. A Forgejo release carries
-  `x86_64` artifacts alone.
+- Releases are built natively, once per architecture; there is no cross-built
+  artifact.
 - A Wayland-only session without XWayland is untested; the desktop application
   reaches X11 through the toolkit's own backend.
 - Configuration rewrites do not preserve comments or key order, and instance and
@@ -959,5 +975,6 @@ before telling anyone the release is there.
 - The desktop application always uses the `en-US` locale. It is the only locale
   that exists, so nothing is currently unreachable, but the application does not
   yet follow the configured language the way the CLI does.
-- Uninstalling does not remove keyring entries. They have to be removed through
-  the desktop's own credential manager.
+- Uninstalling does not remove keyring entries. Sign out of each account first,
+  or remove the `ephervex` entries with your desktop's credential manager or
+  `secret-tool clear service ephervex`. See [Uninstalling](#uninstalling).
