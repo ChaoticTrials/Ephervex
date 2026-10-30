@@ -15,7 +15,8 @@ cannot be changed by a theme.
 
 Or `$XDG_CONFIG_HOME/ephervex/themes/` when `XDG_CONFIG_HOME` is set. The folder
 does not exist until you create it. When a theme has a problem, Show problems
-in the theme setting names the exact path.
+in the theme setting names the themes folder and lists each affected file inside
+it.
 
 A theme that brings its own images is a folder instead of a file:
 
@@ -32,8 +33,9 @@ A theme that brings its own images is a folder instead of a file:
 `theme.toml` is not a theme and is ignored.
 
 The file name, or the folder name for a theme folder, is the theme's identity.
-Use lowercase letters, digits, `-` and `_` (for example `modrinth.toml` or
-`my-dark_2`); other names are skipped. Renaming a file or folder makes it a
+Use lowercase letters, digits, `-` and `_`, starting with a letter or digit and
+up to 64 characters (for example `modrinth.toml` or `my-dark_2`); other names
+are skipped. Renaming a file or folder makes it a
 different theme, so a choice recorded for the old name falls back to the
 default until you choose it again. If a file and a usable folder have the same
 name, the folder is used and the file is reported. A folder that cannot be used
@@ -60,7 +62,7 @@ background = "#e6f4ec"
 
 | Key | Required | Meaning |
 |---|---|---|
-| `format_version` | No, defaults to `1` | The theme format. A file with a newer version than this Ephervex reads is skipped. |
+| `format_version` | No, defaults to `1` | The theme format. A file with a version below 1 or newer than this Ephervex reads is skipped. |
 | `name` | No, defaults to the file name | What the theme list shows. At most 64 characters are kept. |
 | `parent` | No, defaults to `"workbench"` | The built-in theme to start from. See [Parents](#parents). |
 | `[colors]` | No | The colors to change, by token name. |
@@ -171,15 +173,15 @@ also holds a commented-out `[branding]` section for use in a theme folder.
 Keep text readable: `text`, `text-secondary` and `text-muted` are drawn on
 `background`, `surface`, `field` and `elevated`, and captions on the button fills.
 
-The built-in Workbench theme is held to the same bar, and so is the example
+Every built-in palette is held to the same bar, and so is the example
 theme. Every caption is readable on the fill it is drawn on: `text` on
 `surface`, `selection`, `selection-strong`, `note-fill` and each `chip-` fill, `on-accent` on `accent-primary` and each `state-` fill,
 `on-primary` on `primary-fill` and `primary-fill-hover`, and `on-danger` on `danger-fill` and
 `danger-fill-hover`, and `surface` on `danger` and on `border-strong` (the counts on a card's problem badge and on a list section's heading). A switch's knob is told apart from its track by its own
 color or by the `border-strong` outline. The scrim dims the page firmly.
 
-The tones drawn as text (`accent`, `accent-secondary`, `success`, `warning`, `danger`, the marks, and the group
-tones) are held at 4.5:1 or more on every surface, and on `surface` and `selection`, which is what a tag is drawn on,
+The tones drawn as text (`accent`, `accent-secondary`, `success`, `warning`, `danger`, `server`, `modrinth`, `curseforge`, and the group
+tones) are held at 4.5:1 or more on `surface` and on `selection`, which is what a tag is drawn on,
 so they are darker than the pastel fills of the same hue. `on-accent` is dark on every accent and state fill.
 A disabled button keeps its fill and its caption at reduced opacity and does not
 rise, so it reads as inactive.
@@ -331,11 +333,11 @@ lists.
 
 ## When a file has a problem
 
-The theme setting says how many problems were found, and Show problems lists
-them, one line per file:
+When any theme has a problem, the theme setting shows a Show problems link that
+lists them, one line per file:
 
-- A file is skipped when it is not valid TOML, uses a newer `format_version`,
-  names a `parent` other than `"workbench"`, `"dark"` or `"light"`, gives a key the wrong type, or
+- A file is skipped when it is not valid TOML, uses a `format_version` that is not a whole
+  number of 1 or more or is newer than this Ephervex reads, names a `parent` other than `"workbench"`, `"dark"` or `"light"`, gives a key the wrong type, or
   writes a color any other way than `#rrggbb` or `#rrggbbaa`.
 - A color token or key Ephervex does not know is ignored and reported, and the
   rest of the theme is used. Check the spelling when you see one.
