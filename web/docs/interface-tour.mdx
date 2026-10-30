@@ -112,6 +112,20 @@ See [Mods](./mods.mdx) for installation, switches, version changes,
 dependencies, and file repair.
 The [Mod Isolation guide](./mod-isolation.mdx) walks through each test round.
 
+## Packs
+
+The **Packs** surface lists the resource packs, shader packs, and data packs
+that an imported pack placed in the host's game folder. They are not mods and
+are not listed with the mods. Each card shows the pack's name, its kind, whether
+the file is present or missing, its path, and where it came from. A data pack
+also names the world that owns it. The surface only reads: it changes nothing
+and contacts no provider.
+
+An instance imported before this list existed shows only the files its pack
+named until it is imported again. The same list is available on the command
+line with `ephervex packs --instance INSTANCE_ID` or
+`ephervex packs --server SERVER_ID`.
+
 ## Servers
 
 A server can stand alone or be linked to a client instance. The server page
