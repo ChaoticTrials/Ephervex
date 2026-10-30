@@ -14,7 +14,7 @@
 # test all inspect and run the binaries the job produced, and a cross build
 # leaves every one of those unverified.
 #
-# Three jobs, because they need different things. The build matrix needs a
+# Separate jobs, because they need different things. The build matrix needs a
 # toolchain and no repository access; publishing needs a token that can write
 # releases and nothing else; the package repository needs its own credentials
 # and a key. Splitting them is also what keeps two architectures from racing to
@@ -39,7 +39,14 @@ permissions:
   contents: read
 
 jobs:
-  artifacts:
+  # Everything that gates a release short of the test suite: the tag, the
+  # datasets, the license inventory, formatting, and lints.
+  #
+  # The gate and the build are separate jobs per architecture, not one. Lints,
+  # tests, and the release build each compile the workspace in a different mode
+  # and none can reuse another's output, so apart each has a fresh disk and
+  # memory of its own and the lints and tests run at the same time.
+  verify:
     strategy:
       # An architecture that fails should not cancel the other one's build. Both
       # have to succeed before anything is published, and seeing which of them
@@ -55,39 +62,30 @@ jobs:
           # artifact.
           - arch: aarch64
             runner: ubuntu-24.04-arm
-    name: ${{ matrix.arch }}
+    name: verify ${{ matrix.arch }}
+    # On the runner itself rather than the baseline image: nothing this job
+    # builds is shipped, and the artifacts job checks the binaries that are.
     runs-on: ${{ matrix.runner }}
     env:
-      # What the packaging scripts target. They refuse to build for an
-      # architecture the host is not, so pairing an architecture with the wrong
-      # runner above fails here rather than producing a mislabeled package.
-      EPHERVEX_BASELINE_ARCH: ${{ matrix.arch }}
-    # The runner images are far above the glibc floor packaging/linux-baseline
-    # declares, and the packaging scripts refuse to package binaries that
-    # require more than the floor, so every job runs in the baseline image that
-    # file names. GitHub mounts its own node into the container, so the
-    # JavaScript actions below still run.
-    container:
-      image: ubuntu:22.04
+      # One rustc at a time: compiling the interface crate's generated code
+      # takes about 14 GB, and a hosted runner has 16.
+      CARGO_BUILD_JOBS: 1
     steps:
       - name: Install build dependencies
-        # Ahead of the checkout, because a bare image has no git either.
+        # What the desktop application links against. The rest is already on
+        # the runner image.
         run: |
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential curl ca-certificates pkg-config git file jq \
-            python3 desktop-file-utils binutils coreutils zsync appstream \
-            dpkg-dev rpm cpio \
-            libfontconfig-dev libfreetype-dev libssl-dev
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-            | sh -s -- -y --profile minimal --component rustfmt --component clippy
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Cache cargo registry and target dir
         uses: Swatinem/rust-cache@v2
@@ -138,6 +136,39 @@ jobs:
       - name: Lints
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    name: test ${{ matrix.arch }}
+    # On the runner itself, like verify. Still native per architecture, which is
+    # what the suite has to be; the glibc floor only concerns what is shipped.
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - name: Install build dependencies
+        # What the desktop application links against. The rest is already on
+        # the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
@@ -148,11 +179,55 @@ jobs:
         # a suite that only ever ran on one of them would leave the other
         # released untested.
         #
-        # One build, one rustc at a time: compiling the interface crate's
-        # generated code takes about 14 GB, and a hosted runner has 16.
-        env:
-          CARGO_BUILD_JOBS: 1
         run: cargo test --workspace --no-fail-fast
+
+  artifacts:
+    # Nothing is built for release until every architecture passed the gate.
+    needs: [verify, test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      # What the packaging scripts target. They refuse to build for an
+      # architecture the host is not, so pairing an architecture with the wrong
+      # runner above fails here rather than producing a mislabeled package.
+      EPHERVEX_BASELINE_ARCH: ${{ matrix.arch }}
+    # The runner images are far above the glibc floor packaging/linux-baseline
+    # declares, and the packaging scripts refuse to package binaries that
+    # require more than the floor, so every job runs in the baseline image that
+    # file names. GitHub mounts its own node into the container, so the
+    # JavaScript actions below still run.
+    container:
+      image: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        # Ahead of the checkout, because a bare image has no git either.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential curl ca-certificates pkg-config git file jq \
+            python3 desktop-file-utils binutils coreutils zsync appstream \
+            dpkg-dev rpm cpio \
+            libfontconfig-dev libfreetype-dev libssl-dev
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
 
       - name: Provision the pinned host tools
         # Which architecture's assets to fetch, what they are named, and the
@@ -204,7 +279,7 @@ jobs:
         run: packaging/stage-release-assets.sh dist upload
 
       - name: Keep the artifacts for the publish job
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-${{ matrix.arch }}
           path: upload/
@@ -223,10 +298,10 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Collect every architecture's artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist
@@ -332,7 +407,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout the package repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ChaoticTrials/package-repo
           token: ${{ secrets.APT_REPO_TOKEN }}

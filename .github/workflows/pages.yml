@@ -80,7 +80,7 @@ jobs:
       pages: read
     steps:
       - name: Check out application source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.from_current_commit) && github.sha || needs.release.outputs.tag }}
           path: source
@@ -88,7 +88,7 @@ jobs:
 
       - name: Check out current website source
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
           path: current
@@ -107,7 +107,7 @@ jobs:
       # The application reads this file as its options feed between releases, so
       # it comes from main, never from the release tag the docs were built from.
       - name: Check out the options feed from main
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
           path: feed
@@ -137,7 +137,7 @@ jobs:
           workspaces: source -> target
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
@@ -171,10 +171,10 @@ jobs:
           cmp "$feed" source/web/build/assets/minecraft-options.json
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: source/web/build
 
@@ -192,4 +192,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

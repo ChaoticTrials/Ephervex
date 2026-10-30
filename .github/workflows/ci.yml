@@ -3,6 +3,10 @@
 # The same gate a version tag runs before it publishes anything, so what passes
 # here is what a release will find rather than a different toolchain's opinion
 # of the tree.
+#
+# Three jobs on three runners. Lints and tests each build the whole workspace in
+# a different mode and neither can reuse the other's output, so apart each has a
+# fresh disk and memory of its own, and they run at the same time.
 
 name: CI
 
@@ -16,28 +20,17 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  check:
-    name: fmt, clippy, test
+  checks:
+    name: datasets, licenses, packaging, fmt
     runs-on: ubuntu-latest
     steps:
-      - name: Install build dependencies
-        # What the desktop application links against. The rest of the set the
-        # release job installs is already on the runner image.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libfontconfig-dev libfreetype-dev
-
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo registry and target dir
-        uses: Swatinem/rust-cache@v2
+          components: rustfmt
 
       - name: Verify the tooling datasets
         run: |
@@ -76,15 +69,62 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
 
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    env:
+      # One rustc at a time: compiling the interface crate's generated code
+      # takes about 14 GB, and a hosted runner has 16.
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - name: Install build dependencies
+        # What the desktop application links against. The rest of the set the
+        # release job installs is already on the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
+
       - name: Lints
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    env:
+      # One rustc at a time: compiling the interface crate's generated code
+      # takes about 14 GB, and a hosted runner has 16.
+      CARGO_BUILD_JOBS: 1
+    steps:
+      - name: Install build dependencies
+        # What the desktop application links against. The rest of the set the
+        # release job installs is already on the runner image.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libfontconfig-dev libfreetype-dev
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target dir
+        uses: Swatinem/rust-cache@v2
 
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
-        #
-        # One build, one rustc at a time: compiling the interface crate's
-        # generated code takes about 14 GB, and a hosted runner has 16.
-        env:
-          CARGO_BUILD_JOBS: 1
         run: cargo test --workspace
