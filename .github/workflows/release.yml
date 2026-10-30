@@ -62,6 +62,9 @@ jobs:
       # architecture the host is not, so pairing an architecture with the wrong
       # runner above fails here rather than producing a mislabeled package.
       EPHERVEX_BASELINE_ARCH: ${{ matrix.arch }}
+      # The test build compiles the generated interface code of several crates
+      # at once; full debug information can exhaust the runner's memory.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     # The runner images are far above the glibc floor packaging/linux-baseline
     # declares, and the packaging scripts refuse to package binaries that
     # require more than the floor, so every job runs in the baseline image that
