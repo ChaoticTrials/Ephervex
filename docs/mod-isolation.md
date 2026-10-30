@@ -7,8 +7,9 @@ is active, so Ephervex captures a safety snapshot before the first round.
 ## Desktop workflow
 
 Open a client's or server's **Isolation** tab and choose **Set up isolation**.
-Select any mods that must stay enabled throughout the investigation. Ephervex
-also keeps everything those mods require enabled. Canceling the setup returns
+Use the switches beside the candidate mods to pin any that must stay enabled
+throughout the investigation. Ephervex also keeps everything those mods require
+enabled. Canceling the setup returns
 to the empty Isolation tab. A setup is only valid for the mods it was planned
 from: enabling, disabling, adding, deleting, updating, or restoring mods,
 restoring a snapshot of the host, or recording new dependency information,
@@ -38,7 +39,9 @@ changing the session. **Undo answer** restores the preceding round when an
 answer was wrong. A contradiction stops the search until the latest answer is
 undone or the session is canceled.
 
-Every enabled mod can be isolated, including one another mod requires. A
+Every enabled mod that is not pinned, and not required by a pinned mod, can be
+isolated, including one another mod requires. Mods that require each other are
+tested as one candidate. A
 round never enables a mod without everything it requires, so a dependency can
 be tested without the mods requiring it, but not the other way around. The
 result lists the remaining candidates that no other remaining candidate
@@ -73,8 +76,9 @@ names the server as not restored or not set to the result, and its safety
 snapshot keeps its starting state. Isolate a server that is not kept in step separately when its mods are
 also relevant.
 
-Ephervex must be stopped for the affected host before it starts, advances,
-undoes, finishes, or cancels a round. The workspace header continues to provide
+The affected host must be stopped before a session starts or resumes, or a round
+is answered, undone, finished, or canceled. When linked servers are kept in
+step, they must be stopped too. The workspace header continues to provide
 the client's launch/stop action or the server's start/stop/restart actions while
 the Isolation tab is open. Launching while a round waits for an answer remains
 available. While Ephervex is starting the session, applying or restoring a round,
@@ -117,6 +121,9 @@ ephervex mod isolate cancel --instance <id>
 
 `start` refuses refreshable unrecorded dependency information by default.
 `--accept-unrecorded` explicitly continues with a reduced-confidence result.
+`start` also refuses when a required dependency is missing. The CLI has no way to
+continue past that; install the dependency first, or use the desktop setup,
+which can acknowledge it.
 `--linked-server <id>` (repeatable, client sessions only) keeps that linked
 server's mods in step with each round, as described above; every command that
 prints a round then also prints what each server was set to, and `status --json`
