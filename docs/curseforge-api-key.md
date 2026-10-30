@@ -8,11 +8,17 @@ a build without one (any local development build, or a private/forked build
 that does not set the release secret) cannot make a CurseForge request until
 you configure your own.
 
+Precedence: the key you stored in the keyring, then the key built into an
+official release, then none. Ephervex does not read the key from an environment
+variable at run time. If the keyring cannot be read (for example, it is locked),
+Ephervex reports that and does not fall back to the built-in key.
+
 ## Why Ephervex needs one
 
 CurseForge does not offer an anonymous read path for the data a launcher needs,
-and since 2026 direct CurseForge file downloads require an API key as well.
-Without a key in effect, CurseForge features stay unavailable; every other
+and CurseForge serves file downloads only to requests that carry an API key.
+Without a key in effect, CurseForge browsing, pack import, and CurseForge
+downloads stay unavailable; every other
 part of Ephervex, including Modrinth workflows, works exactly as before.
 
 ## Getting a key
@@ -40,16 +46,20 @@ In your operating system's keyring, through the Secret Service (ADR 0004).
   rather than writing the key to a file.
 
 Once stored, the key cannot be read back through the launcher's interface.
-Settings reports which key is in effect and nothing more: *Configured* for one
-of your own, *Default* where the build's own key is standing in for it, and
-*Not configured* where there is neither. Replacing a key means entering the new
+Settings reports which key is in effect and nothing more: CONFIGURED for one
+of your own, DEFAULT where the build's own key is standing in for it, and
+NOT CONFIGURED where there is neither. `ephervex api show` reports the same
+state. Replacing a key means entering the new
 one. Removing a key never requires revealing the old one, and never touches a
 build's own fallback key: there is nothing to remove until you configure one
 yourself.
 
 ## Setting it
 
-In the desktop application: **Settings → Providers & APIs → CurseForge**.
+In the desktop application: **Settings > Providers & APIs > CurseForge API
+key**. Paste the key and choose **Save Key** (**Replace Key** if one is already
+stored). **Remove...** deletes your own key, and **Get a CurseForge API key**
+opens the application page.
 
 From the command line, the key is read from standard input so it does not reach
 your shell history or the process list:
@@ -62,10 +72,14 @@ ephervex api clear-curseforge-key
 
 ## What it is used for
 
-Importing a CurseForge modpack export, and fetching a CurseForge artifact again
-after the shared artifact cache has been collected. The archive itself is read
-locally, so
-Ephervex identifies the file, names the pack, and reports its exact Minecraft
+Browsing and installing mods from CurseForge (the Mods catalog in the desktop
+application, and `ephervex mod search --provider curseforge` and the other
+`ephervex mod` commands with `--provider curseforge`), importing a CurseForge
+modpack export, and fetching a CurseForge artifact again after the shared
+artifact cache has been collected. A search or version lookup contacts the API on
+every request, because responses are not cached.
+
+For a pack import, the archive itself is read locally, so Ephervex identifies the file, names the pack, and reports its exact Minecraft
 version, loader build, and file counts with no key configured at all. What needs
 the key is looking those files up: a CurseForge manifest names each one by
 project id and file id, and their names, sizes, checksums, and addresses exist
@@ -100,3 +114,8 @@ time-to-live, and no CurseForge namespace under the metadata store.
 This is deliberate: the published CurseForge third-party API terms prohibit
 saving or caching data obtained through the API. Verified downloaded artifacts
 are a separate matter and follow Ephervex's ordinary shared-store rules.
+
+What an install records in the instance's recipe is the minimum needed to
+install and verify the file again: project and file ids, name, size, digest,
+source address, and the relations CurseForge declared. The API responses
+themselves are not kept.
