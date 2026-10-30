@@ -777,7 +777,7 @@ allowance, so no other dependency can arrive under those terms unnoticed. Its
 condition is attribution: the desktop application shows Slint's own `AboutSlint`
 widget on the "About & Licenses" screen, which is what a release ships under
 (ADR 0001, ADR 0018). Removing that widget would put a release outside its
-terms, and `crates/gui/tests/third_party_license_modal.rs` fails if it goes.
+terms, and `crates/gui/tests/gui/third_party_license_modal.rs` fails if it goes.
 
 Because Slint's license is not an SPDX identifier, `cargo-about` resolves the
 expression but has no text to attach. The clarification in `about.toml` names
