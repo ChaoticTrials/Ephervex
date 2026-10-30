@@ -13,9 +13,9 @@ test('Pride covers all of June and stops at its boundaries', () => {
   for (let day = 1; day <= 30; day++) assert.equal(season(6, day), 'pride');
   assert.equal(season(7, 1), undefined);
 });
-test('Halloween remains October 31 only', () => {
-  assert.equal(season(10, 30), undefined);
-  assert.equal(season(10, 31), 'halloween');
+test('Halloween runs October 25 through October 31', () => {
+  assert.equal(season(10, 24), undefined);
+  for (let day = 25; day <= 31; day++) assert.equal(season(10, day), 'halloween');
   assert.equal(season(11, 1), undefined);
 });
 test('previews are restricted to local hosts and can disable a scheduled season', () => {

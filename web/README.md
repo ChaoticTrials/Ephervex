@@ -7,13 +7,16 @@ plugin at build time. Its landing page and every exported issue and pull request
 have real static HTML routes. The committed site export contains Forgejo issues
 and PRs, with Forgejo releases excluded. Its publication flag is currently
 `approved`, which makes archive pages indexable and includes them in the
-sitemap; the flag does not verify the export's content. No Forgejo connection
-is required to build the website.
+sitemap; the flag does not verify the export's content. The archive was exported
+from the final state of the Forgejo instance, which is now archived; the project
+lives on GitHub (ChaoticTrials/Ephervex). No Forgejo connection is required to
+build the website.
 
 The permanent URL contract is `/road-to-v1/`,
 `/road-to-v1/forgejo/issues/{number}/`, and
-`/road-to-v1/forgejo/pulls/{number}/`. Finalize and freeze these URLs **before**
-rewriting historical Git commit messages for GitHub.
+`/road-to-v1/forgejo/pulls/{number}/`. The contract is permanent: issue and pull
+request numbers in older commit messages and in the project README link to these
+routes, so keep these paths stable.
 
 Run `npm run archive:test`, `npm run archive:exporter:test`, and
 `npm run archive:check` after `npm run build`.
@@ -21,8 +24,10 @@ For a subpath deployment, set `DOCUSAURUS_BASE_URL=/preview/` before building
 and run `npm run archive:check -- /preview/`.
 
 This Docusaurus site uses screenshots of the actual Ephervex Slint window.
-The Rust generator uses synthetic fixtures and writes original PNGs locally.
-The website uses optimized WebP copies.
+The Rust generator renders the compiled application window with Slint's headless
+Skia renderer, using data recorded from real packs and servers plus fixture
+state, and writes the original PNGs locally. The website uses optimized WebP
+copies.
 
 The installation page is a standalone route at `/install`. The v1 docs have a
 Getting Started guide at `/docs/v1/getting-started` with a link to the
@@ -35,10 +40,10 @@ The navbar logo, favicon, and social image in `static/img/` are symlinks to
 artwork under the repository's `assets/` directory. Build from a full
 repository checkout so Docusaurus can copy those files into `build/img/`.
 The Halloween logo and favicon in `static/img/` are resized from
-`ephervex_logos_x4.zip` supplied by the project. On October 31 in the visitor's
-local time, the site switches to warm orange and purple colors and those two
-icons. It keeps the default launcher screenshots until matching GUI captures
-exist. On localhost or a private network address, add
+the launcher's Halloween theme mascot, `assets/themes/halloween.png`. From
+October 25 through October 31 in the visitor's local time, the site switches to
+warm orange and purple colors and those two icons, and its screenshots switch to
+the matching Halloween captures. On localhost or a private network address, add
 `?seasonPreview=halloween` to preview the theme in the current tab.
 
 Pride runs throughout June, with rainbow surfaces and accents and the
@@ -54,7 +59,9 @@ April Fools runs April 1 in local time, with pink, gold, cyan, and violet
 surfaces and the project-supplied jester mascot from the x4 artwork. Preview it
 locally with
 `?seasonPreview=april-fools`.
-Seasonal branding keeps the default launcher screenshots.
+While a seasonal theme is active, screenshots show the launcher's matching
+seasonal capture (Halloween, Christmas, Pride, or April Fools). Turning the
+theme off restores the light or dark captures.
 During a seasonal theme, visitors can turn it off or back on with its named
 button in the navigation bar or mobile menu, such as `Pride: On/Off`. The
 choice is saved in their browser and applies on later visits.
@@ -75,14 +82,13 @@ To publish both 1080p and 1440p, generate the 2560x1440 captures with
 `--size 2560x1440` and run
 `npm run screenshots:sync -- --size 1920x1080 --size 2560x1440` instead of
 the default sync command. The Rust generator captures only 1080p by default.
-The WebP files under `static/img/ephervex/` and their manifest under
-`src/components/` are the site assets. The original PNGs and contact sheets
-remain gitignored under `tools/auto-screenshot-tool/screenshots/`. Generated
-WebP files under `static/img/ephervex/` are also ignored. A fresh checkout must
-generate and synchronize images before building.
+The manifest `src/components/screenshot-manifest.json` is committed. The WebP
+files it lists under `static/img/ephervex/` and the original PNGs and contact
+sheets under `tools/auto-screenshot-tool/screenshots/` are gitignored. A fresh
+checkout must generate and synchronize images before building.
 
-`npm run screenshots:sync` checks that every theme exists for every
-selected state, region, and size. Full-window WebPs live directly under each state;
+`npm run screenshots:sync` checks that all six themes (light, dark, halloween,
+christmas, pride, april-fools) exist for every selected state, region, and size. Full-window WebPs live directly under each state;
 named crops have a subdirectory. It hashes the source PNGs and reuses unchanged
 WebPs.
 `npm run screenshots:contact-sheet` writes local review sheets grouped by
@@ -100,9 +106,10 @@ directly if you need the pages without starting or building the site.
 `EPHERVEX_CLI_BIN` to an already built Ephervex CLI binary when generating
 the reference for a specific build.
 
-`ThemeScreenshot` reads the synchronized manifest. It renders a sized
-placeholder for server rendering and hydration, then mounts only the image
-for Docusaurus's selected color mode. `useBaseUrl` applies the site's
+`ThemeScreenshot` reads the synchronized manifest. Static HTML contains the
+light capture in a frame sized from the manifest; after hydration it switches to
+the capture for the active seasonal theme, or otherwise for Docusaurus's
+selected color mode. Pass `theme=` to force one capture. `useBaseUrl` applies the site's
 configured base URL. Set `DOCUSAURUS_BASE_URL=/your-path/` for a subpath
 deployment. New screenshot states need only a fixture and catalog
 entry in the Rust tool; the sync command discovers their output directories.
@@ -125,15 +132,23 @@ does not create a commit.
 
 Pages deploys after a successful GitHub Release workflow or a manually published
 release. A push to `main` that changes `web/`, `tools/auto-screenshot-tool/`,
-`assets/`, or the Pages workflow also deploys when a published full release
-exists. The latest published full release supplies the application source and
-Cargo lockfile. On `main` pushes, the workflow applies the current website,
-screenshot tool, and artwork to that released source. If a capture needs an
-unreleased application change, the build fails and the prior Pages deployment
-stays in place. Manual workflow dispatch can retry the current `main` source.
-Each build regenerates both screenshot sizes and WebP assets without committing
-generated files. GitHub release downloads are the installation page's source;
+`assets/`, `crates/options/data/minecraft-options.json`, or the Pages workflow
+also deploys when a published full release exists. The latest published full
+release supplies the application source and Cargo lockfile. On `main` pushes and
+manual dispatches, the workflow applies the current website, screenshot tool,
+and artwork to that released source. The options dataset always comes from
+`main`. If a capture needs an unreleased application change, the build fails and
+the prior Pages deployment stays in place. A manual run with
+`from_current_commit` builds from the chosen commit instead of the latest
+release, and deploys even before any release exists. Each build regenerates the
+1920x1080 screenshots and their WebP assets without committing generated files. GitHub release downloads are the installation page's source;
 see `.github/workflows/release.yml` for artifact names and architectures.
+
+The site publishes the Minecraft options dataset at
+`/assets/minecraft-options.json`, which the application reads as its feed between
+releases. `plugins/minecraft-options` builds the `/minecraft-options/` coverage
+page from `crates/options/data/minecraft-options.json`. Run
+`npm run options:test` to check the coverage logic.
 
 Edit `docs/` for v1, which includes all pre-v1 releases and the v1 series.
 The current docs version is labeled `v1` and served at `/docs/v1/`. There is
