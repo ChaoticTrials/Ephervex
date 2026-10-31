@@ -140,4 +140,7 @@ jobs:
       - name: Tests
         # Offline by contract: fixtures and loopback servers only, no Mojang,
         # Microsoft, Modrinth, CurseForge, Forge, or NeoForge service.
-        run: cargo test --workspace
+        #
+        # Every test target runs even after one fails, so a run shows all that
+        # is wrong on an architecture instead of the first target's failures.
+        run: cargo test --workspace --no-fail-fast
