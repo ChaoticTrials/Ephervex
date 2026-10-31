@@ -167,6 +167,8 @@ pub(super) fn version(
     let project = CurseForgeProjectId::new(document.mod_id).ok_or_else(|| invalid_id("modId"))?;
     let file = CurseForgeFileId::new(document.id).ok_or_else(|| invalid_id("id"))?;
 
+    // No exception here: a listing offers what authors publish now, and an
+    // unavailable release is reached only by an exact pin (`normalize_file`).
     if !document.is_available {
         return Err(ModPlatformError::FileUnavailable {
             provider: ModProvider::CurseForge,
@@ -413,6 +415,27 @@ fn invalid_id(field: &str) -> ModPlatformError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+
+    /// A release its author archived is the one an exact pack pin names, but a
+    /// listing is what a user picks from, so it still does not offer one.
+    #[test]
+    fn a_listing_does_not_offer_an_archived_release() {
+        let document: CurseForgeFileDocument = serde_json::from_str(
+            r#"{"id":5922047,"gameId":432,"modId":1001614,"isAvailable":false,
+                "fileStatus":8,"fileName":"lionfishapi-2.4-Fix.jar","fileLength":162767,
+                "downloadUrl":"https://edge.forgecdn.net/files/5922/47/lionfishapi-2.4-Fix.jar",
+                "hashes":[{"value":"b198f38fb27dfc6db490b496d56aa1622d5a5b87","algo":1}]}"#,
+        )
+        .expect("a documented archived file response");
+
+        let error = version(document, &DomainAllowlist::curseforge_artifact_defaults())
+            .expect_err("a listing refuses it");
+
+        assert!(
+            matches!(error, ModPlatformError::FileUnavailable { .. }),
+            "{error:?}"
+        );
+    }
 
     fn project_with_latest_files(game_versions: &[&[&str]]) -> CurseForgeProject {
         let files: Vec<_> = game_versions

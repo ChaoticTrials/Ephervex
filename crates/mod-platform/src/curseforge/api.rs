@@ -88,6 +88,43 @@ const RESOURCE_PACKS_CLASS_SLUG: &str = "texture-packs";
 /// not currently name it.
 const SHADER_PACKS_CLASS_SLUG: &str = "shaders";
 
+/// CurseForge `FileStatus` values. Only these matter here: archived and
+/// under-review files are still served by id, so a pack's pin on them is
+/// honored; rejected, malware detected and deleted are condemned and never
+/// installed. Every other status leaves the decision to the file's availability
+/// and download address.
+const FILE_STATUS_UNDER_REVIEW: u32 = 3;
+const FILE_STATUS_REJECTED: u32 = 5;
+const FILE_STATUS_MALWARE_DETECTED: u32 = 6;
+const FILE_STATUS_DELETED: u32 = 7;
+const FILE_STATUS_ARCHIVED: u32 = 8;
+
+/// Whether a file document describes a file this launcher must not install
+/// because CurseForge does not offer it.
+///
+/// Condemned files are always refused. An unavailable file is refused when it
+/// has no download address and nothing says CurseForge still serves it: an
+/// archived or under-review file with no address is the author's restriction,
+/// recorded as one, but an unexplained gap is not assumed to be one.
+fn is_refused_as_unavailable(document: &CurseForgeFileDocument) -> bool {
+    let status = document.file_status;
+    if matches!(
+        status,
+        Some(FILE_STATUS_REJECTED | FILE_STATUS_MALWARE_DETECTED | FILE_STATUS_DELETED)
+    ) {
+        return true;
+    }
+    let has_address = document
+        .download_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty());
+    let served = matches!(
+        status,
+        Some(FILE_STATUS_ARCHIVED | FILE_STATUS_UNDER_REVIEW)
+    );
+    !document.is_available && !has_address && !served
+}
+
 /// The header the third-party API authenticates with.
 ///
 /// Public because the same header is what an authenticated *artifact* request
@@ -1188,7 +1225,13 @@ fn normalize_file(
             returned: format!("{}/{}", document.mod_id, document.id),
         });
     }
-    if !document.is_available {
+    // What makes a file downloadable is the address CurseForge publishes for it,
+    // which it withholds when the author disabled distribution. "Not available"
+    // alone is not a reason to refuse a file it still gives an address for:
+    // archived and under-review files are like that, packs pin them, and an
+    // exact import wants precisely that file rather than a newer one. The checks
+    // below, including the digest, are the same for them as for any other file.
+    if is_refused_as_unavailable(&document) {
         return Err(ModPlatformError::FileUnavailable {
             provider: ModProvider::CurseForge,
             project_id: project.to_string(),
@@ -1605,17 +1648,205 @@ mod tests {
         ));
     }
 
+    /// The shape CurseForge answers with for a file its author archived: not
+    /// "available", yet with an address, a size and digests, and a status.
+    fn archived_document(extra: &str) -> CurseForgeFileDocument {
+        serde_json::from_str(&format!(
+            r#"{{"id":5922047,"gameId":432,"modId":1001614,"isAvailable":false,
+                "fileStatus":8,"fileName":"lionfishapi-2.4-Fix.jar","fileLength":162767,
+                "downloadUrl":"https://edge.forgecdn.net/files/5922/47/lionfishapi-2.4-Fix.jar",
+                "hashes":[{{"value":"b198f38fb27dfc6db490b496d56aa1622d5a5b87","algo":1}},
+                          {{"value":"81efd7c198c3c7036c77c79cae764ed4","algo":2}}]{extra}}}"#
+        ))
+        .expect("a documented archived file response")
+    }
+
+    fn archived_ids() -> (CurseForgeProjectId, CurseForgeFileId) {
+        (
+            CurseForgeProjectId::new(1_001_614).expect("a real id"),
+            CurseForgeFileId::new(5_922_047).expect("a real id"),
+        )
+    }
+
+    /// A pack pins one exact release. An author archiving that release does not
+    /// make it another file, and CurseForge still serves it by id, so it is the
+    /// file the pack asked for and the one to install.
+    #[test]
+    fn an_archived_file_is_still_the_file_a_pack_pinned() {
+        let (project, file) = archived_ids();
+
+        let release = normalize_file(project, file, archived_document(""), &hosts())
+            .expect("an archived file is the pinned file");
+
+        assert_eq!(release.artifact.file_name, "lionfishapi-2.4-Fix.jar");
+        assert_eq!(release.artifact.size, Some(162_767));
+        assert_eq!(
+            release.artifact.distribution.download_url(),
+            Some("https://edge.forgecdn.net/files/5922/47/lionfishapi-2.4-Fix.jar")
+        );
+        assert!(
+            !release.artifact.hashes.is_empty(),
+            "the digest it will be verified against is kept"
+        );
+    }
+
+    /// A pack author can pin a file CurseForge has published but not yet
+    /// approved. It is served by id with an address and digests, as an archived
+    /// one is, and the official launcher installs it, so it is the pinned file
+    /// too. This is the shape its answer has.
+    #[test]
+    fn a_file_under_review_is_still_the_file_a_pack_pinned() {
+        let project = CurseForgeProjectId::new(1_486_511).expect("a real id");
+        let file = CurseForgeFileId::new(7_759_163).expect("a real id");
+        let document: CurseForgeFileDocument = serde_json::from_str(
+            r#"{"id":7759163,"gameId":432,"modId":1486511,"isAvailable":false,
+                "fileStatus":3,"fileName":"cc-tweaked-1.20.1-forge-1.115.1.jar",
+                "fileLength":3073327,
+                "downloadUrl":"https://edge.forgecdn.net/files/7759/163/cc-tweaked-1.20.1-forge-1.115.1.jar",
+                "hashes":[{"value":"1a2f9672b3aa5e4c485c8b3ac0b2579ecdfb6798","algo":1},
+                          {"value":"eb104bb91d92a241d6bba81f4e32eec3","algo":2}]}"#,
+        )
+        .expect("a documented file response");
+
+        let release = normalize_file(project, file, document, &hosts())
+            .expect("a file under review is the pinned file");
+
+        assert_eq!(
+            release.artifact.file_name,
+            "cc-tweaked-1.20.1-forge-1.115.1.jar"
+        );
+        assert_eq!(release.artifact.size, Some(3_073_327));
+        assert!(!release.artifact.hashes.is_empty());
+    }
+
+    /// "Not available" does not refuse a file CurseForge gives an address for:
+    /// whatever its review state, it is downloadable and the pack pinned it.
+    #[test]
+    fn an_unavailable_file_with_a_download_address_is_downloaded() {
+        let (project, file) = archived_ids();
+
+        for (label, status) in [
+            ("no status", None),
+            ("changes required", Some(2)),
+            ("under review", Some(3)),
+            ("archived", Some(8)),
+            ("deprecated", Some(12)),
+        ] {
+            let mut document = archived_document("");
+            document.file_status = status;
+            let release = normalize_file(project, file, document, &hosts())
+                .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            assert!(
+                release.artifact.distribution.download_url().is_some(),
+                "{label}"
+            );
+        }
+    }
+
+    /// A file CurseForge itself rejected, flagged, or deleted is never
+    /// installed, address or not.
+    #[test]
+    fn a_file_curseforge_condemned_is_refused_even_with_an_address() {
+        let (project, file) = archived_ids();
+
+        for (label, status) in [("rejected", 5), ("malware detected", 6), ("deleted", 7)] {
+            let mut document = archived_document("");
+            document.file_status = Some(status);
+            let error = normalize_file(project, file, document, &hosts()).expect_err(label);
+            assert!(
+                matches!(error, ModPlatformError::FileUnavailable { .. }),
+                "{label}: {error:?}"
+            );
+
+            // The status counts even when the file is reported as available.
+            let mut available = self::document();
+            available.file_status = Some(status);
+            let error =
+                normalize_file(self::project(), file_id(), available, &hosts()).expect_err(label);
+            assert!(
+                matches!(error, ModPlatformError::FileUnavailable { .. }),
+                "available {label}: {error:?}"
+            );
+        }
+    }
+
+    /// With no address, an unavailable file is the author's restriction only
+    /// when its status says CurseForge still serves it. Otherwise there is
+    /// nothing to fetch and no reason given, so it is refused.
+    #[test]
+    fn an_unavailable_file_with_no_address_is_a_restriction_only_when_it_is_still_served() {
+        let (project, file) = archived_ids();
+
+        for (label, status, accepted) in [
+            ("no status", None, false),
+            ("changes required", Some(2), false),
+            ("deprecated", Some(12), false),
+            ("archived", Some(8), true),
+            ("under review", Some(3), true),
+        ] {
+            let mut document = archived_document("");
+            document.file_status = status;
+            document.download_url = None;
+            let result = normalize_file(project, file, document, &hosts());
+            if accepted {
+                let release = result.unwrap_or_else(|error| panic!("{label}: {error:?}"));
+                assert!(release.artifact.distribution.is_restricted(), "{label}");
+            } else {
+                assert!(
+                    matches!(
+                        result.expect_err(label),
+                        ModPlatformError::FileUnavailable { .. }
+                    ),
+                    "{label}"
+                );
+            }
+        }
+    }
+
+    /// Archiving loosens one check and no other: the digest is still required,
+    /// the address must still be one this launcher may fetch from, and a file
+    /// whose author withholds the address is still restricted, with none invented.
+    #[test]
+    fn an_archived_file_still_has_to_pass_every_other_check() {
+        let (project, file) = archived_ids();
+
+        let mut no_digest = archived_document("");
+        no_digest.hashes.clear();
+        assert!(matches!(
+            normalize_file(project, file, no_digest, &hosts()).expect_err("no digest"),
+            ModPlatformError::HashesMissing { .. }
+        ));
+
+        let mut elsewhere = archived_document("");
+        elsewhere.download_url = Some("https://downloads.example.invalid/x.jar".to_owned());
+        assert!(matches!(
+            normalize_file(project, file, elsewhere, &hosts()).expect_err("off-list host"),
+            ModPlatformError::DownloadAddressRejected { .. }
+        ));
+
+        let mut withheld = archived_document("");
+        withheld.download_url = None;
+        let release = normalize_file(project, file, withheld, &hosts())
+            .expect("a restricted file is recorded, not lost");
+        assert!(release.artifact.distribution.is_restricted());
+        assert_eq!(release.artifact.distribution.download_url(), None);
+    }
+
     #[test]
     fn a_file_the_provider_will_not_serve_is_still_a_file_it_described() {
         let mut unavailable = document();
         unavailable.is_available = false;
+        normalize_file(project(), file_id(), unavailable.clone(), &hosts())
+            .expect("an address is what makes a file downloadable");
+        unavailable.download_url = None;
         assert!(
             matches!(
                 normalize_file(project(), file_id(), unavailable, &hosts())
                     .expect_err("must refuse"),
                 ModPlatformError::FileUnavailable { .. }
             ),
-            "a withdrawn file is a refusal; a restricted one is not"
+            "nothing to fetch and nothing saying it is still served is a refusal; \
+             a restricted file that is available is not"
         );
 
         for (label, address) in [("null", None), ("blank", Some("   ".to_owned()))] {

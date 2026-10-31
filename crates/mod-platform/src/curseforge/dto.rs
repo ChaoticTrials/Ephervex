@@ -202,8 +202,21 @@ pub(super) struct CurseForgeFileDocument {
     pub(super) id: u32,
     /// The project this file belongs to. Checked for the same reason.
     pub(super) mod_id: u32,
-    /// Whether CurseForge currently serves this file at all.
+    /// Whether CurseForge lists this file as available.
+    ///
+    /// False for a file its author archived or one still under review as well
+    /// as for one that was withdrawn, and they differ: the first two are still
+    /// served and are still the file a pack pinned. Read together with
+    /// [`Self::file_status`].
     pub(super) is_available: bool,
+    /// CurseForge's own status for the file, a number from its documented
+    /// file status list.
+    ///
+    /// Always checked for the statuses CurseForge condemns. For an unavailable
+    /// file with no download address it also says whether the file is still
+    /// served. Absent on a response that omits it.
+    #[serde(default)]
+    pub(super) file_status: Option<u32>,
     /// The provider's own file name. Untrusted input: validated as a safe
     /// relative path before it is allowed to name a destination.
     pub(super) file_name: String,
