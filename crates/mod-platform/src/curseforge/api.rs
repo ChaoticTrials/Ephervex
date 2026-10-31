@@ -125,6 +125,11 @@ fn is_refused_as_unavailable(document: &CurseForgeFileDocument) -> bool {
     !document.is_available && !has_address && !served
 }
 
+/// How many ids one batch request carries. CurseForge documents no limit this
+/// launcher relies on; a hundred keeps each request small, and a pack of a few
+/// hundred files is a handful of requests.
+const BATCH_SIZE: usize = 100;
+
 /// The header the third-party API authenticates with.
 ///
 /// Public because the same header is what an authenticated *artifact* request
@@ -535,6 +540,78 @@ impl CurseForgeOperation<'_> {
                 Err(other) => return Err(other),
             };
         normalize_file(project, file, document, hosts)
+    }
+
+    /// Several exact files of several exact projects, a request per
+    /// [`BATCH_SIZE`] files instead of one per file.
+    ///
+    /// `POST /v1/mods/files` answers with the documents it knows and leaves the
+    /// rest out, so every wanted pair gets an outcome of its own, in the order
+    /// given. A pair CurseForge returned nothing for, or returned only under
+    /// another project, is [`ModPlatformError::FileUnknown`]: the fact
+    /// [`Self::file`] states from a 404, and never a different file used in its
+    /// place. Everything else is judged exactly as [`Self::file`] judges one. A
+    /// request that fails outright fails the whole call, because nothing is then
+    /// known about any pair in it.
+    pub async fn exact_files(
+        &self,
+        wanted: &[(CurseForgeProjectId, CurseForgeFileId)],
+        hosts: &DomainAllowlist,
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<ModPlatformResult<CurseForgeFileRelease>>> {
+        let mut documents: BTreeMap<u32, CurseForgeFileDocument> = BTreeMap::new();
+        for chunk in wanted.chunks(BATCH_SIZE) {
+            let mut ids: Vec<CurseForgeFileId> = chunk.iter().map(|(_, file)| *file).collect();
+            ids.sort_unstable();
+            ids.dedup();
+            for document in self.files(&ids, cancel).await? {
+                documents.entry(document.id).or_insert(document);
+            }
+        }
+        Ok(wanted
+            .iter()
+            .map(|&(project, file)| match documents.get(&file.get()) {
+                Some(document) if document.mod_id == project.get() => {
+                    normalize_file(project, file, document.clone(), hosts)
+                }
+                _ => Err(ModPlatformError::FileUnknown {
+                    provider: ModProvider::CurseForge,
+                    project_id: project.to_string(),
+                    file_id: file.to_string(),
+                }),
+            })
+            .collect())
+    }
+
+    /// Several projects, a request per [`BATCH_SIZE`] projects instead of one
+    /// per project.
+    ///
+    /// `POST /v1/mods`, with an outcome for every project asked about, in the
+    /// order given. One CurseForge returned nothing for is
+    /// [`ModPlatformError::ProjectUnknown`], as [`Self::project`] reports from a
+    /// 404. A request that fails outright fails the whole call.
+    pub async fn exact_projects(
+        &self,
+        projects: &[CurseForgeProjectId],
+        cancel: &CancellationToken,
+    ) -> ModPlatformResult<Vec<ModPlatformResult<CurseForgeProject>>> {
+        let mut documents: BTreeMap<u32, CurseForgeProject> = BTreeMap::new();
+        for chunk in projects.chunks(BATCH_SIZE) {
+            for document in self.projects(chunk, cancel).await? {
+                documents.entry(document.id).or_insert(document);
+            }
+        }
+        Ok(projects
+            .iter()
+            .map(|project| {
+                documents.get(&project.get()).cloned().ok_or_else(|| {
+                    ModPlatformError::ProjectUnknown {
+                        provider: ModProvider::CurseForge,
+                        reference: project.to_string(),
+                    }
+                })
+            })
+            .collect())
     }
 
     /// One page of the game's Mods, narrowed to what an instance can run.

@@ -73,21 +73,12 @@ use ephervex_pack::{
     PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, RecipeRelation, SHADERPACKS_DIR,
     safe_file_name,
 };
-use futures_util::StreamExt as _;
 use reqwest::header::HeaderName;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, instrument};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
-
-/// How many exact-file lookups one import runs at once.
-///
-/// A pack may declare several hundred files, and one task per entry would open
-/// several hundred sockets against somebody else's rate limit. The number
-/// matches the download manager's own default concurrency, which is the figure
-/// this launcher has already decided is polite.
-const LOOKUP_CONCURRENCY: usize = 6;
 
 impl App {
     /// Fills in everything a pack analysis still needs from its provider.
@@ -619,19 +610,15 @@ async fn classify_projects(
     // launcher is allowed to assume.
     let classes = operation.project_classes(MINECRAFT_GAME_ID, cancel).await?;
 
-    // `buffered` yields responses in the same order the requests were made,
-    // so this stays lined up with `projects` without re-deriving an identity
-    // from the response.
-    let classified: Vec<CurseForgeProject> = futures_util::stream::iter(
-        projects
-            .iter()
-            .map(|project| operation.project(*project, cancel)),
-    )
-    .buffered(LOOKUP_CONCURRENCY)
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .collect::<Result<_, ModPlatformError>>()?;
+    // One batch request per hundred projects rather than one per project, so a
+    // pack of a few hundred is a handful of requests against somebody else's
+    // rate limit. Outcomes come back in the order asked, so this stays lined up
+    // with `projects`.
+    let classified: Vec<CurseForgeProject> = operation
+        .exact_projects(&projects, cancel)
+        .await?
+        .into_iter()
+        .collect::<Result<_, ModPlatformError>>()?;
 
     projects
         .into_iter()
@@ -681,7 +668,7 @@ struct BlockedFileDetail {
     relations: Vec<RecipeRelation>,
 }
 
-/// Looks up every declared file, deduplicated and with bounded concurrency.
+/// Looks up every declared file, deduplicated, in batches of at most a hundred.
 ///
 /// A file whose author disabled third-party downloads does not abort the
 /// batch: the provider still describes it, and it is collected into the
@@ -716,9 +703,10 @@ async fn resolve_files(
         .map(declared_ids)
         .collect::<CoreResult<_>>()?;
 
-    // One request per distinct file, however many entries name it. Responses
-    // cannot be cached across operations, which is all the more reason not to
-    // ask twice inside one.
+    // Each distinct file is asked about once, however many entries name it, and
+    // in batches rather than one request per file. Responses cannot be cached
+    // across operations, which is all the more reason not to ask twice inside
+    // one.
     let mut distinct: Vec<(CurseForgeProjectId, CurseForgeFileId)> = wanted.clone();
     distinct.sort_unstable();
     distinct.dedup();
@@ -729,14 +717,7 @@ async fn resolve_files(
     );
 
     let outcomes: Vec<Result<CurseForgeFileRelease, ModPlatformError>> =
-        futures_util::stream::iter(
-            distinct
-                .iter()
-                .map(|(project, file)| operation.file(*project, *file, hosts, cancel)),
-        )
-        .buffered(LOOKUP_CONCURRENCY)
-        .collect::<Vec<_>>()
-        .await;
+        operation.exact_files(&distinct, hosts, cancel).await?;
 
     // Every resolved release, restricted or not: the one-file-per-project
     // choice (ADR 0031) must see a restricted duplicate too, or a discarded
@@ -1083,6 +1064,7 @@ fn recipe_entry(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    use std::collections::HashMap;
     use std::io::Write as _;
     use std::path::Path;
 
@@ -1173,6 +1155,131 @@ mod tests {
         let mut hasher = Sha1::new();
         hasher.update(body);
         hex::encode(hasher.finalize())
+    }
+
+    /// The documents one loopback server knows, answered through the batch
+    /// endpoints the way CurseForge does: the documents it has, with every
+    /// unknown id left out.
+    #[derive(Default)]
+    struct BatchDocuments {
+        files: HashMap<u64, serde_json::Value>,
+        projects: HashMap<u64, serde_json::Value>,
+    }
+
+    type SharedBatchDocuments = Arc<std::sync::Mutex<BatchDocuments>>;
+
+    /// Holds only a weak reference, so a pooled server that was reset (which
+    /// drops its mocks and with them the strong references) starts over empty.
+    static BATCH_DOCUMENTS: std::sync::LazyLock<
+        std::sync::Mutex<HashMap<String, std::sync::Weak<std::sync::Mutex<BatchDocuments>>>>,
+    > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+    struct BatchAnswer {
+        documents: SharedBatchDocuments,
+        ids_member: &'static str,
+        projects: bool,
+    }
+
+    impl wiremock::Respond for BatchAnswer {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("a JSON batch request");
+            let documents = self.documents.lock().expect("batch documents");
+            let known = if self.projects {
+                &documents.projects
+            } else {
+                &documents.files
+            };
+            let found: Vec<&serde_json::Value> = body[self.ids_member]
+                .as_array()
+                .expect("a list of ids")
+                .iter()
+                .filter_map(|id| known.get(&id.as_u64().expect("a numeric id")))
+                .collect();
+            ResponseTemplate::new(200).set_body_raw(
+                serde_json::json!({ "data": found }).to_string(),
+                "application/json",
+            )
+        }
+    }
+
+    /// The documents of `server`, mounting its two batch endpoints on first use.
+    async fn batch_documents(server: &MockServer) -> SharedBatchDocuments {
+        let existing = BATCH_DOCUMENTS
+            .lock()
+            .expect("registry")
+            .get(&server.uri())
+            .and_then(std::sync::Weak::upgrade);
+        if let Some(documents) = existing {
+            return documents;
+        }
+        let documents = SharedBatchDocuments::default();
+        BATCH_DOCUMENTS
+            .lock()
+            .expect("registry")
+            .insert(server.uri(), Arc::downgrade(&documents));
+        for (route, ids_member, projects) in [
+            ("/v1/mods/files", "fileIds", false),
+            ("/v1/mods", "modIds", true),
+        ] {
+            Mock::given(method("POST"))
+                .and(path(route))
+                .respond_with(BatchAnswer {
+                    documents: Arc::clone(&documents),
+                    ids_member,
+                    projects,
+                })
+                .mount(server)
+                .await;
+        }
+        documents
+    }
+
+    /// Makes `server` know `file`, from a `{"data":{...}}` document. The first
+    /// document registered for an id is the one answered.
+    async fn register_file(server: &MockServer, file: u32, document: &str) {
+        let document: serde_json::Value = serde_json::from_str(document).expect("a JSON document");
+        batch_documents(server)
+            .await
+            .lock()
+            .expect("batch documents")
+            .files
+            .entry(u64::from(file))
+            .or_insert(document["data"].clone());
+    }
+
+    /// The same for a project document.
+    async fn register_project(server: &MockServer, project: u32, document: &str) {
+        let document: serde_json::Value = serde_json::from_str(document).expect("a JSON document");
+        batch_documents(server)
+            .await
+            .lock()
+            .expect("batch documents")
+            .projects
+            .entry(u64::from(project))
+            .or_insert(document["data"].clone());
+    }
+
+    /// Every id the server was asked about through one batch endpoint, across
+    /// all of its requests, in the order asked.
+    async fn batch_requested_ids(server: &MockServer, route: &str, member: &str) -> Vec<u64> {
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .iter()
+            .filter(|request| request.method.as_str() == "POST" && request.url.path() == route)
+            .flat_map(|request| {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&request.body).expect("a JSON batch request");
+                body[member]
+                    .as_array()
+                    .expect("a list of ids")
+                    .iter()
+                    .map(|id| id.as_u64().expect("a numeric id"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The exact-file document for one artifact, as the API answers.
@@ -1271,22 +1378,20 @@ mod tests {
         game_versions: &[&str],
         file_date: &str,
     ) {
-        Mock::given(method("GET"))
-            .and(path(format!("/v1/mods/{project}/files/{file}")))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document_with_game_versions_and_date(
-                    server,
-                    project,
-                    file,
-                    name,
-                    body,
-                    game_versions,
-                    file_date,
-                ),
-                "application/json",
-            ))
-            .mount(server)
-            .await;
+        register_file(
+            server,
+            file,
+            &file_document_with_game_versions_and_date(
+                server,
+                project,
+                file,
+                name,
+                body,
+                game_versions,
+                file_date,
+            ),
+        )
+        .await;
         Mock::given(method("GET"))
             .and(path(format!("/files/{project}/{file}/{name}")))
             .respond_with(
@@ -1313,23 +1418,21 @@ mod tests {
             .map(|version| format!("\"{version}\""))
             .collect::<Vec<_>>()
             .join(",");
-        Mock::given(method("GET"))
-            .and(path(format!("/v1/mods/{project}/files/{file}")))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},
-                        "isAvailable":true,"fileName":"{name}","fileLength":{length},
-                        "downloadUrl":null,
-                        "gameVersions":[{game_versions}],
-                        "fileDate":"{file_date}",
-                        "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
-                    length = body.len(),
-                    digest = sha1_of(body),
-                ),
-                "application/json",
-            ))
-            .mount(server)
-            .await;
+        register_file(
+            server,
+            file,
+            &format!(
+                r#"{{"data":{{"id":{file},"gameId":432,"modId":{project},
+                    "isAvailable":true,"fileName":"{name}","fileLength":{length},
+                    "downloadUrl":null,
+                    "gameVersions":[{game_versions}],
+                    "fileDate":"{file_date}",
+                    "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
+                length = body.len(),
+                digest = sha1_of(body),
+            ),
+        )
+        .await;
     }
 
     /// The numeric id this test fixture's loopback server uses for the Mods
@@ -1382,7 +1485,7 @@ mod tests {
             .await;
     }
 
-    /// Serves one project's classification, as `GET /v1/mods/{id}` answers.
+    /// Serves one project's classification, as `POST /v1/mods` answers.
     async fn serve_project_class(server: &MockServer, project: u32, name: &str, class_id: u32) {
         serve_project_raw(server, project, name, &format!(r#""classId":{class_id}"#)).await;
     }
@@ -1396,14 +1499,14 @@ mod tests {
     /// Serves one project's classification with a hand-written `classId`
     /// member, so a test can name a class the categories fixture never listed.
     async fn serve_project_raw(server: &MockServer, project: u32, name: &str, class_member: &str) {
+        let document = format!(
+            r#"{{"data":{{"id":{project},"gameId":432,"name":"{name}","slug":"{name}",{class_member}}}}}"#
+        );
+        register_project(server, project, &document).await;
+        // The mod browser still reads one project by its own address.
         Mock::given(method("GET"))
             .and(path(format!("/v1/mods/{project}")))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    r#"{{"data":{{"id":{project},"gameId":432,"name":"{name}","slug":"{name}",{class_member}}}}}"#
-                ),
-                "application/json",
-            ))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(document, "application/json"))
             .mount(server)
             .await;
     }
@@ -1418,14 +1521,12 @@ mod tests {
 
     /// Serves one exact file's metadata and its bytes.
     async fn serve_file(server: &MockServer, project: u32, file: u32, name: &str, body: &[u8]) {
-        Mock::given(method("GET"))
-            .and(path(format!("/v1/mods/{project}/files/{file}")))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document(server, project, file, name, body),
-                "application/json",
-            ))
-            .mount(server)
-            .await;
+        register_file(
+            server,
+            file,
+            &file_document(server, project, file, name, body),
+        )
+        .await;
         Mock::given(method("GET"))
             .and(path(format!("/files/{project}/{file}/{name}")))
             .respond_with(
@@ -1622,14 +1723,12 @@ mod tests {
         body: &[u8],
         relations: &[(u32, u32)],
     ) {
-        Mock::given(method("GET"))
-            .and(path(format!("/v1/mods/{project}/files/{file}")))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document_with_relations(server, project, file, name, body, relations),
-                "application/json",
-            ))
-            .mount(server)
-            .await;
+        register_file(
+            server,
+            file,
+            &file_document_with_relations(server, project, file, name, body, relations),
+        )
+        .await;
         Mock::given(method("GET"))
             .and(path(format!("/files/{project}/{file}/{name}")))
             .respond_with(
@@ -1852,23 +1951,19 @@ mod tests {
         // itself, and that is what the recipe must record for the server.
         let server = MockServer::start().await;
         serve_pack_as_mods(&server).await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document_with_environment(
-                    &server,
-                    REQUIRED_PROJECT,
-                    REQUIRED_FILE,
-                    "required-1.0.0.jar",
-                    REQUIRED_BODY,
-                    &["Client", "1.20.1", "Forge"],
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+        register_file(
+            &server,
+            REQUIRED_FILE,
+            &file_document_with_environment(
+                &server,
+                REQUIRED_PROJECT,
+                REQUIRED_FILE,
+                "required-1.0.0.jar",
+                REQUIRED_BODY,
+                &["Client", "1.20.1", "Forge"],
+            ),
+        )
+        .await;
         Mock::given(method("GET"))
             .and(path(format!(
                 "/files/{REQUIRED_PROJECT}/{REQUIRED_FILE}/required-1.0.0.jar"
@@ -1905,27 +2000,23 @@ mod tests {
 
     #[tokio::test]
     async fn the_exact_declared_file_is_requested_and_a_newer_one_is_never_substituted() {
-        // The regression this whole design exists for. The API is told to
-        // answer about a *newer* file for the same project; the import must
-        // refuse rather than install it.
+        // The regression this whole design exists for. The API is asked for
+        // the pinned file and answers only about a *newer* one of the same
+        // project; the import must refuse rather than install it.
         let server = MockServer::start().await;
         serve_pack_as_mods(&server).await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document(
-                    &server,
-                    REQUIRED_PROJECT,
-                    REQUIRED_FILE + 1,
-                    "required-2.0.0.jar",
-                    REQUIRED_BODY,
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+        register_file(
+            &server,
+            REQUIRED_FILE,
+            &file_document(
+                &server,
+                REQUIRED_PROJECT,
+                REQUIRED_FILE + 1,
+                "required-2.0.0.jar",
+                REQUIRED_BODY,
+            ),
+        )
+        .await;
         serve_file(
             &server,
             OPTIONAL_PROJECT,
@@ -1940,14 +2031,14 @@ mod tests {
         let app = app_against(dir.path(), &server);
 
         let error = import(&app, &archive).await.expect_err("must refuse");
-        assert_eq!(error.message_id(), "error-mod-file-identity-mismatch");
+        assert_eq!(error.message_id(), "error-mod-file-unknown");
         assert!(app.list_clients().expect("list").is_empty());
 
-        // Only the exact file endpoint, project classification, and artifact
-        // delivery were asked; nothing listed the project's versions looking
-        // for something that would fit. A "list this project's files" request
-        // has no file id segment, which is exactly what distinguishes it from
-        // every path allowed here.
+        // Only the batch file and project endpoints, class discovery, and
+        // artifact delivery were asked; nothing listed the project's versions
+        // looking for something that would fit. A "list this project's files"
+        // request is `/v1/mods/{id}/files`, which none of the paths allowed
+        // here has.
         let paths: Vec<String> = server
             .received_requests()
             .await
@@ -1958,12 +2049,9 @@ mod tests {
         assert!(
             paths.iter().all(|requested| {
                 requested == "/v1/categories"
-                    || requested.contains("/files/")
+                    || requested == "/v1/mods/files"
+                    || requested == "/v1/mods"
                     || requested.starts_with("/files/")
-                    // Project classification: `/v1/mods/{id}` exactly, with no
-                    // further segment, the shape a "list this project's
-                    // files" request would have and this never does.
-                    || (requested.starts_with("/v1/mods/") && !requested[9..].contains('/'))
             }),
             "{paths:?}"
         );
@@ -1979,27 +2067,19 @@ mod tests {
 
         import(&app, &archive).await.expect("import");
 
-        let recorded = server.received_requests().await.expect("recorded");
-        let file_lookups = recorded
-            .iter()
-            .filter(|request| {
-                request.url.path().contains("/files/") && !request.url.path().starts_with("/files/")
-            })
-            .count();
+        let mut file_lookups = batch_requested_ids(&server, "/v1/mods/files", "fileIds").await;
+        file_lookups.sort_unstable();
         assert_eq!(
-            file_lookups, 2,
-            "one exact-file request per declared file, and no more"
+            file_lookups,
+            [u64::from(REQUIRED_FILE), u64::from(OPTIONAL_FILE)],
+            "each declared file is asked about once, and no more"
         );
-        let class_lookups = recorded
-            .iter()
-            .filter(|request| {
-                request.url.path().starts_with("/v1/mods/")
-                    && !request.url.path().contains("/files/")
-            })
-            .count();
+        let mut class_lookups = batch_requested_ids(&server, "/v1/mods", "modIds").await;
+        class_lookups.sort_unstable();
         assert_eq!(
-            class_lookups, 2,
-            "one classification request per declared project, and no more"
+            class_lookups,
+            [u64::from(REQUIRED_PROJECT), u64::from(OPTIONAL_PROJECT)],
+            "each declared project is asked about once, and no more"
         );
     }
 
@@ -2039,15 +2119,9 @@ mod tests {
             .await
             .expect("both entries name a Mod project");
 
-        let classifications = server
-            .received_requests()
-            .await
-            .expect("recorded")
-            .iter()
-            .filter(|request| request.url.path() == format!("/v1/mods/{REQUIRED_PROJECT}"))
-            .count();
         assert_eq!(
-            classifications, 1,
+            batch_requested_ids(&server, "/v1/mods", "modIds").await,
+            [u64::from(REQUIRED_PROJECT)],
             "one project named by two pending entries is classified once"
         );
     }
@@ -2617,21 +2691,12 @@ mod tests {
         // A confirmed Resource Pack whose author disabled third-party
         // downloads: the same conservative refusal a restricted mod gets,
         // never a substitution and never an omission.
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
+        register_file(&server, OPTIONAL_FILE, &format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
                         "downloadUrl":null,
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                )).await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -2890,21 +2955,12 @@ mod tests {
             REQUIRED_BODY,
         )
         .await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
+        register_file(&server, OPTIONAL_FILE, &format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.zip","fileLength":10,
                         "downloadUrl":null,
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                )).await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -3012,22 +3068,18 @@ mod tests {
     async fn a_body_that_does_not_match_the_published_digest_publishes_no_instance() {
         let server = MockServer::start().await;
         serve_pack_as_mods(&server).await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                file_document(
-                    &server,
-                    REQUIRED_PROJECT,
-                    REQUIRED_FILE,
-                    "required-1.0.0.jar",
-                    REQUIRED_BODY,
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+        register_file(
+            &server,
+            REQUIRED_FILE,
+            &file_document(
+                &server,
+                REQUIRED_PROJECT,
+                REQUIRED_FILE,
+                "required-1.0.0.jar",
+                REQUIRED_BODY,
+            ),
+        )
+        .await;
         // The declared size still matches, so only the digest can catch this.
         Mock::given(method("GET"))
             .and(path(format!(
@@ -3064,21 +3116,12 @@ mod tests {
     async fn a_file_whose_author_forbids_third_party_downloads_stops_the_import_explicitly() {
         let server = MockServer::start().await;
         serve_pack_as_mods(&server).await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
+        register_file(&server, REQUIRED_FILE, &format!(
                     r#"{{"data":{{"id":{REQUIRED_FILE},"gameId":432,"modId":{REQUIRED_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
                         "downloadUrl":null,
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                )).await;
         serve_file(
             &server,
             OPTIONAL_PROJECT,
@@ -3118,22 +3161,13 @@ mod tests {
             REQUIRED_BODY,
         )
         .await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
+        register_file(&server, OPTIONAL_FILE, &format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
                         "downloadUrl":null,
                         "dependencies":[{{"modId":{REQUIRED_PROJECT},"relationType":3}}],
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                )).await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -3191,23 +3225,19 @@ mod tests {
         )
         .await;
         let digest = sha1_of(RESTRICTED_BODY);
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
+        register_file(
+            &server,
+            OPTIONAL_FILE,
+            &format!(
+                r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":{length},
                         "downloadUrl":null,
                         "dependencies":[{{"modId":{REQUIRED_PROJECT},"relationType":3}}],
                         "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
-                    length = RESTRICTED_BODY.len(),
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                length = RESTRICTED_BODY.len(),
+            ),
+        )
+        .await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -3273,21 +3303,12 @@ mod tests {
             REQUIRED_BODY,
         )
         .await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{OPTIONAL_PROJECT}/files/{OPTIONAL_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
+        register_file(&server, OPTIONAL_FILE, &format!(
                     r#"{{"data":{{"id":{OPTIONAL_FILE},"gameId":432,"modId":{OPTIONAL_PROJECT},
                         "isAvailable":true,"fileName":"restricted.jar","fileLength":10,
                         "downloadUrl":null,
                         "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}}}"#
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                )).await;
 
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = archive_at(dir.path(), "repro.zip");
@@ -3819,22 +3840,18 @@ mod tests {
     async fn a_download_address_off_the_permitted_hosts_is_refused_rather_than_followed() {
         let server = MockServer::start().await;
         serve_pack_as_mods(&server).await;
-        Mock::given(method("GET"))
-            .and(path(format!(
-                "/v1/mods/{REQUIRED_PROJECT}/files/{REQUIRED_FILE}"
-            )))
-            .respond_with(ResponseTemplate::new(200).set_body_raw(
-                format!(
-                    r#"{{"data":{{"id":{REQUIRED_FILE},"gameId":432,"modId":{REQUIRED_PROJECT},
+        register_file(
+            &server,
+            REQUIRED_FILE,
+            &format!(
+                r#"{{"data":{{"id":{REQUIRED_FILE},"gameId":432,"modId":{REQUIRED_PROJECT},
                         "isAvailable":true,"fileName":"required-1.0.0.jar","fileLength":20,
                         "downloadUrl":"https://evil.example/required-1.0.0.jar",
                         "hashes":[{{"value":"{digest}","algo":1}}]}}}}"#,
-                    digest = sha1_of(REQUIRED_BODY),
-                ),
-                "application/json",
-            ))
-            .mount(&server)
-            .await;
+                digest = sha1_of(REQUIRED_BODY),
+            ),
+        )
+        .await;
         serve_file(
             &server,
             OPTIONAL_PROJECT,
@@ -4051,14 +4068,12 @@ mod tests {
                 OPTIONAL_BODY,
             ),
         ] {
-            Mock::given(method("GET"))
-                .and(path(format!("/v1/mods/{project}/files/{file}")))
-                .respond_with(ResponseTemplate::new(200).set_body_raw(
-                    file_document(server, project, file, name, body),
-                    "application/json",
-                ))
-                .mount(server)
-                .await;
+            register_file(
+                server,
+                file,
+                &file_document(server, project, file, name, body),
+            )
+            .await;
             Mock::given(method("GET"))
                 .and(path(format!("/files/{project}/{file}/{name}")))
                 .and(header(CURSEFORGE_API_KEY_HEADER, FAKE_KEY))
@@ -4303,9 +4318,9 @@ mod tests {
         let imported = import_then_evict(&app, &archive).await;
         let (metadata_before, _) = artifact_requests(&server, "/v1/").await;
         assert_eq!(
-            metadata_before, 5,
-            "one categories lookup, one classification and one exact-file \
-             lookup per declared project during import, and no more"
+            metadata_before, 3,
+            "one categories lookup, one batch classification and one batch \
+             exact-file lookup during import, and no more"
         );
 
         let target = reconstruct_server(&app, &imported, &dir.path().join("server"))

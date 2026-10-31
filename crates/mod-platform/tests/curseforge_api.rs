@@ -792,3 +792,575 @@ async fn an_empty_fingerprint_batch_contacts_nobody() {
             .is_empty()
     );
 }
+
+// -- batched exact files and projects -------------------------------------
+
+const BATCH_FILES_PATH: &str = "/v1/mods/files";
+const BATCH_PROJECTS_PATH: &str = "/v1/mods";
+
+fn project_of(id: u32) -> CurseForgeProjectId {
+    CurseForgeProjectId::new(id).expect("a real id")
+}
+
+fn file_of(id: u32) -> CurseForgeFileId {
+    CurseForgeFileId::new(id).expect("a real id")
+}
+
+/// A file document for `file` of `project` that anyone may download.
+fn batch_file_document(project: u32, file: u32) -> String {
+    batch_file_document_with(
+        project,
+        file,
+        true,
+        4,
+        Some("https://mediafilez.forgecdn.net/f.jar"),
+    )
+}
+
+fn batch_file_document_with(
+    project: u32,
+    file: u32,
+    available: bool,
+    status: u32,
+    download_url: Option<&str>,
+) -> String {
+    let url = download_url.map_or_else(|| "null".to_owned(), |url| format!("\"{url}\""));
+    format!(
+        r#"{{"id":{file},"gameId":432,"modId":{project},"isAvailable":{available},
+        "displayName":"f{file}","fileName":"f{file}.jar","releaseType":1,
+        "fileStatus":{status},"fileLength":10,"downloadUrl":{url},
+        "hashes":[{{"value":"da39a3ee5e6b4b0d3255bfef95601890afd80709","algo":1}}]}}"#
+    )
+}
+
+fn batch_project_document(id: u32) -> String {
+    format!(
+        r#"{{"id":{id},"gameId":432,"name":"Project {id}","slug":"project-{id}","summary":"s","classId":6}}"#
+    )
+}
+
+fn data_envelope(documents: &[String]) -> String {
+    format!(r#"{{"data":[{}]}}"#, documents.join(","))
+}
+
+async fn mount_batch(server: &MockServer, route: &str, status: u16, body: String) {
+    Mock::given(method("POST"))
+        .and(path(route))
+        .and(header(API_KEY_HEADER, FAKE_KEY))
+        .respond_with(ResponseTemplate::new(status).set_body_raw(body, "application/json"))
+        .mount(server)
+        .await;
+}
+
+/// The id lists each POST to `route` carried, under `key`, in request order.
+async fn posted_ids(server: &MockServer, route: &str, key: &str) -> Vec<Vec<u64>> {
+    server
+        .received_requests()
+        .await
+        .expect("recorded")
+        .iter()
+        .filter(|request| request.url.path() == route)
+        .map(|request| {
+            assert_eq!(request.method.as_str(), "POST");
+            let body: serde_json::Value = request.body_json().expect("a json body");
+            body[key]
+                .as_array()
+                .unwrap_or_else(|| panic!("no `{key}` array in {body}"))
+                .iter()
+                .map(|id| id.as_u64().expect("a numeric id"))
+                .collect()
+        })
+        .collect()
+}
+
+/// Answers every batch file request with the documents for the ids it carries.
+struct EchoFiles;
+
+impl wiremock::Respond for EchoFiles {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = request.body_json().expect("a json body");
+        let documents: Vec<String> = body["fileIds"]
+            .as_array()
+            .expect("file ids")
+            .iter()
+            .map(|id| {
+                let file = u32::try_from(id.as_u64().expect("numeric")).expect("fits");
+                batch_file_document(1000 + file % 7, file)
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_raw(data_envelope(&documents), "application/json")
+    }
+}
+
+/// Answers every batch project request with the documents for the ids it carries.
+struct EchoProjects;
+
+impl wiremock::Respond for EchoProjects {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        let body: serde_json::Value = request.body_json().expect("a json body");
+        let documents: Vec<String> = body["modIds"]
+            .as_array()
+            .expect("project ids")
+            .iter()
+            .map(|id| {
+                batch_project_document(u32::try_from(id.as_u64().expect("numeric")).expect("fits"))
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_raw(data_envelope(&documents), "application/json")
+    }
+}
+
+async fn exact_files_from(
+    server: &MockServer,
+    wanted: &[(CurseForgeProjectId, CurseForgeFileId)],
+) -> Result<
+    Vec<Result<ephervex_mod_platform::CurseForgeFileRelease, ModPlatformError>>,
+    ModPlatformError,
+> {
+    configured(server)
+        .begin_operation()
+        .expect("a configured key")
+        .exact_files(wanted, &delivery_hosts(), &CancellationToken::new())
+        .await
+}
+
+async fn exact_projects_from(
+    server: &MockServer,
+    projects: &[CurseForgeProjectId],
+) -> Result<Vec<Result<ephervex_mod_platform::CurseForgeProject, ModPlatformError>>, ModPlatformError>
+{
+    configured(server)
+        .begin_operation()
+        .expect("a configured key")
+        .exact_projects(projects, &CancellationToken::new())
+        .await
+}
+
+#[tokio::test]
+async fn several_exact_files_are_resolved_in_one_post_carrying_exactly_the_wanted_file_ids() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[
+            batch_file_document(10, 101),
+            batch_file_document(20, 202),
+            batch_file_document(30, 303),
+        ]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(20), file_of(202)),
+            (project_of(30), file_of(303)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    assert_eq!(outcomes.len(), 3);
+    assert!(outcomes.iter().all(Result::is_ok), "{outcomes:?}");
+    assert_eq!(
+        posted_ids(&server, BATCH_FILES_PATH, "fileIds").await,
+        vec![vec![101, 202, 303]]
+    );
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 1);
+}
+
+#[tokio::test]
+async fn a_file_id_wanted_under_two_projects_is_sent_once_and_only_the_matching_pair_resolves() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[batch_file_document(10, 101)]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(20), file_of(101)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    assert!(outcomes[0].is_ok(), "{outcomes:?}");
+    assert!(
+        matches!(outcomes[1], Err(ModPlatformError::FileUnknown { .. })),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        posted_ids(&server, BATCH_FILES_PATH, "fileIds").await,
+        vec![vec![101]],
+        "the id is sent once"
+    );
+}
+
+#[tokio::test]
+async fn exact_file_outcomes_follow_the_order_asked_whatever_order_the_server_answers_in() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[
+            batch_file_document(30, 303),
+            batch_file_document(10, 101),
+            batch_file_document(20, 202),
+        ]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(20), file_of(202)),
+            (project_of(30), file_of(303)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    let resolved: Vec<(u32, u32)> = outcomes
+        .into_iter()
+        .map(|outcome| {
+            let release = outcome.expect("resolved");
+            (release.project.get(), release.file.get())
+        })
+        .collect();
+    assert_eq!(resolved, vec![(10, 101), (20, 202), (30, 303)]);
+}
+
+#[tokio::test]
+async fn an_exact_file_the_server_leaves_out_is_unknown_while_the_others_still_resolve() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[batch_file_document(10, 101), batch_file_document(30, 303)]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(20), file_of(202)),
+            (project_of(30), file_of(303)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    assert_eq!(outcomes[0].as_ref().expect("resolved").file.get(), 101);
+    assert!(
+        matches!(
+            &outcomes[1],
+            Err(ModPlatformError::FileUnknown { project_id, file_id, .. })
+                if project_id == "20" && file_id == "202"
+        ),
+        "{:?}",
+        outcomes[1]
+    );
+    assert_eq!(outcomes[2].as_ref().expect("resolved").file.get(), 303);
+}
+
+#[tokio::test]
+async fn an_exact_file_returned_only_under_another_project_is_unknown_and_never_used() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[batch_file_document(99, 101), batch_file_document(30, 303)]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(30), file_of(303)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    assert!(
+        matches!(
+            &outcomes[0],
+            Err(ModPlatformError::FileUnknown { project_id, file_id, .. })
+                if project_id == "10" && file_id == "101"
+        ),
+        "{:?}",
+        outcomes[0]
+    );
+    assert!(outcomes[1].is_ok(), "{:?}", outcomes[1]);
+}
+
+#[tokio::test]
+async fn more_than_a_hundred_exact_files_are_sent_as_several_requests_and_each_gets_an_outcome() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(BATCH_FILES_PATH))
+        .respond_with(EchoFiles)
+        .mount(&server)
+        .await;
+
+    let wanted: Vec<_> = (1..=250u32)
+        .map(|file| (project_of(1000 + file % 7), file_of(file)))
+        .collect();
+    let outcomes = exact_files_from(&server, &wanted)
+        .await
+        .expect("every request succeeds");
+
+    assert_eq!(outcomes.len(), 250);
+    for (outcome, (project, file)) in outcomes.iter().zip(&wanted) {
+        let release = outcome.as_ref().expect("resolved");
+        assert_eq!((release.project, release.file), (*project, *file));
+    }
+    let batches = posted_ids(&server, BATCH_FILES_PATH, "fileIds").await;
+    assert_eq!(batches.len(), 3);
+    assert!(batches.iter().all(|ids| ids.len() <= 100), "{batches:?}");
+    let mut sent: Vec<u64> = batches.into_iter().flatten().collect();
+    sent.sort_unstable();
+    assert_eq!(sent, (1..=250u64).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn each_pair_in_an_exact_file_batch_is_judged_on_its_own_without_spoiling_the_others() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_FILES_PATH,
+        200,
+        data_envelope(&[
+            batch_file_document(10, 101),
+            // Withdrawn, no address: nothing serves it.
+            batch_file_document_with(20, 202, false, 4, None),
+            // Archived but still served from an address: still the pinned file.
+            batch_file_document_with(
+                30,
+                303,
+                false,
+                8,
+                Some("https://mediafilez.forgecdn.net/archived.jar"),
+            ),
+            // An address outside the approved hosts.
+            batch_file_document_with(40, 404, true, 4, Some("https://unapproved.invalid/a.jar")),
+            batch_file_document(50, 505),
+        ]),
+    )
+    .await;
+
+    let outcomes = exact_files_from(
+        &server,
+        &[
+            (project_of(10), file_of(101)),
+            (project_of(20), file_of(202)),
+            (project_of(30), file_of(303)),
+            (project_of(40), file_of(404)),
+            (project_of(50), file_of(505)),
+        ],
+    )
+    .await
+    .expect("the request succeeds");
+
+    assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
+    assert!(
+        matches!(
+            &outcomes[1],
+            Err(ModPlatformError::FileUnavailable { project_id, file_id, .. })
+                if project_id == "20" && file_id == "202"
+        ),
+        "{:?}",
+        outcomes[1]
+    );
+    let archived = outcomes[2].as_ref().expect("an archived file is accepted");
+    assert_eq!(
+        archived.artifact.distribution.download_url(),
+        Some("https://mediafilez.forgecdn.net/archived.jar")
+    );
+    assert!(
+        matches!(
+            &outcomes[3],
+            Err(ModPlatformError::DownloadAddressRejected { .. })
+        ),
+        "{:?}",
+        outcomes[3]
+    );
+    assert!(outcomes[4].is_ok(), "{:?}", outcomes[4]);
+}
+
+#[tokio::test]
+async fn a_failing_exact_file_batch_request_fails_the_whole_call() {
+    for status in [403, 500] {
+        let server = MockServer::start().await;
+        mount_batch(&server, BATCH_FILES_PATH, status, "{}".to_owned()).await;
+
+        let error = exact_files_from(
+            &server,
+            &[
+                (project_of(10), file_of(101)),
+                (project_of(20), file_of(202)),
+            ],
+        )
+        .await
+        .expect_err("the request failed");
+
+        match (status, &error) {
+            (403, ModPlatformError::CredentialRejected { status: 403, .. })
+            | (500, ModPlatformError::HttpStatus { status: 500, .. }) => {}
+            _ => panic!("{status} produced {error:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_empty_exact_file_batch_sends_no_request() {
+    let server = MockServer::start().await;
+
+    let outcomes = exact_files_from(&server, &[])
+        .await
+        .expect("nothing to ask about");
+
+    assert!(outcomes.is_empty());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn several_exact_projects_are_resolved_in_one_post_and_keep_the_order_asked() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_PROJECTS_PATH,
+        200,
+        data_envelope(&[
+            batch_project_document(30),
+            batch_project_document(10),
+            batch_project_document(20),
+        ]),
+    )
+    .await;
+
+    let outcomes = exact_projects_from(&server, &[project_of(10), project_of(20), project_of(30)])
+        .await
+        .expect("the request succeeds");
+
+    let resolved: Vec<u32> = outcomes
+        .into_iter()
+        .map(|outcome| outcome.expect("resolved").id)
+        .collect();
+    assert_eq!(resolved, vec![10, 20, 30]);
+    assert_eq!(
+        posted_ids(&server, BATCH_PROJECTS_PATH, "modIds").await,
+        vec![vec![10, 20, 30]]
+    );
+    assert_eq!(server.received_requests().await.expect("recorded").len(), 1);
+}
+
+#[tokio::test]
+async fn an_exact_project_the_server_leaves_out_is_unknown_while_the_others_still_resolve() {
+    let server = MockServer::start().await;
+    mount_batch(
+        &server,
+        BATCH_PROJECTS_PATH,
+        200,
+        data_envelope(&[batch_project_document(10), batch_project_document(30)]),
+    )
+    .await;
+
+    let outcomes = exact_projects_from(&server, &[project_of(10), project_of(20), project_of(30)])
+        .await
+        .expect("the request succeeds");
+
+    assert_eq!(outcomes[0].as_ref().expect("resolved").id, 10);
+    assert!(
+        matches!(
+            &outcomes[1],
+            Err(ModPlatformError::ProjectUnknown { reference, .. }) if reference == "20"
+        ),
+        "{:?}",
+        outcomes[1]
+    );
+    assert_eq!(outcomes[2].as_ref().expect("resolved").id, 30);
+}
+
+#[tokio::test]
+async fn more_than_a_hundred_exact_projects_are_sent_as_several_requests_and_each_gets_an_outcome()
+{
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(BATCH_PROJECTS_PATH))
+        .respond_with(EchoProjects)
+        .mount(&server)
+        .await;
+
+    let projects: Vec<_> = (1..=250u32).map(project_of).collect();
+    let outcomes = exact_projects_from(&server, &projects)
+        .await
+        .expect("every request succeeds");
+
+    assert_eq!(outcomes.len(), 250);
+    for (outcome, project) in outcomes.iter().zip(&projects) {
+        assert_eq!(outcome.as_ref().expect("resolved").id, project.get());
+    }
+    let batches = posted_ids(&server, BATCH_PROJECTS_PATH, "modIds").await;
+    assert_eq!(batches.len(), 3);
+    assert!(batches.iter().all(|ids| ids.len() <= 100), "{batches:?}");
+    let mut sent: Vec<u64> = batches.into_iter().flatten().collect();
+    sent.sort_unstable();
+    assert_eq!(sent, (1..=250u64).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_failing_exact_project_batch_request_fails_the_whole_call() {
+    for status in [403, 500] {
+        let server = MockServer::start().await;
+        mount_batch(&server, BATCH_PROJECTS_PATH, status, "{}".to_owned()).await;
+
+        let error = exact_projects_from(&server, &[project_of(10), project_of(20)])
+            .await
+            .expect_err("the request failed");
+
+        match (status, &error) {
+            (403, ModPlatformError::CredentialRejected { status: 403, .. })
+            | (500, ModPlatformError::HttpStatus { status: 500, .. }) => {}
+            _ => panic!("{status} produced {error:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_empty_exact_project_batch_sends_no_request() {
+    let server = MockServer::start().await;
+
+    let outcomes = exact_projects_from(&server, &[])
+        .await
+        .expect("nothing to ask about");
+
+    assert!(outcomes.is_empty());
+    assert!(
+        server
+            .received_requests()
+            .await
+            .expect("recorded")
+            .is_empty()
+    );
+}
