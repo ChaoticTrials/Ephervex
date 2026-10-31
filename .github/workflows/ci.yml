@@ -4,9 +4,11 @@
 # here is what a release will find rather than a different toolchain's opinion
 # of the tree.
 #
-# Three jobs on three runners. Lints and tests each build the whole workspace in
-# a different mode and neither can reuse the other's output, so apart each has a
-# fresh disk and memory of its own, and they run at the same time.
+# Separate jobs on separate runners. Lints and tests each build the whole
+# workspace in a different mode and neither can reuse the other's output, so
+# apart each has a fresh disk and memory of its own, and they run at the same
+# time. The tests run once per release architecture, because what a binary does
+# on its own machine is not deducible from what it does on another.
 
 name: CI
 
@@ -100,8 +102,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: test
-    runs-on: ubuntu-latest
+    strategy:
+      # One architecture failing should not hide whether the other passes.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          # GitHub's hosted arm64 Linux runners. There is no `-latest` form of
+          # the label, so it names a release.
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    name: test ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     env:
       # One rustc at a time: compiling the interface crate's generated code
       # takes about 14 GB, and a hosted runner has 16.
