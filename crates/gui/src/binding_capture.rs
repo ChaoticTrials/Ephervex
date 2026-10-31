@@ -136,19 +136,19 @@ impl CustomApplicationHandler for BindingCaptureReader {
                 is_synthetic: false,
                 ..
             } => {
-                if event.state.is_pressed() && !event.repeat {
-                    if let winit::keyboard::PhysicalKey::Code(code) = event.physical_key {
-                        if let Some(key) = physical_key_of_code(code) {
-                            self.pending = Some(CapturedInput::Key(key));
-                        }
-                    }
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && let winit::keyboard::PhysicalKey::Code(code) = event.physical_key
+                    && let Some(key) = physical_key_of_code(code)
+                {
+                    self.pending = Some(CapturedInput::Key(key));
                 }
             }
             winit::event::WindowEvent::MouseInput { state, button, .. } => {
-                if state.is_pressed() {
-                    if let Some(button) = mouse_button_of_winit(*button) {
-                        self.pending = Some(CapturedInput::Mouse(button));
-                    }
+                if state.is_pressed()
+                    && let Some(button) = mouse_button_of_winit(*button)
+                {
+                    self.pending = Some(CapturedInput::Mouse(button));
                 }
             }
             // Everything else, pointer motion included, is left alone: only

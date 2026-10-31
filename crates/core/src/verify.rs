@@ -619,32 +619,32 @@ impl App {
                     // Deleting the outgoing copy is allowed to fail: a leftover
                     // in launcher-owned scratch is invisible to the game. It
                     // remains a typed recovery issue until reviewed.
-                    if let Some(retired) = &retired {
-                        if let Err(error) = std::fs::remove_file(&retired.to) {
-                            report.recovery_issues.push(MutationRecoveryIssue {
-                                action: MutationRecoveryAction::RemoveRetired,
-                                path: retired.to.clone(),
-                                error_kind: error.kind(),
-                            });
-                        }
+                    if let Some(retired) = &retired
+                        && let Err(error) = std::fs::remove_file(&retired.to)
+                    {
+                        report.recovery_issues.push(MutationRecoveryIssue {
+                            action: MutationRecoveryAction::RemoveRetired,
+                            path: retired.to.clone(),
+                            error_kind: error.kind(),
+                        });
                     }
                     // The replacement is written where an enabled jar goes. A
                     // jar the user or an isolation round turned off stays off.
-                    if retired.as_ref().is_some_and(|retired| retired.was_disabled) {
-                        if let Err(error) = self.set_mod_enabled(host, &path, false) {
-                            warn!(%error, path = %path.display(), "a repaired jar could not be turned off again");
-                            report.failed.push(path);
-                            continue;
-                        }
+                    if retired.as_ref().is_some_and(|retired| retired.was_disabled)
+                        && let Err(error) = self.set_mod_enabled(host, &path, false)
+                    {
+                        warn!(%error, path = %path.display(), "a repaired jar could not be turned off again");
+                        report.failed.push(path);
+                        continue;
                     }
                     report.repaired.push(path);
                 }
                 Err(error) => {
                     warn!(%error, path = %path.display(), "a file could not be repaired");
-                    if let Some(retired) = retired {
-                        if let Some(issue) = restore_retired(&retired.to, &retired.from) {
-                            report.recovery_issues.push(issue);
-                        }
+                    if let Some(retired) = retired
+                        && let Some(issue) = restore_retired(&retired.to, &retired.from)
+                    {
+                        report.recovery_issues.push(issue);
                     }
                     // Stopped rather than defeated: the file was never
                     // replaced, and it is not a fault to try again for.

@@ -245,7 +245,7 @@ const MAX_SWEEP_DEPTH: usize = 4;
 ///
 /// Only an unpack that predates owner markers writes one, and writing a
 /// single native takes seconds.
-const UNOWNED_TEMPORARY_MIN_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const UNOWNED_TEMPORARY_MIN_AGE: Duration = Duration::from_hours(24);
 
 /// Whether `name` has the shape of a temporary [`create_temporary_sibling`]
 /// makes: `.<native>.<pid>.<counter>.part`.
@@ -704,7 +704,7 @@ mod tests {
         let owner = ScratchOwner::claim(&live).expect("claim");
         leave_temporary(destination.path(), ".libbig.so.4242.0.part");
         // Even a long-unmodified file is live while its owner holds the marker.
-        age(&live, Duration::from_secs(10 * 24 * 60 * 60));
+        age(&live, Duration::from_hours(240));
 
         extract(archive.path(), destination.path(), &[]).expect("unpack");
 

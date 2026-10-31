@@ -77,7 +77,7 @@ mod tests {
     fn an_ordinary_lifetime_is_kept_exactly() {
         let lifetime = Lifetime::from_seconds(86_400);
         assert_eq!(lifetime.seconds(), 86_400);
-        assert_eq!(lifetime.remaining(), Duration::from_secs(86_400));
+        assert_eq!(lifetime.remaining(), Duration::from_hours(24));
         assert!(lifetime.is_positive());
     }
 

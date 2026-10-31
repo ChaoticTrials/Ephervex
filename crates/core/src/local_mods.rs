@@ -382,10 +382,10 @@ impl App {
             // folder as it was. A record dropped for a file that then fails to
             // copy only leaves the old jar unrecorded, which a refresh
             // identifies again.
-            if record == Recorded::Replaceable {
-                if let Some(recipe) = recipe.as_mut() {
-                    forget_replaced_record(&layout, recipe, &file_name)?;
-                }
+            if record == Recorded::Replaceable
+                && let Some(recipe) = recipe.as_mut()
+            {
+                forget_replaced_record(&layout, recipe, &file_name)?;
             }
             publish_local_mod(source, &staging, &dir, &file_name)?;
             if existed {

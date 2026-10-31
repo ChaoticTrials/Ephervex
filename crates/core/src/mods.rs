@@ -445,10 +445,8 @@ fn record_identified(root: &Path, side: PackSide, adopted: &[IdentifiedJar]) {
         }
     }
 
-    if changed {
-        if let Err(error) = store.write_recipe(&recipe) {
-            warn!(%error, "identified mods could not be recorded");
-        }
+    if changed && let Err(error) = store.write_recipe(&recipe) {
+        warn!(%error, "identified mods could not be recorded");
     }
 }
 
@@ -515,11 +513,11 @@ async fn still_hashed(game_dir: &Path, adopted: Vec<IdentifiedJar>) -> Vec<Ident
         let installed = game_dir.join(&jar.entry.logical_path);
         let mut holds = false;
         for path in [disabled_path(&installed), installed] {
-            if let Ok(now) = hash_file(&path, hashed.algorithm).await {
-                if now == *hashed {
-                    holds = true;
-                    break;
-                }
+            if let Ok(now) = hash_file(&path, hashed.algorithm).await
+                && now == *hashed
+            {
+                holds = true;
+                break;
             }
         }
         if holds {
@@ -1861,16 +1859,16 @@ impl App {
                 // The releases just fetched state what each mod requires. Kept,
                 // so refreshing the list leaves dependency questions answered
                 // exactly as an explicit dependency refresh would.
-                if let Some(_gate) = host_recipe_gate::hold(self.registry(), host, cancel).await {
-                    if let Err(error) = self.record_declared_relations(
+                if let Some(_gate) = host_recipe_gate::hold(self.registry(), host, cancel).await
+                    && let Err(error) = self.record_declared_relations(
                         host,
                         details
                             .versions
                             .iter()
                             .map(|((catalog, _), version)| (*catalog, version)),
-                    ) {
-                        warn!(%error, "the relations these mods declare could not be recorded");
-                    }
+                    )
+                {
+                    warn!(%error, "the relations these mods declare could not be recorded");
                 }
                 snapshot.apply(&details);
                 snapshot.metadata = MetadataAvailability::Provider;

@@ -697,7 +697,7 @@ fn compact_count(count: u64) -> String {
             // Tenths, rounded down so a figure never reads higher than it is.
             let tenths = count / (size / 10);
             let whole = tenths / 10;
-            return if tenths % 10 == 0 {
+            return if tenths.is_multiple_of(10) {
                 format!("{whole}{suffix}")
             } else {
                 format!("{whole}.{}{suffix}", tenths % 10)
@@ -2372,7 +2372,7 @@ pub fn cache_limit_custom_fields(limit: ArtifactCacheLimit) -> (String, String) 
     let unit = ByteUnit::ALL
         .into_iter()
         .rev()
-        .find(|unit| bytes % unit.bytes() == 0)
+        .find(|unit| bytes.is_multiple_of(unit.bytes()))
         .unwrap_or(ByteUnit::Mebibytes);
     ((bytes / unit.bytes()).to_string(), unit.label().to_owned())
 }

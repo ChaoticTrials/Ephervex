@@ -513,14 +513,14 @@ fn write_probe(directory: &Path) -> std::io::Result<()> {
         uuid::Uuid::new_v4().simple()
     ));
     std::fs::File::create(&probe).map(drop)?;
-    if let Err(error) = std::fs::remove_file(&probe) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(
-                path = %probe.display(),
-                %error,
-                "could not remove a write probe; the file is left behind"
-            );
-        }
+    if let Err(error) = std::fs::remove_file(&probe)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %probe.display(),
+            %error,
+            "could not remove a write probe; the file is left behind"
+        );
     }
     Ok(())
 }

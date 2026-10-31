@@ -310,7 +310,7 @@ pub fn format_binary_bytes(bytes: u64) -> String {
 
     for (scale, label, decimals) in UNITS {
         if bytes >= scale {
-            if bytes % scale == 0 {
+            if bytes.is_multiple_of(scale) {
                 return format!("{} {label}", bytes / scale);
             }
             // Scaled through `f64` only for presentation. The value is at most

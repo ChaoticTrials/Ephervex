@@ -46,9 +46,9 @@ pub fn curseforge_fingerprint(bytes: &[u8]) -> u32 {
 #[allow(clippy::cast_possible_truncation)]
 fn murmur2(data: &[u8], seed: u32) -> u32 {
     let mut hash = seed ^ (data.len() as u32);
-    let mut chunks = data.chunks_exact(4);
-    for chunk in &mut chunks {
-        let mut block = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    let (chunks, tail) = data.as_chunks::<4>();
+    for chunk in chunks {
+        let mut block = u32::from_le_bytes(*chunk);
         block = block.wrapping_mul(M);
         block ^= block >> R;
         block = block.wrapping_mul(M);
@@ -56,7 +56,6 @@ fn murmur2(data: &[u8], seed: u32) -> u32 {
         hash ^= block;
     }
 
-    let tail = chunks.remainder();
     if !tail.is_empty() {
         if tail.len() >= 3 {
             hash ^= u32::from(tail[2]) << 16;

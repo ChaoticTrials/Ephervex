@@ -94,7 +94,7 @@ const MAX_REQUEST_LINE: u64 = 8 * 1024;
 /// Long enough for a password manager, a two-factor prompt, and someone
 /// finding their phone; short enough that a forgotten login does not leave a
 /// socket bound for the life of the process.
-pub const DEFAULT_LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// How long one accepted connection may take to deliver its request line
 /// before it is dropped. A real browser sends the request immediately, but

@@ -1048,7 +1048,7 @@ fn listening_inode(row: &str, target: SocketAddr) -> Option<u64> {
 fn table_address(hex: &str) -> Option<IpAddr> {
     let mut octets = [0_u8; 16];
     let words = hex.len() / 8;
-    if !matches!(words, 1 | 4) || hex.len() % 8 != 0 {
+    if !matches!(words, 1 | 4) || !hex.len().is_multiple_of(8) {
         return None;
     }
     for word in 0..words {

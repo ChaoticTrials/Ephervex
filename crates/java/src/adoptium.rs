@@ -56,7 +56,7 @@ pub const ADOPTIUM_API_BASE: &str = "https://api.adoptium.net";
 ///
 /// Adoptium publishes quarterly, so a day is generous and still means a
 /// machine that installs two runtimes in a session makes one request.
-pub const RELEASE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+pub const RELEASE_TTL: std::time::Duration = std::time::Duration::from_hours(24);
 
 /// An architecture in Adoptium's spelling.
 ///

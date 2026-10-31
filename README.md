@@ -340,7 +340,7 @@ uninstall behavior, offline expectations, and how a release is built.
 
 ## Building and testing
 
-Use a stable Rust toolchain, version 1.85 or newer:
+Use a stable Rust toolchain, version 1.91.1 or newer:
 
 ```bash
 cargo build --workspace

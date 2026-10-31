@@ -1398,10 +1398,10 @@ fn damaged_paths_of(
     layout: &CacheLayout,
 ) -> BTreeSet<PathBuf> {
     let mut needed = version.plan.stored_paths().files;
-    if let IndexState::Read(index) = &version.index {
-        if let Ok(objects) = index.object_paths(layout) {
-            needed.extend(objects);
-        }
+    if let IndexState::Read(index) = &version.index
+        && let Ok(objects) = index.object_paths(layout)
+    {
+        needed.extend(objects);
     }
     before
         .recoverable()
@@ -1823,7 +1823,7 @@ mod tests {
         let world = World::with(&[&version]).await;
         world.client("1.21.1", LoaderSelection::vanilla());
         let installed = world.install(&version).await;
-        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(86_400 * 900);
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(24 * 900);
         for path in [&installed.client, &installed.library, &installed.asset] {
             std::fs::File::options()
                 .write(true)

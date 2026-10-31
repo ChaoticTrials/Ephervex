@@ -112,7 +112,7 @@ it captures. Do not add unfinished product screens to satisfy a screenshot.
 
 ## Platform requirements
 
-- Linux with Rust 1.85 or newer and the native build dependencies required by
+- Linux with Rust 1.91.1 or newer and the native build dependencies required by
   `ephervex-gui` (including the fontconfig and FreeType development
   libraries).
 - Bash and a fontconfig setup with the fonts used by the launcher.

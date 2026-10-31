@@ -1020,7 +1020,14 @@ mod tests {
                 0 => layout.split_beside(target).map(|_| ()),
                 1 => layout.split_below(target).map(|_| ()),
                 2 => layout.close(target),
-                3 => layout.show_host(target, if seed % 2 == 0 { client() } else { server() }),
+                3 => layout.show_host(
+                    target,
+                    if seed.is_multiple_of(2) {
+                        client()
+                    } else {
+                        server()
+                    },
+                ),
                 _ => layout.show_surface(target, Surface::Console),
             };
             assert_supported(&layout);

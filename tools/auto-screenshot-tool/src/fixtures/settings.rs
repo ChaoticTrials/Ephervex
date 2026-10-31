@@ -358,7 +358,7 @@ const GIB: u64 = 1024 * MIB;
 fn size(bytes: u64) -> String {
     for (scale, label) in [(GIB, "GiB"), (MIB, "MiB")] {
         if bytes >= scale {
-            if bytes % scale == 0 {
+            if bytes.is_multiple_of(scale) {
                 return format!("{} {label}", bytes / scale);
             }
             #[allow(clippy::cast_precision_loss)]

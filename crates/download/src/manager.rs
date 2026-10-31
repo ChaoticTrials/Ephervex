@@ -812,10 +812,10 @@ async fn finish_transfer(
             // call, and its validator does not survive the process. Leaving
             // it behind would litter the cache with bytes nothing can ever
             // use.
-            if let Err(cleanup) = fs::remove_file(part).await {
-                if cleanup.kind() != std::io::ErrorKind::NotFound {
-                    debug!(path = %part.display(), error = %cleanup, "could not remove partial download");
-                }
+            if let Err(cleanup) = fs::remove_file(part).await
+                && cleanup.kind() != std::io::ErrorKind::NotFound
+            {
+                debug!(path = %part.display(), error = %cleanup, "could not remove partial download");
             }
             Err(error)
         }
@@ -1032,21 +1032,21 @@ impl Transfer<'_, '_> {
                 (Some(config), Some(request)) => Some(config.min(request)),
                 (limit, None) | (None, limit) => limit,
             };
-            if let Some(limit) = ceiling {
-                if written > limit {
-                    return Err(DownloadError::BodyTooLarge {
-                        url: self.url_label.clone(),
-                        limit,
-                    }
-                    .into());
+            if let Some(limit) = ceiling
+                && written > limit
+            {
+                return Err(DownloadError::BodyTooLarge {
+                    url: self.url_label.clone(),
+                    limit,
                 }
+                .into());
             }
             // Stop as soon as the body overruns its declared size rather than
             // reading an unbounded response to the end just to reject it.
-            if let Some(expected) = self.request.expected_size {
-                if written > expected {
-                    return Err(self.size_mismatch(expected, written));
-                }
+            if let Some(expected) = self.request.expected_size
+                && written > expected
+            {
+                return Err(self.size_mismatch(expected, written));
             }
 
             file.write_all(&chunk)
@@ -1073,10 +1073,10 @@ impl Transfer<'_, '_> {
 
     /// Verifies, then renames into place.
     async fn finalize(&mut self, written: u64) -> Result<u64, AttemptFailure> {
-        if let Some(expected) = self.request.expected_size {
-            if written != expected {
-                return Err(self.size_mismatch(expected, written));
-            }
+        if let Some(expected) = self.request.expected_size
+            && written != expected
+        {
+            return Err(self.size_mismatch(expected, written));
         }
 
         // Taken out so the digests are finalized exactly once; any retry from
@@ -1136,10 +1136,10 @@ impl Transfer<'_, '_> {
     }
 
     async fn discard_part(&self, reason: &str) {
-        if let Err(error) = fs::remove_file(self.part).await {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                debug!(path = %self.part.display(), %error, "could not remove {reason}");
-            }
+        if let Err(error) = fs::remove_file(self.part).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            debug!(path = %self.part.display(), %error, "could not remove {reason}");
         }
     }
 

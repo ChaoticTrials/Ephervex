@@ -1358,12 +1358,11 @@ impl App {
             Ok(report) => !report.recovery_issues.is_empty(),
             Err(error) => !error.recovery_issues().is_empty(),
         };
-        if recovery_needed {
-            if let Err(error) =
+        if recovery_needed
+            && let Err(error) =
                 self.add_server_attention(server, AttentionReason::InterruptedMutation)
-            {
-                warn!(%error, "an interrupted mutation could not be recorded on the server");
-            }
+        {
+            warn!(%error, "an interrupted mutation could not be recorded on the server");
         }
 
         result.map_err(|error| {

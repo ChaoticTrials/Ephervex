@@ -639,10 +639,10 @@ impl Drop for LaunchLock {
         if !owns_path {
             return;
         }
-        if let Err(error) = std::fs::remove_file(&self.path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                warn!(path = %self.path.display(), %error, "could not release the launch lock");
-            }
+        if let Err(error) = std::fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(path = %self.path.display(), %error, "could not release the launch lock");
         }
     }
 }

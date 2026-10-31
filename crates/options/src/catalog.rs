@@ -754,10 +754,10 @@ fn validate_presentation_shape(descriptor: &MinecraftPreferenceDescriptor) -> Re
                     ));
                 }
             }
-            if let Some(default) = default {
-                if !values.iter().any(|value| &value.technical_value == default) {
-                    return Err(format!("`{did}` default is not one of its own enum values"));
-                }
+            if let Some(default) = default
+                && !values.iter().any(|value| &value.technical_value == default)
+            {
+                return Err(format!("`{did}` default is not one of its own enum values"));
             }
             Ok(())
         }
@@ -767,18 +767,18 @@ fn validate_presentation_shape(descriptor: &MinecraftPreferenceDescriptor) -> Re
             max,
             step,
         } => {
-            if let (Some(low), Some(high)) = (*min, *max) {
-                if low > high {
-                    return Err(format!("`{did}` numeric domain is inverted"));
-                }
+            if let (Some(low), Some(high)) = (*min, *max)
+                && low > high
+            {
+                return Err(format!("`{did}` numeric domain is inverted"));
             }
             if step.is_some_and(|step| step <= 0) {
                 return Err(format!("`{did}` numeric step must be positive"));
             }
-            if let Some(default) = *default {
-                if min.is_some_and(|low| default < low) || max.is_some_and(|high| default > high) {
-                    return Err(format!("`{did}` default is outside its own numeric domain"));
-                }
+            if let Some(default) = *default
+                && (min.is_some_and(|low| default < low) || max.is_some_and(|high| default > high))
+            {
+                return Err(format!("`{did}` default is outside its own numeric domain"));
             }
             Ok(())
         }
@@ -795,18 +795,18 @@ fn validate_presentation_shape(descriptor: &MinecraftPreferenceDescriptor) -> Re
                     ));
                 }
             }
-            if let (Some(low), Some(high)) = (*min, *max) {
-                if low > high {
-                    return Err(format!("`{did}` numeric domain is inverted"));
-                }
+            if let (Some(low), Some(high)) = (*min, *max)
+                && low > high
+            {
+                return Err(format!("`{did}` numeric domain is inverted"));
             }
             if step.is_some_and(|step| step <= 0.0) {
                 return Err(format!("`{did}` numeric step must be positive"));
             }
-            if let Some(default) = *default {
-                if min.is_some_and(|low| default < low) || max.is_some_and(|high| default > high) {
-                    return Err(format!("`{did}` default is outside its own numeric domain"));
-                }
+            if let Some(default) = *default
+                && (min.is_some_and(|low| default < low) || max.is_some_and(|high| default > high))
+            {
+                return Err(format!("`{did}` default is outside its own numeric domain"));
             }
             Ok(())
         }

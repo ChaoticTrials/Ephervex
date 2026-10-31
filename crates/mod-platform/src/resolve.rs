@@ -1517,13 +1517,12 @@ impl<'a> Resolver<'a> {
         {
             return Err(refusal);
         }
-        if let (true, Some(pin)) = (declarers.is_empty(), pin) {
-            if let Some(version) = self
+        if let (true, Some(pin)) = (declarers.is_empty(), pin)
+            && let Some(version) = self
                 .listed_pins
                 .get(&(project_id.to_owned(), pin.to_owned()))
-            {
-                return Ok(version.clone());
-            }
+        {
+            return Ok(version.clone());
         }
         match self.select_version(project_id, pin, declarers).await {
             Ok(version) => {
@@ -2397,14 +2396,13 @@ fn normalize(
             if let Some(version) = looked_up
                 .iter()
                 .find(|candidate| candidate.id == version_id)
+                && version.project_id != project_id
             {
-                if version.project_id != project_id {
-                    return Err(ModPlatformError::InconsistentDependency {
-                        declared_by: declared_by.to_owned(),
-                        project_id: project_id.to_owned(),
-                        version_project_id: version.project_id.clone(),
-                    });
-                }
+                return Err(ModPlatformError::InconsistentDependency {
+                    declared_by: declared_by.to_owned(),
+                    project_id: project_id.to_owned(),
+                    version_project_id: version.project_id.clone(),
+                });
             }
             Ok(Normalized::Project {
                 kind: dependency.kind,

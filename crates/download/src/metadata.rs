@@ -103,7 +103,7 @@ pub const METADATA_ENVELOPE_VERSION: u32 = 1;
 /// every list operation is exactly the behavior The interface asks launchers not to
 /// have. Callers that genuinely need "now" call
 /// [`MetadataCache::refresh`].
-pub const DEFAULT_METADATA_TTL: Duration = Duration::from_secs(15 * 60);
+pub const DEFAULT_METADATA_TTL: Duration = Duration::from_mins(15);
 
 /// The largest provider document this cache will accept.
 ///
@@ -119,7 +119,7 @@ pub const MAX_METADATA_BYTES: u64 = 64 * 1024 * 1024;
 
 /// How old a staging or temporary file must be before a refresh treats it as
 /// left behind by a crashed process rather than owned by a live one.
-const ABANDONED_STAGING_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const ABANDONED_STAGING_AGE: Duration = Duration::from_hours(24);
 
 /// Where a document came from and how old it is.
 ///
@@ -984,10 +984,10 @@ impl std::io::Write for BoundedWriter {
 
 /// Deletes a path, treating "it was not there" as success.
 async fn remove_if_present(path: &Path) {
-    if let Err(error) = fs::remove_file(path).await {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            debug!(path = %path.display(), %error, "could not remove metadata cache file");
-        }
+    if let Err(error) = fs::remove_file(path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        debug!(path = %path.display(), %error, "could not remove metadata cache file");
     }
 }
 
@@ -1699,7 +1699,7 @@ mod tests {
         for file in [&old, &recent, &other] {
             std::fs::write(file, b"x").expect("write");
         }
-        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let long_ago = std::time::SystemTime::now() - Duration::from_hours(48);
         for file in [&old, &other] {
             std::fs::File::options()
                 .write(true)
@@ -1748,7 +1748,7 @@ mod tests {
             .store(&lookalike, &url(), raw("{}"))
             .await
             .expect("store");
-        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let long_ago = std::time::SystemTime::now() - Duration::from_hours(48);
         std::fs::File::options()
             .write(true)
             .open(cache.path(&lookalike))
@@ -1798,7 +1798,7 @@ mod tests {
         let nested = crate::manager::staging_path(&outer);
         let envelope = crate::manager::staging_path(&cache.path(&key));
         let abandoned = [outer, nested, envelope];
-        let long_ago = std::time::SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        let long_ago = std::time::SystemTime::now() - Duration::from_hours(48);
         for file in &abandoned {
             std::fs::write(file, b"x").expect("write");
             std::fs::File::options()

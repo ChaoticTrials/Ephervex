@@ -490,7 +490,7 @@ fn measure(
                         .map(|relative| relative.iter().collect())
                         .unwrap_or_default();
                     tally.file(&metadata, classify(root.rule, &cache, &components));
-                    if tally.files % PROGRESS_EVERY == 0 {
+                    if tally.files.is_multiple_of(PROGRESS_EVERY) {
                         reporter.set_items_at(
                             Progress {
                                 current: tally.files,
