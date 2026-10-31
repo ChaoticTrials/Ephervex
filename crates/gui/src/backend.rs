@@ -289,6 +289,9 @@ pub enum Command {
         /// The linked server is built from these instead of from the client's
         /// recipe (ADR 0024).
         server_pack: Option<PathBuf>,
+        /// The issue the link that offered the pack named, stored on the
+        /// instance. Checked again by the import.
+        issue_link: Option<String>,
     },
     LaunchClient {
         instance: InstanceId,
@@ -3622,6 +3625,7 @@ fn run_worker(
                 request_id,
                 create_linked_server,
                 server_pack,
+                issue_link,
             } => {
                 let paths = app.paths().clone();
                 spawn_import_submission(
@@ -3638,6 +3642,7 @@ fn run_worker(
                         request_id,
                         create_linked_server,
                         server_pack,
+                        issue_link,
                     },
                 );
             }
@@ -12765,6 +12770,7 @@ struct ImportSubmission {
     request_id: String,
     create_linked_server: bool,
     server_pack: Option<PathBuf>,
+    issue_link: Option<String>,
 }
 
 /// The name a server takes when nobody types one: its client's or target's
@@ -12796,6 +12802,7 @@ fn spawn_import_submission(
         request_id,
         create_linked_server,
         server_pack,
+        issue_link,
     } = submission;
     // Cloned for the setup-failure path, which runs instead of the body rather
     // than after it.
@@ -12828,6 +12835,9 @@ fn spawn_import_submission(
                 .skipping_blocked(skip_blocked);
             if !name.trim().is_empty() {
                 request = request.named(name);
+            }
+            if let Some(issue_link) = issue_link {
+                request = request.with_issue_link(issue_link);
             }
             let result = runtime.block_on(app.import_pack(&request, &reporter, &cancel));
             // Closing the modal is not decided here: a receiver only closes

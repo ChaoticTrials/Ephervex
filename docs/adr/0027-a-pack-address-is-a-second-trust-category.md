@@ -68,6 +68,17 @@ expands into; nothing bounded the archive. An unbounded fetch of an address a
 web page chose is a disk-exhaustion primitive, so a ceiling is enforced while
 the body streams and an oversized one is abandoned as it crosses the line.
 
+**What else a link carries is metadata, never an address to fetch.** A link may
+name the issue the pack reproduces, as `&issue=`. It is stored as the instance's
+issue link under the rules a link typed into the instance follows: a plain
+`http` or `https` address, no credentials, bounded in length. The launcher never
+requests it. It is shown in the import dialog before it is stored, and once
+stored it is opened in the browser only when the user presses it on the
+instance. An address that fails
+those rules, or a link that names two, is dropped and the pack still imports:
+refusing the link instead would make a click in a browser do nothing at all,
+because a refused launch has no window to say why.
+
 **The scheme is registered when installing said so, and not before.** Claiming a
 system-wide URL scheme is not something a launcher should do quietly on first
 run. Installing a package is not that: `apt install` is an explicit act, and a

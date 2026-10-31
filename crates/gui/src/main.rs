@@ -128,7 +128,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // handler starts a fresh process for every click, so without this a second
     // link means a second launcher sharing one set of instances.
     let link = match &startup {
-        Startup::Link(ephervex_core::LauncherUrl::Import { url }) => Some(url.as_str()),
+        Startup::Link(ephervex_core::LauncherUrl::Import { url, issue_link }) => {
+            Some((url.as_str(), issue_link.as_deref()))
+        }
         _ => None,
     };
     let primary =
@@ -156,9 +158,9 @@ fn main() -> Result<(), slint::PlatformError> {
     ephervex_gui::controller::show_third_party_licenses(&ui);
     let controller = ephervex_gui::controller::attach(&ui, &keys);
     ephervex_gui::controller::accept_file_drops(&ui, &drops, &controller);
-    if let Some(url) = link {
+    if let Some((url, issue_link)) = link {
         tracing::info!("opening a modpack a link named");
-        ephervex_gui::controller::open_pack_link(&ui, url);
+        ephervex_gui::controller::open_pack_link(&ui, url, issue_link);
     }
     let launcher_name = primary.and_then(|primary| {
         // Delivered onto the event loop: the listener runs on a thread of its
@@ -170,10 +172,10 @@ fn main() -> Result<(), slint::PlatformError> {
                 if let Some(ui) = weak.upgrade() {
                     ephervex_gui::controller::raise(&ui);
                     if let ephervex_core::single_instance::Handover::Link(message) = &handover
-                        && let Ok(ephervex_core::LauncherUrl::Import { url }) =
+                        && let Ok(ephervex_core::LauncherUrl::Import { url, issue_link }) =
                             ephervex_core::LauncherUrl::parse(message)
                     {
-                        ephervex_gui::controller::open_pack_link(&ui, &url);
+                        ephervex_gui::controller::open_pack_link(&ui, &url, issue_link.as_deref());
                     }
                 }
             });
@@ -216,6 +218,27 @@ mod tests {
             ephervex_core::LauncherUrl::parse(handoff).expect("the handoff round-trips"),
             ephervex_core::LauncherUrl::Import {
                 url: "https://example.test/pack.mrpack".to_owned(),
+                issue_link: None,
+            }
+        );
+    }
+
+    /// The running launcher re-parses the argument it is handed, so what a link
+    /// carries beside the pack has to survive the handoff the same way.
+    #[test]
+    fn handoff_carries_the_issue_a_link_names() {
+        let argument = "ephervex://import?url=https%3A%2F%2Fexample.test%2Fpack.mrpack&issue=https%3A%2F%2Fgithub.com%2Fexample%2Fcavestone%2Fissues%2F42".to_owned();
+        let arguments = vec![argument.clone()];
+        let startup = startup_from(&arguments);
+
+        let handoff =
+            handoff_argument(&startup, &arguments).expect("an import link hands off something");
+        assert_eq!(handoff, argument);
+        assert_eq!(
+            ephervex_core::LauncherUrl::parse(handoff).expect("the handoff round-trips"),
+            ephervex_core::LauncherUrl::Import {
+                url: "https://example.test/pack.mrpack".to_owned(),
+                issue_link: Some("https://github.com/example/cavestone/issues/42".to_owned()),
             }
         );
     }

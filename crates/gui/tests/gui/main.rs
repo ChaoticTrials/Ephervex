@@ -33,6 +33,7 @@ mod host_page_header;
 mod host_picker_selection;
 mod host_restart;
 mod hover_notes_stay_inside_window;
+mod import_issue_link;
 mod instance_deletion_dialog;
 mod instance_organization;
 mod instance_promotion_dialog;

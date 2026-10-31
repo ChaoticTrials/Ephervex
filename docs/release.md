@@ -178,6 +178,18 @@ A site that hosts packs can offer a link that hands one straight to Ephervex:
 ephervex://import?url=<percent-encoded https address of the pack>
 ```
 
+The link may also name the issue or bug report the pack reproduces:
+
+```text
+ephervex://import?url=<percent-encoded https address of the pack>&issue=<percent-encoded address of the issue>
+```
+
+The import dialog shows that address, and the instance it creates keeps it as
+its issue link. An address an issue link may not be (anything other than a plain
+`http` or `https` address without a user name or password, or one over 2048
+bytes), or a link naming two of them, loses the issue and nothing else: the pack
+still imports.
+
 **Either package sets this up for you.** Both install their own
 `ephervex-url-handler.desktop`, so links work as soon as one is installed and
 stop working when it is removed. Nothing further to do.

@@ -44,6 +44,7 @@ use crate::app::App;
 use crate::curseforge_pack::ProviderCredentials;
 use crate::error::CoreResult;
 use crate::instance::{sanitized_entity_name, validated_entity_name};
+use crate::issue_link::validated_issue_link;
 
 /// What a caller wants imported.
 #[derive(Debug, Clone)]
@@ -67,6 +68,11 @@ pub struct ImportRequest {
     /// CLI ever supplies: import still refuses atomically when a pack has any
     /// file a provider refused and nothing said what to do about it.
     pub skip_blocked: Vec<ProviderFileIdentity>,
+    /// The issue or bug report this pack reproduces, stored on the instance.
+    ///
+    /// Checked the way a link typed into the instance is, and before any
+    /// archive or network work: a refused one creates nothing.
+    pub issue_link: Option<String>,
 }
 
 impl ImportRequest {
@@ -79,6 +85,7 @@ impl ImportRequest {
             storage: StorageClass::default_for_new_instance(),
             selection: OptionalSelection::none(),
             skip_blocked: Vec::new(),
+            issue_link: None,
         }
     }
 
@@ -103,6 +110,12 @@ impl ImportRequest {
     #[must_use]
     pub fn skipping_blocked(mut self, skip_blocked: Vec<ProviderFileIdentity>) -> Self {
         self.skip_blocked = skip_blocked;
+        self
+    }
+
+    #[must_use]
+    pub fn with_issue_link(mut self, issue_link: impl Into<String>) -> Self {
+        self.issue_link = Some(issue_link.into());
         self
     }
 }
@@ -196,6 +209,12 @@ impl App {
             .as_deref()
             .map(validated_entity_name)
             .transpose()?;
+        let issue_link = request
+            .issue_link
+            .as_deref()
+            .map(validated_issue_link)
+            .transpose()?
+            .flatten();
         // Everything that can refuse the pack runs before the instance exists.
         reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
         let (archive, mut analysis) = Self::open_pack(&request.archive)?;
@@ -218,16 +237,18 @@ impl App {
             Some(chosen) => chosen,
             None => suggested_instance_name(&analysis),
         };
-        let record = self.registry_for_services().create_client(
-            NewClient::new(
-                name,
-                analysis.recipe.minecraft_version.clone(),
-                analysis.recipe.loader.clone(),
-            )
-            .with_storage(request.storage)
-            .with_source(import_source(&analysis))
-            .with_attention(analysis.attention.clone()),
-        )?;
+        let mut new_client = NewClient::new(
+            name,
+            analysis.recipe.minecraft_version.clone(),
+            analysis.recipe.loader.clone(),
+        )
+        .with_storage(request.storage)
+        .with_source(import_source(&analysis))
+        .with_attention(analysis.attention.clone());
+        if let Some(issue_link) = issue_link {
+            new_client = new_client.with_issue_link(issue_link);
+        }
+        let record = self.registry_for_services().create_client(new_client)?;
 
         let materialized = match self
             .materialize(MaterializePack {
@@ -707,6 +728,89 @@ mod tests {
             .await
             .expect("import");
         assert_eq!(imported.record.name, "Chosen name");
+    }
+
+    fn offline_pack(dir: &Path) -> PathBuf {
+        let archive = dir.join("report.mrpack");
+        zip_file(
+            &archive,
+            &[(
+                "modrinth.index.json",
+                &index(r#"{"minecraft": "1.20.1", "forge": "47.4.0"}"#),
+            )],
+        );
+        archive
+    }
+
+    #[tokio::test]
+    async fn an_imported_instance_keeps_the_issue_link_it_was_imported_for() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = offline_pack(dir.path());
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let imported = app
+            .import_pack(
+                &ImportRequest::new(&archive)
+                    .with_issue_link("  https://github.com/example/cavestone/issues/42  "),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("import");
+
+        let link = Some("https://github.com/example/cavestone/issues/42".to_owned());
+        assert_eq!(imported.record.issue_link, link);
+        assert_eq!(
+            app.current_client(imported.record.id)
+                .expect("read back")
+                .issue_link,
+            link,
+            "the link is in the instance's own metadata, not only on the record returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_import_with_no_issue_link_has_none() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = offline_pack(dir.path());
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        let imported = import(&app, &archive).await.expect("import");
+
+        assert_eq!(imported.record.issue_link, None);
+    }
+
+    /// The link comes from outside, so an address the instance's own editor
+    /// would refuse is refused here too, before anything is written.
+    #[tokio::test]
+    async fn an_issue_link_an_edit_would_refuse_is_refused_and_creates_nothing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = offline_pack(dir.path());
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+
+        for bad in [
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "https://user:secret@example.com/issues/1",
+            "not an address",
+        ] {
+            let error = app
+                .import_pack(
+                    &ImportRequest::new(&archive).with_issue_link(bad),
+                    &OperationReporter::silent("test-import"),
+                    &CancellationToken::new(),
+                )
+                .await
+                .expect_err("must refuse");
+            assert!(
+                matches!(error, crate::error::CoreError::IssueLinkInvalid { .. }),
+                "{bad}: {error:?}"
+            );
+        }
+        assert!(app.list_clients().expect("list").is_empty());
     }
 
     #[tokio::test]

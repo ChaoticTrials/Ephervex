@@ -663,6 +663,7 @@ fn word_bounds(text: &str, offset: usize) -> Option<(usize, usize)> {
 /// [`ImportFlowState::name_edited`].
 fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
     ui.set_import_path(state.archive.display().to_string().into());
+    ui.set_import_issue_link(state.issue_link.clone().unwrap_or_default().into());
     if !state.name_edited {
         ui.set_import_name(state.suggested_name.clone().into());
     }
@@ -867,6 +868,7 @@ fn register_import_flow(
                 create_linked_server: create_server,
                 server_pack: (create_server && !server_pack.is_empty())
                     .then(|| PathBuf::from(server_pack.as_str())),
+                issue_link: submission.issue_link,
             },
         );
     });
@@ -1265,6 +1267,7 @@ struct PreparedImportSubmission {
     archive: PathBuf,
     selection: OptionalSelection,
     skip_blocked: Vec<ProviderFileIdentity>,
+    issue_link: Option<String>,
 }
 
 /// A change to a host's mods that isolation has asked the worker for.
@@ -2138,6 +2141,11 @@ struct ImportFlowState {
     /// later analysis/resolution result would otherwise overwrite it: an
     /// edit survives everything except a genuinely new archive pick.
     name_edited: bool,
+    /// The issue the link that offered this pack named, already checked. It is
+    /// shown in the dialog and stored on the instance; nothing edits it here.
+    /// It belongs to the pack the link offered, so any new attempt, such as
+    /// choosing a different archive, starts without it.
+    issue_link: Option<String>,
     error: String,
     /// The category `error` was classified from, so the modal can offer a
     /// state-specific affordance (like opening Providers & APIs for a
@@ -2333,6 +2341,7 @@ impl ImportFlowState {
             archive: self.archive.clone(),
             selection: self.selection(),
             skip_blocked: self.skipped.clone(),
+            issue_link: self.issue_link.clone(),
         })
     }
 
@@ -2559,7 +2568,7 @@ pub fn accept_file_drops(ui: &AppWindow, drops: &FileDrops, controller: &Control
                         let Some(archive) = paths.into_iter().next() else {
                             return;
                         };
-                        begin_import(&ui, &flow, &sender, archive);
+                        begin_import(&ui, &flow, &sender, archive, None);
                     }
                 }
             }
@@ -2578,8 +2587,14 @@ fn begin_import(
     flow: &Rc<RefCell<ImportFlowState>>,
     commands: &Sender<Command>,
     archive: PathBuf,
+    issue_link: Option<String>,
 ) {
-    let generation = flow.borrow_mut().begin_attempt();
+    let generation = {
+        let mut state = flow.borrow_mut();
+        let generation = state.begin_attempt();
+        state.issue_link = issue_link;
+        generation
+    };
     set_server_pack(ui, ServerPackTarget::Import, None);
     render_import_flow(ui, &flow.borrow());
     ui.set_modal_error(SharedString::default());
@@ -5161,8 +5176,9 @@ fn register_pack_link_actions(ui: &AppWindow, commands: &Sender<Command>) {
 
     let weak = ui.as_weak();
     let sender = commands.clone();
-    ui.on_deliver_pack_link(move |url| {
+    ui.on_deliver_pack_link(move |url, issue_link| {
         let Some(ui) = weak.upgrade() else { return };
+        ui.set_pack_link_issue(issue_link);
         send(
             &sender,
             Command::OpenPackUrl {
@@ -5241,8 +5257,16 @@ fn pack_link_request_pending(ui: &AppWindow, generation: i32) -> bool {
 /// Takes the window rather than the controller because both callers have one:
 /// `main` for the link this process was started for, and the single-instance
 /// listener for a link a later launch handed over.
-pub fn open_pack_link(ui: &AppWindow, url: &str) {
-    ui.invoke_deliver_pack_link(url.into());
+pub fn open_pack_link(ui: &AppWindow, url: &str, issue_link: Option<&str>) {
+    ui.invoke_deliver_pack_link(url.into(), issue_link.unwrap_or_default().into());
+}
+
+/// The issue the newest link named, taken so that no later import can pick it
+/// up. Empty means the link named none.
+fn take_pack_link_issue(ui: &AppWindow) -> Option<String> {
+    let issue_link = ui.get_pack_link_issue();
+    ui.set_pack_link_issue(SharedString::default());
+    (!issue_link.is_empty()).then(|| issue_link.to_string())
 }
 
 /// Puts this build's third-party license inventory on the "About & Licenses"
@@ -11056,7 +11080,8 @@ fn apply_pack_link_event(
                 ui.set_pack_link_downloading(false);
             }
             if wanted && make_room_for_dialog(ui) {
-                begin_import(ui, import_flow, commands, archive);
+                let issue_link = take_pack_link_issue(ui);
+                begin_import(ui, import_flow, commands, archive, issue_link);
             } else {
                 discard_pack_archive(&archive);
             }
@@ -21224,6 +21249,118 @@ mod tests {
         ));
     }
 
+    const LINKED_ISSUE: &str = "https://github.com/example/cavestone/issues/42";
+
+    fn download_finished(
+        ui: &AppWindow,
+        commands: &Sender<Command>,
+        import_flow: &Rc<RefCell<ImportFlowState>>,
+        generation: i32,
+    ) {
+        apply_pack_link_event(
+            ui,
+            Event::PackDownloaded {
+                generation,
+                archive: PathBuf::from("link.pack"),
+            },
+            import_flow,
+            commands,
+        );
+    }
+
+    /// The issue a link named waits in the window while the pack downloads, and
+    /// the import it opens takes it, shows it, and clears the wait so no later
+    /// import can pick it up.
+    #[test]
+    fn a_finished_link_download_opens_the_import_with_the_issue_the_link_named() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        ui.set_pack_link_issue(LINKED_ISSUE.into());
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        download_finished(&ui, &commands, &import_flow, generation);
+
+        assert_eq!(
+            import_flow.borrow().issue_link.as_deref(),
+            Some(LINKED_ISSUE)
+        );
+        assert_eq!(ui.get_import_issue_link(), LINKED_ISSUE);
+        assert_eq!(ui.get_pack_link_issue(), "", "the wait is cleared");
+    }
+
+    #[test]
+    fn a_link_that_named_no_issue_opens_an_import_without_one() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        let generation = pack_link_downloading(&ui, &commands, &import_flow);
+
+        download_finished(&ui, &commands, &import_flow, generation);
+
+        assert_eq!(import_flow.borrow().issue_link, None);
+        assert_eq!(ui.get_import_issue_link(), "");
+    }
+
+    /// A download that a newer link replaced is dropped, and the newer link's
+    /// issue is not lost with it.
+    #[test]
+    fn a_replaced_download_leaves_the_newer_links_issue_to_the_newer_link() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        ui.set_pack_link_issue("https://github.com/example/older/issues/1".into());
+        let older = pack_link_downloading(&ui, &commands, &import_flow);
+        ui.set_pack_link_issue(LINKED_ISSUE.into());
+        let newer = pack_link_downloading(&ui, &commands, &import_flow);
+
+        download_finished(&ui, &commands, &import_flow, older);
+        assert_eq!(
+            ui.get_pack_link_issue(),
+            LINKED_ISSUE,
+            "an answer for the older link does not take the newer link's issue"
+        );
+        assert_eq!(import_flow.borrow().issue_link, None);
+
+        download_finished(&ui, &commands, &import_flow, newer);
+        assert_eq!(
+            import_flow.borrow().issue_link.as_deref(),
+            Some(LINKED_ISSUE)
+        );
+    }
+
+    /// A failed download leaves its dialog open for a retry with the same
+    /// answer, and the retry is still the same link, so it keeps its issue.
+    #[test]
+    fn a_retry_after_a_failed_download_still_carries_the_issue() {
+        let ui = test_window();
+        let (commands, _received) = std::sync::mpsc::channel();
+        let import_flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        pack_link_cancel_wiring(&ui, &commands);
+        ui.set_pack_link_issue(LINKED_ISSUE.into());
+        let failed = pack_link_downloading(&ui, &commands, &import_flow);
+        apply_pack_link_event(
+            &ui,
+            Event::PackUrlEnded {
+                generation: failed,
+                message: Some("could not download".to_owned()),
+            },
+            &import_flow,
+            &commands,
+        );
+
+        let retry = pack_link_downloading(&ui, &commands, &import_flow);
+        download_finished(&ui, &commands, &import_flow, retry);
+
+        assert_eq!(
+            import_flow.borrow().issue_link.as_deref(),
+            Some(LINKED_ISSUE)
+        );
+    }
+
     #[test]
     fn leaving_the_link_dialog_by_any_route_cancels_its_download() {
         let ui = test_window();
@@ -23201,6 +23338,7 @@ mod tests {
             archive: PathBuf::from("pack.zip"),
             selection: OptionalSelection::of(["mods/optional-b.jar"]),
             skip_blocked: Vec::new(),
+            issue_link: None,
         };
         assert_eq!(flow.begin_submit(), Some(expected.clone()));
         assert_eq!(flow.phase, ImportPhase::Submitting);
@@ -23216,6 +23354,39 @@ mod tests {
             flow.begin_submit(),
             Some(expected),
             "the guard is released once the first submission ends"
+        );
+    }
+
+    /// The issue a link named is part of the attempt the link started, so the
+    /// submission carries it, and an attempt that did not come from a link does
+    /// not inherit one from an earlier attempt that did.
+    #[test]
+    fn the_issue_a_link_named_goes_with_that_attempts_submission_and_no_other() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.issue_link = Some("https://github.com/example/cavestone/issues/42".to_owned());
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.zip"),
+            Ok(resolved_presentation("Example Pack", false)),
+        );
+
+        let submission = flow.begin_submit().expect("ready");
+        assert_eq!(
+            submission.issue_link.as_deref(),
+            Some("https://github.com/example/cavestone/issues/42")
+        );
+
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("other.zip"),
+            Ok(resolved_presentation("Other Pack", false)),
+        );
+        assert_eq!(
+            flow.begin_submit().expect("ready").issue_link,
+            None,
+            "a later attempt starts with no issue"
         );
     }
 
@@ -23238,6 +23409,7 @@ mod tests {
                 archive: PathBuf::from("/tmp/analyzed-pack.zip"),
                 selection: OptionalSelection::of(["mods/optional-a.jar", "mods/optional-b.jar"]),
                 skip_blocked: Vec::new(),
+                issue_link: None,
             }),
             "the archive submitted must be exactly the one the current analysis is for; \
              `begin_submit` takes no archive argument, so nothing else could have supplied one"

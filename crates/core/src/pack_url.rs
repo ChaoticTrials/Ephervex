@@ -35,6 +35,7 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
+use crate::issue_link::validated_issue_link;
 
 /// The largest pack archive Ephervex will download.
 ///
@@ -201,8 +202,15 @@ pub const MAX_LAUNCHER_URL_BYTES: usize = 8 * 1024;
 /// guessing is acting on somebody else's intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LauncherUrl {
-    /// `ephervex://import?url=<percent-encoded https address>`.
-    Import { url: String },
+    /// `ephervex://import?url=<percent-encoded https address>`, optionally
+    /// followed by `&issue=<percent-encoded http or https address>`.
+    Import {
+        url: String,
+        /// The issue or bug report the pack reproduces, already checked the way
+        /// an issue link typed into an instance is. `None` when the link names
+        /// none, or names one this build will not store.
+        issue_link: Option<String>,
+    },
 }
 
 impl LauncherUrl {
@@ -247,7 +255,10 @@ impl LauncherUrl {
         if url.trim().is_empty() {
             return Err(LauncherUrlError::MissingUrl);
         }
-        Ok(Self::Import { url })
+        Ok(Self::Import {
+            url,
+            issue_link: issue_link_of(&parsed),
+        })
     }
 
     /// Whether this argument is even meant for us.
@@ -261,6 +272,31 @@ impl LauncherUrl {
             .to_ascii_lowercase()
             .starts_with(&format!("{LAUNCHER_URL_SCHEME}:"))
     }
+}
+
+/// The issue link a launcher link carries, if it carries a usable one.
+///
+/// The issue link is a courtesy beside the pack, not the reason for the link,
+/// so one this build cannot use costs the link its issue link and nothing else.
+/// Refusing the whole link instead would make a click in a browser do nothing
+/// at all, because a refused launch has no window to explain itself in. Naming
+/// more than one is treated like naming a bad one: picking either would be a
+/// guess. Nothing is logged but the fact, because an address typed by someone
+/// else can carry credentials.
+fn issue_link_of(link: &Url) -> Option<String> {
+    let mut named = link
+        .query_pairs()
+        .filter(|(key, _)| key == "issue")
+        .map(|(_, value)| value.into_owned());
+    let issue = named.next()?;
+    if named.next().is_some() {
+        warn!("a launcher link names more than one issue link, so none is used");
+        return None;
+    }
+    validated_issue_link(&issue).unwrap_or_else(|_| {
+        warn!("the issue link in a launcher link is not one Ephervex stores, so it is not used");
+        None
+    })
 }
 
 /// Why an argument is not a launcher link this build acts on.
@@ -534,10 +570,117 @@ mod tests {
         assert_eq!(
             parsed,
             LauncherUrl::Import {
-                url: "https://dumps.chaotictrials.de/api/dump/5ca16367-3824-486f-a39e-d0c4bffe8922/modpack?platform=modrinth".to_owned()
+                url: "https://dumps.chaotictrials.de/api/dump/5ca16367-3824-486f-a39e-d0c4bffe8922/modpack?platform=modrinth".to_owned(),
+                issue_link: None,
             },
             "the address has to come back with its own query intact"
         );
+    }
+
+    const PACK: &str = "url=https%3A%2F%2Fexample.com%2Fpack.mrpack";
+
+    fn issue_link_of_link(link: &str) -> Option<String> {
+        let LauncherUrl::Import { issue_link, .. } =
+            LauncherUrl::parse(link).expect("a link this build acts on");
+        issue_link
+    }
+
+    /// The issue DumpViewer names beside the pack it offers.
+    #[test]
+    fn a_link_names_the_issue_the_pack_reproduces() {
+        let link = "ephervex://import?url=https%3A%2F%2Fdumps.chaotictrials.de%2Fapi%2Fdump%2F5ca16367%2Fmodpack&issue=https%3A%2F%2Fgithub.com%2Fexample%2Fcavestone%2Fissues%2F42";
+
+        assert_eq!(
+            LauncherUrl::parse(link).expect("a link this build acts on"),
+            LauncherUrl::Import {
+                url: "https://dumps.chaotictrials.de/api/dump/5ca16367/modpack".to_owned(),
+                issue_link: Some("https://github.com/example/cavestone/issues/42".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn the_issue_link_is_read_wherever_it_sits_in_the_query() {
+        let expected = Some("https://github.com/example/cavestone/issues/42".to_owned());
+        for link in [
+            format!(
+                "ephervex://import?{PACK}&issue=https%3A%2F%2Fgithub.com%2Fexample%2Fcavestone%2Fissues%2F42"
+            ),
+            format!(
+                "ephervex://import?issue=https%3A%2F%2Fgithub.com%2Fexample%2Fcavestone%2Fissues%2F42&{PACK}"
+            ),
+            format!(
+                "ephervex://import?{PACK}&other=1&issue=https%3A%2F%2Fgithub.com%2Fexample%2Fcavestone%2Fissues%2F42"
+            ),
+        ] {
+            assert_eq!(issue_link_of_link(&link), expected, "{link}");
+        }
+    }
+
+    /// The query is read as form data, so a `+` that is not percent-encoded is a
+    /// space, as it is in the pack address. A site that encodes the issue as
+    /// any URL encoder does keeps a literal `+` as `%2B`.
+    #[test]
+    fn a_plus_in_the_issue_survives_when_it_is_percent_encoded() {
+        let link =
+            format!("ephervex://import?{PACK}&issue=https%3A%2F%2Fx.example%2Fissues%3Fq%3Da%2Bb");
+
+        assert_eq!(
+            issue_link_of_link(&link),
+            Some("https://x.example/issues?q=a+b".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_link_without_an_issue_has_none() {
+        assert_eq!(
+            issue_link_of_link(&format!("ephervex://import?{PACK}")),
+            None
+        );
+        assert_eq!(
+            issue_link_of_link(&format!("ephervex://import?{PACK}&issue=")),
+            None,
+            "an empty value names no issue"
+        );
+    }
+
+    /// The issue is a courtesy beside the pack. One this build will not store
+    /// costs the link its issue and nothing else: the pack is still the one the
+    /// link names, and the link is not refused, because a refused launch has no
+    /// window to say why.
+    #[test]
+    fn an_issue_link_this_build_will_not_store_is_dropped_and_the_pack_still_imports() {
+        let too_long = format!("https%3A%2F%2Fexample.com%2F{}", "a".repeat(2048));
+        for bad in [
+            "javascript%3Aalert(1)",
+            "file%3A%2F%2F%2Fetc%2Fpasswd",
+            "ephervex%3A%2F%2Fimport%3Furl%3Dx",
+            "https%3A%2F%2Fuser%3Asecret%40example.com%2Fissues%2F1",
+            "https%3A%2F%2Fexample.com%2Fan%20issue",
+            "not%20an%20address",
+            "%2F%2Fexample.com%2Fissues%2F1",
+            too_long.as_str(),
+        ] {
+            let link = format!("ephervex://import?{PACK}&issue={bad}");
+            assert_eq!(
+                LauncherUrl::parse(&link).expect("the pack is still named"),
+                LauncherUrl::Import {
+                    url: "https://example.com/pack.mrpack".to_owned(),
+                    issue_link: None,
+                },
+                "{bad}"
+            );
+        }
+    }
+
+    /// Two issues is not a link with a spare: picking either would be a guess.
+    #[test]
+    fn a_link_naming_two_issues_uses_neither() {
+        let link = format!(
+            "ephervex://import?{PACK}&issue=https%3A%2F%2Fa.example%2F1&issue=https%3A%2F%2Fb.example%2F2"
+        );
+
+        assert_eq!(issue_link_of_link(&link), None);
     }
 
     /// `ephervex:import?...` and `ephervex://import?...` mean the same thing to
@@ -546,6 +689,7 @@ mod tests {
     fn an_action_is_read_whether_it_is_written_as_a_host_or_a_path() {
         let expected = LauncherUrl::Import {
             url: "https://example.com/pack.mrpack".to_owned(),
+            issue_link: None,
         };
         for link in [
             "ephervex://import?url=https%3A%2F%2Fexample.com%2Fpack.mrpack",
@@ -619,7 +763,7 @@ mod tests {
     fn an_address_smuggled_inside_a_link_is_still_checked() {
         let base = tempfile::tempdir().expect("temp dir");
         let app = App::open_at(Paths::rooted_at(base.path())).expect("app opens");
-        let LauncherUrl::Import { url } =
+        let LauncherUrl::Import { url, .. } =
             LauncherUrl::parse("ephervex://import?url=file%3A%2F%2F%2Fetc%2Fpasswd")
                 .expect("a well-formed link");
 

@@ -107,6 +107,11 @@ can export a stored dump as a Modrinth pack and open it directly in Ephervex.
 Confirm the browser's request to open Ephervex, review the pack address and
 choose whether to remember its host, then review the normal import dialog.
 
+A link can also carry an `issue` parameter, the percent-encoded address of the
+issue or bug report the pack reproduces. The import dialog shows it, and the new
+instance keeps it as its issue link. An address that is not a plain `http` or
+`https` link is ignored, and the pack still imports.
+
 <ThemeScreenshot state="import-link-trust-prompt" alt="Open a modpack prompt showing the HTTPS address, a switch to remember the site, and Download it" />
 
 Linux packages install the link handler. For an AppImage, register it once

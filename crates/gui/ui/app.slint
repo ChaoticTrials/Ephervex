@@ -630,6 +630,9 @@ export component AppWindow inherits Window {
     in-out property <string> create-instance-server-pack-name;
     in-out property <string> import-path;
     in-out property <string> import-name;
+    // The issue the pack being imported reproduces, when the link that
+    // offered it named one. Shown, not typed: it is stored with the instance.
+    in-out property <string> import-issue-link;
     // Whether the import should also leave a server behind. Off by
     // default: most imports are opened to reproduce a client.
     in-out property <bool> import-create-server: false;
@@ -885,9 +888,15 @@ export component AppWindow inherits Window {
     in-out property <bool> pack-link-downloading;
     // Stop that download. Every way out of the dialog calls this first.
     callback cancel-pack-link();
+    // The issue the newest link named, held until its archive arrives and the
+    // import dialog can show it. Empty when the link named none. Kept when a
+    // download fails, so the retry from the same dialog still carries it; the
+    // next link replaces it, and an import that takes it clears it.
+    in-out property <string> pack-link-issue;
     // A link this process was started for, or one a later launch handed
-    // over. Asking is still the backend's decision, not this call's.
-    callback deliver-pack-link(string);
+    // over, with the issue it named (empty for none). Asking is still the
+    // backend's decision, not this call's.
+    callback deliver-pack-link(string, string);
     // The sites agreed to serve modpacks. Granting happens in the link
     // dialog; this is where it is seen and taken back.
     in-out property <[string]> trusted-pack-hosts;
@@ -3220,6 +3229,8 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        if root.import-issue-link != "" : Text { text: GuiI18n.text("gui-issue-link"); color: Theme.text-secondary; font-size: Theme.label-size; }
+                        if root.import-issue-link != "" : BodyText { text: root.import-issue-link; wrap: char-wrap; }
                         Text { text: GuiI18n.text("gui-instance-name-optional"); color: Theme.text-secondary; font-size: Theme.label-size; }
                         TextField {
                             text <=> root.import-name;
