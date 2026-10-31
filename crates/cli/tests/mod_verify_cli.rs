@@ -196,12 +196,56 @@ fn mod_delete_help_says_a_repair_leaves_the_jar_aside() {
     );
 }
 
+/// Whether this is a Linux machine the captured Minecraft metadata has no
+/// natives for.
+///
+/// Mojang publishes Linux natives for x86_64 only. On any other Linux machine
+/// the files of the version cannot be planned, and `verify --shared` refuses
+/// instead of reporting on files it could not use.
+const fn host_has_no_natives() -> bool {
+    cfg!(all(target_os = "linux", not(target_arch = "x86_64")))
+}
+
+/// What a machine the natives do not cover is told. Ephervex keeps the selected
+/// version and does not substitute natives, so the command fails with that
+/// reason and says nothing about files.
+fn assert_refused_for_missing_natives(output: &Output, json: bool) {
+    assert!(
+        !output.status.success(),
+        "verify: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if json {
+        let error: serde_json::Value =
+            serde_json::from_str(&stderr).expect("the refusal is one JSON document");
+        assert_eq!(
+            error["message_id"], "error-launch-incompatible-native-library",
+            "{stderr}"
+        );
+    } else {
+        assert!(
+            stderr.contains("do not support your Linux CPU architecture"),
+            "the refusal does not name the architecture: {stderr}"
+        );
+    }
+    assert!(
+        output.stdout.is_empty(),
+        "a refused verification reported something: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
 #[test]
 fn shared_files_not_downloaded_yet_are_not_counted_as_checked() {
     let sandbox = Sandbox::new();
     let id = sandbox.instance_with_an_unproven_jar();
 
     let output = sandbox.run(&["mod", "verify", "--instance", &id, "--shared"]);
+    if host_has_no_natives() {
+        assert_refused_for_missing_natives(&output, false);
+        return;
+    }
     assert!(
         output.status.success(),
         "verify: {}",
@@ -224,6 +268,10 @@ fn shared_json_output_is_one_document_holding_both_reports() {
     let id = sandbox.instance_with_an_unproven_jar();
 
     let output = sandbox.run(&["--json", "mod", "verify", "--instance", &id, "--shared"]);
+    if host_has_no_natives() {
+        assert_refused_for_missing_natives(&output, true);
+        return;
+    }
     assert!(
         output.status.success(),
         "verify: {}",
@@ -241,6 +289,53 @@ fn shared_json_output_is_one_document_holding_both_reports() {
     );
     assert_eq!(value["shared"]["metadata_cached"], true);
     assert!(value["shared"]["files"].is_array());
+}
+
+/// The refusal check is only reached on a machine the natives do not cover, so
+/// it is exercised here against what such a machine printed.
+#[cfg(unix)]
+mod refusal_check {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::process::{ExitStatus, Output};
+
+    use super::assert_refused_for_missing_natives;
+
+    fn failed(stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    const PLAIN: &str = "verify: error: This version selects native libraries that do not support your Linux CPU architecture.\n       Run this instance on a compatible machine. Ephervex keeps the selected versions and does not substitute native downloads.\n  native classifier `natives-linux` for `org.lwjgl:lwjgl-glfw:3.3.1:natives-linux` does not support `linux-arm64`\n";
+    const JSON: &str = r#"{
+  "action": "Run this instance on a compatible machine. Ephervex keeps the selected versions and does not substitute native downloads.",
+  "detail": ["native classifier `natives-linux` for `org.lwjgl:lwjgl-glfw:3.3.1:natives-linux` does not support `linux-arm64`"],
+  "error": "This version selects native libraries that do not support your Linux CPU architecture.",
+  "java": null,
+  "message_id": "error-launch-incompatible-native-library"
+}"#;
+
+    #[test]
+    fn what_an_arm64_machine_prints_is_accepted_as_the_refusal() {
+        assert_refused_for_missing_natives(&failed(PLAIN), false);
+        assert_refused_for_missing_natives(&failed(JSON), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "does not name the architecture")]
+    fn another_failure_is_not_taken_for_the_refusal() {
+        assert_refused_for_missing_natives(&failed("verify: error: something else\n"), false);
+    }
+
+    #[test]
+    #[should_panic(expected = "verify:")]
+    fn a_success_is_not_taken_for_the_refusal() {
+        let mut output = failed(PLAIN);
+        output.status = ExitStatus::from_raw(0);
+        assert_refused_for_missing_natives(&output, false);
+    }
 }
 
 #[test]

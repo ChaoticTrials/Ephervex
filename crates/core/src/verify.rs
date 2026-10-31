@@ -405,6 +405,21 @@ impl App {
         &self,
         instance: InstanceId,
     ) -> CoreResult<SharedArtifactReport> {
+        self.verify_shared_artifacts_on(instance, Platform::host())
+            .await
+    }
+
+    /// [`Self::verify_shared_artifacts`] for the files `platform` would use.
+    ///
+    /// What is planned depends on the machine, because Mojang publishes natives
+    /// for some of them only. Taking the platform keeps the host out of the
+    /// tests, so they mean the same on every architecture.
+    #[instrument(skip(self, platform), fields(instance = %instance))]
+    pub(crate) async fn verify_shared_artifacts_on(
+        &self,
+        instance: InstanceId,
+        platform: Platform,
+    ) -> CoreResult<SharedArtifactReport> {
         let record = self.current_client(instance)?;
         let loader_libraries_uncovered = record.loader.kind != LoaderKind::Vanilla;
         let Some(metadata) = self
@@ -431,10 +446,7 @@ impl App {
             })?,
             CacheLayout::new(self.paths().cache_dir()),
         );
-        let plan = installer.plan(
-            &metadata,
-            &LaunchFeatures::default().rule_context(Platform::host()),
-        )?;
+        let plan = installer.plan(&metadata, &LaunchFeatures::default().rule_context(platform))?;
 
         let mut planned: Vec<&PlannedArtifact> = vec![&plan.client_jar, &plan.asset_index];
         planned.extend(plan.libraries.iter());
@@ -934,7 +946,7 @@ mod tests {
             .expect("client");
 
         let first = app
-            .verify_shared_artifacts(client.id)
+            .verify_shared_artifacts_on(client.id, linux_x86_64())
             .await
             .expect("report");
         let library = first
@@ -951,13 +963,48 @@ mod tests {
         std::fs::write(&stored_at, b"bit rot").unwrap();
 
         let second = app
-            .verify_shared_artifacts(client.id)
+            .verify_shared_artifacts_on(client.id, linux_x86_64())
             .await
             .expect("report");
 
         let fault = second.faults().next().expect("the damaged library");
         assert_eq!(fault.logical_path, library.logical_path);
         assert_eq!(second.location_of(fault), Some(stored_at.as_path()));
+    }
+
+    /// The platform the captured Minecraft metadata ships Linux natives for.
+    fn linux_x86_64() -> Platform {
+        Platform::new(OsName::Linux, "x86_64", "6.0")
+    }
+
+    /// Mojang publishes no Linux natives for arm64, so the files of a version
+    /// cannot be planned for that machine. Ephervex does not substitute natives,
+    /// and the refusal is the answer, not a gap in the report.
+    #[tokio::test]
+    async fn the_shared_files_of_a_version_with_no_natives_for_the_machine_are_refused() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(base.path())).expect("app");
+        crate::test_fixtures::seed_minecraft(app.paths().cache_dir()).await;
+        let client = app
+            .create_client_for_test(NewClient::new(
+                "shared",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+
+        let error = app
+            .verify_shared_artifacts_on(client.id, Platform::new(OsName::Linux, "arm64", "6.0"))
+            .await
+            .expect_err("no Linux arm64 natives exist for this version");
+
+        assert!(
+            matches!(
+                error,
+                CoreError::Launch(LaunchError::IncompatibleNativeLibrary { .. })
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -973,6 +1020,7 @@ mod tests {
         assert_eq!(issue.error_kind, std::io::ErrorKind::NotFound);
     }
 
+    use ephervex_minecraft::{LaunchError, OsName};
     use ephervex_model::{HashAlgorithm, InstanceId, LoaderKind, LoaderSelection, ModOrigin};
     use ephervex_pack::{
         PackFileRecipe, PackRecipe, ProviderFileIdentity, SideRequirement, SourceStore,
