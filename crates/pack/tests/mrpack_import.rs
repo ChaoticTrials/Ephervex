@@ -55,7 +55,7 @@ fn read_fixture(relative: &str) -> Vec<u8> {
 fn build_archive(destination: &Path, index: &[u8], layers: &[&str]) {
     let file = std::fs::File::create(destination).expect("create archive");
     let mut writer = zip::ZipWriter::new(file);
-    let options: zip::write::FileOptions<'_, ()> =
+    let options: zip::write::FileOptions<'_, '_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
     writer
@@ -670,7 +670,7 @@ async fn a_pack_whose_archive_carries_a_traversing_override_is_refused_before_it
     let archive = workspace.path().join("hostile.mrpack");
     let file = std::fs::File::create(&archive).expect("create");
     let mut writer = zip::ZipWriter::new(file);
-    let options: zip::write::FileOptions<'_, ()> =
+    let options: zip::write::FileOptions<'_, '_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
     writer
         .start_file("modrinth.index.json", options)
@@ -746,7 +746,7 @@ async fn pack_declaring_a_file_and_shipping(
 
     let archive = workspace.join("layer-collision.mrpack");
     let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).expect("create archive"));
-    let options: zip::write::FileOptions<'_, ()> =
+    let options: zip::write::FileOptions<'_, '_, ()> =
         zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     writer
         .start_file("modrinth.index.json", options)

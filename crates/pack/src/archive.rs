@@ -33,6 +33,7 @@
 //! whether it is on a runtime. An override layer extraction polls a
 //! cancellation token between entries and between chunks of an entry.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -306,10 +307,10 @@ impl PackArchive {
         }
         let zip = opened.map_err(|source| PackError::ArchiveInvalid {
             path: path.to_path_buf(),
-            source,
+            source: Box::new(source),
         })?;
 
-        let location = locate(zip.file_names());
+        let location = locate(decoded_names(&zip));
         Ok(Self {
             path: path.to_path_buf(),
             zip,
@@ -329,8 +330,8 @@ impl PackArchive {
 
     /// Every entry name exactly as the central directory spells it, in archive
     /// order. Untrusted text: never a path until it has been validated.
-    pub(crate) fn entry_names(&self) -> impl Iterator<Item = &str> {
-        self.zip.file_names()
+    pub(crate) fn entry_names(&self) -> impl Iterator<Item = Cow<'_, str>> {
+        decoded_names(&self.zip)
     }
 
     /// The archive's own path on disk.
@@ -379,9 +380,10 @@ impl PackArchive {
         if prefix.is_empty() {
             return !self.zip.is_empty();
         }
-        self.zip.file_names().any(|name| {
-            entry_components(name).is_some_and(|parts| {
-                parts.starts_with(prefix) && (parts.len() > prefix.len() || is_directory_name(name))
+        decoded_names(&self.zip).any(|name| {
+            entry_components(&name).is_some_and(|parts| {
+                parts.starts_with(prefix)
+                    && (parts.len() > prefix.len() || is_directory_name(&name))
             })
         })
     }
@@ -440,7 +442,7 @@ impl PackArchive {
                 .by_index(index)
                 .map_err(|source| PackError::ArchiveInvalid {
                     path: self.path.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
             if entry.is_dir() || entry.is_symlink() {
                 continue;
@@ -470,7 +472,7 @@ impl PackArchive {
                         .by_index(index)
                         .map_err(|source| PackError::ArchiveInvalid {
                             path: archive_path.clone(),
-                            source,
+                            source: Box::new(source),
                         })?;
                 allowance.check(entry.size())?;
                 let mut hasher = Sha256::new();
@@ -499,7 +501,7 @@ impl PackArchive {
                 .by_index(index)
                 .map_err(|source| PackError::ArchiveInvalid {
                     path: self.path.clone(),
-                    source,
+                    source: Box::new(source),
                 })?;
             for prefix in prefixes {
                 entry_under(entry.name_raw(), prefix)?;
@@ -528,10 +530,13 @@ impl PackArchive {
             return Some(index);
         }
         (0..self.zip.len()).find(|&index| {
-            self.zip.name_for_index(index).is_some_and(|name| {
-                !is_directory_name(name)
-                    && entry_components(name).is_some_and(|parts| parts == components)
-            })
+            self.zip
+                .name_for_index(index)
+                .and_then(Result::ok)
+                .is_some_and(|name| {
+                    !is_directory_name(&name)
+                        && entry_components(&name).is_some_and(|parts| parts == components)
+                })
         })
     }
 
@@ -555,7 +560,7 @@ impl PackArchive {
     pub fn single_root(&self) -> Option<String> {
         let mut root: Option<String> = None;
         let mut nested_directory = false;
-        for name in self.zip.file_names() {
+        for name in decoded_names(&self.zip) {
             let name = name.replace('\\', "/");
             let trimmed = name.trim_start_matches("./");
             let (first, rest) = trimmed.split_once('/')?;
@@ -617,7 +622,7 @@ impl PackArchive {
             .by_index(index)
             .map_err(|source| PackError::ArchiveInvalid {
                 path: path.clone(),
-                source,
+                source: Box::new(source),
             })?;
         // The declared size can lie, so the read below is bounded as well.
         allowance.check(entry.size())?;
@@ -732,7 +737,7 @@ impl PackArchive {
                         .by_index(index)
                         .map_err(|source| PackError::ArchiveInvalid {
                             path: archive_path.clone(),
-                            source,
+                            source: Box::new(source),
                         })?;
 
                 let name = String::from_utf8_lossy(entry.name_raw()).into_owned();
@@ -821,7 +826,7 @@ impl PackArchive {
             .by_index(index)
             .map_err(|source| PackError::ArchiveInvalid {
                 path: archive_path.clone(),
-                source,
+                source: Box::new(source),
             })?;
 
         let mut file = File::create(target).map_err(|source| PackError::Unwritable {
@@ -927,7 +932,7 @@ fn stream_entry(
             Err(source) => {
                 return Err(PackError::ArchiveInvalid {
                     path: archive.to_path_buf(),
-                    source: zip::result::ZipError::Io(source),
+                    source: Box::new(zip::result::ZipError::Io(source)),
                 });
             }
         };
@@ -936,6 +941,15 @@ fn stream_entry(
     }
     allowance.check(produced)?;
     Ok(produced)
+}
+
+/// Entry names as text, in archive order. A name the archive cannot decode
+/// stands in as a replacement character: it matches no manifest and no wrapper
+/// directory, but it is still an entry, so it cannot hide that the root holds
+/// more than one folder.
+fn decoded_names<R: Read + Seek>(zip: &ZipArchive<R>) -> impl Iterator<Item = Cow<'_, str>> {
+    zip.file_names()
+        .map(|name| name.unwrap_or(Cow::Borrowed("\u{fffd}")))
 }
 
 /// Validates one entry name and returns its path relative to `prefix`, or
@@ -997,7 +1011,7 @@ mod tests {
     fn zip_file(path: &Path, entries: &[(&str, &[u8])]) {
         let file = File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             writer.start_file(*name, options).expect("start entry");
@@ -1017,7 +1031,7 @@ mod tests {
     ) {
         let file = File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let plain: zip::write::FileOptions<'_, ()> =
+        let plain: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (stored_name, stored_body) in stored {
             writer.start_file(*stored_name, plain).expect("start entry");
@@ -1080,8 +1094,11 @@ mod tests {
         );
     }
 
+    // The ZIP reader refuses an entry whose data runs past its declared size, so
+    // an archive that understates it is rejected before any limit of ours is
+    // reached.
     #[test]
-    fn a_manifest_understating_its_size_stops_inflating_at_the_ceiling() {
+    fn a_manifest_understating_its_size_is_refused() {
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = dir.path().join("bomb.mrpack");
         let body = vec![b' '; 64 * 1024];
@@ -1097,56 +1114,63 @@ mod tests {
         .expect("open");
         let error = pack
             .read_manifest("modrinth.index.json")
-            .expect_err("a manifest over its ceiling is refused");
+            .expect_err("a manifest larger than it declares is refused");
         assert!(
-            matches!(
-                error,
-                PackError::LimitExceeded {
-                    limit: "manifest-size",
-                    reached: 1025,
-                    ..
-                }
-            ),
-            "reading stops one byte past the ceiling: {error:?}"
+            matches!(error, PackError::ArchiveInvalid { .. }),
+            "refused as an invalid archive: {error:?}"
         );
     }
 
+    // The cap is the launcher's own and does not depend on what the ZIP reader
+    // enforces, so it is exercised with a source that never ends.
     #[test]
-    fn a_manifest_read_is_bounded_by_the_remaining_total() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let archive = dir.path().join("bomb.mrpack");
-        zip_with_understated_entry(
-            &archive,
-            &[("overrides/a.bin", &[b'x'; 40])],
-            "modrinth.index.json",
-            &[b' '; 80],
-            1,
-        );
-
-        let mut pack = PackArchive::open(
-            &archive,
-            ExtractionLimits {
-                max_total_bytes: 100,
-                ..ExtractionLimits::default()
+    fn an_entry_that_never_ends_is_cut_off_one_byte_past_its_allowance() {
+        let allowance = Allowance {
+            limit: "entry-size",
+            allowed: 100,
+            spent: 40,
+        };
+        let mut written = 0_u64;
+        let error = stream_entry(
+            &mut io::repeat(b'x'),
+            allowance,
+            Path::new("bomb.mrpack"),
+            &mut |chunk| {
+                written += u64::try_from(chunk.len()).expect("chunk length");
+                Ok(())
             },
         )
-        .expect("open");
-        pack.extract_prefix("overrides", &dir.path().join("out"))
-            .expect("the layer fits");
-        let error = pack
-            .read_manifest("modrinth.index.json")
-            .expect_err("a manifest over what is left of the total is refused");
+        .expect_err("an endless entry is refused");
         assert!(
             matches!(
                 error,
                 PackError::LimitExceeded {
-                    limit: "total-size",
+                    limit: "entry-size",
                     allowed: 100,
                     reached: 101,
                 }
             ),
-            "reading stops one byte past the remaining total: {error:?}"
+            "unexpected error: {error:?}"
         );
+        assert_eq!(written, 61, "reading stops one byte past what is left");
+    }
+
+    #[test]
+    fn a_ceiling_tied_with_the_remaining_total_is_the_limit_reported() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("pack.mrpack");
+        zip_file(&archive, &[("overrides/a.txt", b"a")]);
+        let pack = PackArchive::open(
+            &archive,
+            ExtractionLimits {
+                max_total_bytes: 100,
+                max_entry_bytes: 100,
+                ..ExtractionLimits::default()
+            },
+        )
+        .expect("open");
+
+        assert_eq!(pack.allowance(&[("entry-size", 100)]).limit, "entry-size");
     }
 
     #[test]
@@ -1242,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_understating_its_size_stops_at_the_remaining_total_and_leaves_no_file() {
+    fn an_entry_understating_its_size_is_refused_and_leaves_no_file() {
         let dir = tempfile::tempdir().expect("temp dir");
         let archive = dir.path().join("bomb.mrpack");
         zip_with_understated_entry(
@@ -1266,52 +1290,14 @@ mod tests {
         let destination = dir.path().join("out");
         let error = pack
             .extract_prefix("overrides", &destination)
-            .expect_err("an entry over what is left of the total is refused");
+            .expect_err("an entry larger than it declares is refused");
         assert!(
-            matches!(
-                error,
-                PackError::LimitExceeded {
-                    limit: "total-size",
-                    allowed: 100,
-                    reached: 101,
-                }
-            ),
-            "writing stops one byte past the remaining total: {error:?}"
+            matches!(error, PackError::ArchiveInvalid { .. }),
+            "refused as an invalid archive: {error:?}"
         );
         assert!(
             !destination.join("big.bin").exists(),
             "the partially written entry is removed rather than left behind"
-        );
-    }
-
-    #[test]
-    fn an_entry_ceiling_tied_with_the_remaining_total_is_the_limit_reported() {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let archive = dir.path().join("bomb.mrpack");
-        zip_with_understated_entry(&archive, &[], "overrides/big.bin", &[b'x'; 4096], 1);
-
-        let mut pack = PackArchive::open(
-            &archive,
-            ExtractionLimits {
-                max_total_bytes: 100,
-                max_entry_bytes: 100,
-                ..ExtractionLimits::default()
-            },
-        )
-        .expect("open");
-        let error = pack
-            .extract_prefix("overrides", &dir.path().join("out"))
-            .expect_err("an oversize entry is refused");
-        assert!(
-            matches!(
-                error,
-                PackError::LimitExceeded {
-                    limit: "entry-size",
-                    allowed: 100,
-                    reached: 101,
-                }
-            ),
-            "unexpected error: {error:?}"
         );
     }
 
@@ -1578,15 +1564,15 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn an_earlier_end_record_cannot_be_used_to_parse_past_the_entry_limit() {
-        // A trailing end record whose directory parses a few headers and then
-        // breaks makes `zip` fall back to the previous end record, which
-        // declares far more entries. Both candidates draw on one budget.
-        let dir = tempfile::tempdir().expect("temp dir");
-        let archive = dir.path().join("fallback.mrpack");
-        write_numbered_zip(&archive, 200);
-        let mut bytes = std::fs::read(&archive).expect("read archive");
+    /// A 200-entry archive followed by a second end record whose directory
+    /// parses five headers and then breaks on a sixth. With the gap, that
+    /// directory does not end exactly at its end record.
+    fn write_archive_with_a_broken_trailing_end_record(
+        archive: &Path,
+        gap_before_end_record: bool,
+    ) {
+        write_numbered_zip(archive, 200);
+        let mut bytes = std::fs::read(archive).expect("read archive");
 
         let u16_at =
             |bytes: &[u8], at: usize| usize::from(u16::from_le_bytes([bytes[at], bytes[at + 1]]));
@@ -1615,6 +1601,9 @@ mod tests {
         let directory_offset = u32::try_from(bytes.len()).expect("small archive");
         let directory_size = u32::try_from(copied.len()).expect("small directory");
         bytes.extend_from_slice(&copied);
+        if gap_before_end_record {
+            bytes.extend_from_slice(&[0; 4]);
+        }
         bytes.extend_from_slice(b"PK\x05\x06");
         bytes.extend_from_slice(&[0; 4]); // disk numbers
         bytes.extend_from_slice(&6u16.to_le_bytes()); // entries on this disk
@@ -1622,7 +1611,17 @@ mod tests {
         bytes.extend_from_slice(&directory_size.to_le_bytes());
         bytes.extend_from_slice(&directory_offset.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes()); // comment length
-        std::fs::write(&archive, bytes).expect("rewrite archive");
+        std::fs::write(archive, bytes).expect("rewrite archive");
+    }
+
+    #[test]
+    fn an_earlier_end_record_cannot_be_used_to_parse_past_the_entry_limit() {
+        // A trailing end record whose directory parses a few headers and then
+        // breaks makes `zip` fall back to the previous end record, which
+        // declares far more entries. Both candidates draw on one budget.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("fallback.mrpack");
+        write_archive_with_a_broken_trailing_end_record(&archive, true);
 
         // Five headers from the trailing record, then six from the earlier one.
         let (_, parsed) = headers_parsed_before_refusal(&archive, 10);
@@ -1642,6 +1641,25 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // `zip` does not fall back past an end record whose directory ends exactly
+    // at it, so the earlier record's far larger directory is never parsed.
+    #[test]
+    fn a_broken_trailing_end_record_that_abuts_its_directory_is_not_fallen_back_from() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = dir.path().join("abutting.mrpack");
+        write_archive_with_a_broken_trailing_end_record(&archive, false);
+
+        let (opened, parsed) = headers_parsed_before_refusal(&archive, 10);
+        assert!(!opened, "the broken trailing record is not recovered from");
+        assert_eq!(parsed, 6, "only the trailing record's own headers are read");
+        let error =
+            PackArchive::open(&archive, ExtractionLimits::default()).expect_err("must refuse");
+        assert!(
+            matches!(error, PackError::ArchiveInvalid { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -1813,7 +1831,7 @@ mod tests {
         {
             let file = File::create(&archive).expect("create archive");
             let mut writer = zip::ZipWriter::new(file);
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Stored);
             writer
                 .add_symlink("overrides/escape.txt", "/etc/passwd", options)

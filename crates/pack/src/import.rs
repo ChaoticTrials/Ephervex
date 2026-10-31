@@ -599,7 +599,7 @@ mod tests {
     fn zip_file(path: &Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             writer.start_file(*name, options).expect("start entry");
@@ -613,7 +613,7 @@ mod tests {
     fn zip_file_with_encrypted(path: &Path, entries: &[(&str, &[u8])], encrypted: &[&str]) {
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let plain: zip::write::FileOptions<'_, ()> =
+        let plain: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             let options = if encrypted.contains(name) {

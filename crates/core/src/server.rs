@@ -2588,7 +2588,7 @@ mod tests {
         use std::io::Write as _;
 
         let mut writer = zip::ZipWriter::new(std::fs::File::create(path).expect("create"));
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for name in entries {
             writer.start_file(*name, options).expect("start entry");

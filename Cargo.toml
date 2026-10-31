@@ -98,7 +98,7 @@ open = "5.4.1"
 # platform accepts there.
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "gzip", "http2", "json", "rustls", "stream", "system-proxy"] }
 rfd = "0.17.2"
-quick-xml = { version = "0.38.4", features = ["serialize"] }
+quick-xml = { version = "0.41.0", features = ["serialize"] }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 raw-window-handle = "0.6.2"
 rust-embed = "8.12.0"
@@ -133,7 +133,7 @@ uuid = { version = "1.24.0", features = ["v4", "serde"] }
 # Reaches one X11 window property the toolkit does not model: the aspect a
 # window manager may resize a window through.
 x11rb = "0.13.2"
-zip = "8.6.0"
+zip = "9.0.0"
 
 # --- test-only ---
 # Drives a real `AppWindow` headlessly so a layering mistake in the Slint markup

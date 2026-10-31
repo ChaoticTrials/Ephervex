@@ -42,6 +42,7 @@
 //! of rules mean one of them gets forgotten, and it will be the one with the
 //! vulnerability (see `docs/architecture.md`).
 
+use std::borrow::Cow;
 use std::io::{Read as _, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -166,7 +167,12 @@ pub fn extract(
 
         // `name` is attacker-controlled in the general case, so the raw string
         // is what gets checked - never a value derived from it.
-        let name = entry.name().to_owned();
+        let Ok(name) = entry.name().map(Cow::into_owned) else {
+            return Err(NativesError::UnsafePath {
+                path: archive.to_path_buf(),
+                entry: String::from_utf8_lossy(entry.name_raw()).into_owned(),
+            });
+        };
         if entry.is_dir() {
             continue;
         }
@@ -493,7 +499,7 @@ mod tests {
     fn jar(entries: &[(&str, &[u8])]) -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut writer = zip::ZipWriter::new(std::fs::File::create(file.path()).expect("create"));
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             writer.start_file(*name, options).expect("start entry");

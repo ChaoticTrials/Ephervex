@@ -999,7 +999,7 @@ mod tests {
         let mut archive = Vec::new();
         {
             let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut archive));
-            let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+            let options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
             writer
                 .start_file("modrinth.index.json", options)

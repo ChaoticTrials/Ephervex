@@ -3463,7 +3463,7 @@ mod tests {
         use std::io::Write as _;
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         writer
             .start_file("modrinth.index.json", options)

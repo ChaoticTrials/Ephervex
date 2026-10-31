@@ -126,10 +126,11 @@ pub fn identify<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<PackFo
 /// Entries are visited in the order given. A manifest at the archive root
 /// outranks any wrapped one, and among wrapped manifests the first wins, so the
 /// answer is a function of the archive alone.
-pub(crate) fn locate<'a>(entries: impl IntoIterator<Item = &'a str>) -> Option<PackLocation> {
+pub(crate) fn locate(entries: impl IntoIterator<Item = impl AsRef<str>>) -> Option<PackLocation> {
     let mut first_wrapped: Option<PackLocation> = None;
 
     for entry in entries {
+        let entry = entry.as_ref();
         // A directory entry named like a manifest is not a manifest.
         if is_directory_name(entry) {
             continue;

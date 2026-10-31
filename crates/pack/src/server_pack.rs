@@ -180,7 +180,7 @@ impl ServerPackEvidence {
         let mut loaders: Vec<ArchiveLoader> = Vec::new();
         let mut unattributed_minecraft: Vec<String> = Vec::new();
         for name in pack.entry_names() {
-            let Some(mut parts) = entry_components(name) else {
+            let Some(mut parts) = entry_components(&name) else {
                 continue;
             };
             if let Some(wrapper) = &wrapper {
@@ -189,7 +189,7 @@ impl ServerPackEvidence {
                 }
                 parts.remove(0);
             }
-            let directory = is_directory_name(name);
+            let directory = is_directory_name(&name);
             match parts.as_slice() {
                 [mods, jar] if !directory && mods.as_str() == MODS_DIR && is_jar(jar) => {
                     carries_mods = true;
@@ -559,7 +559,7 @@ mod tests {
     fn zip_file(path: &Path, entries: &[(&str, &[u8])]) {
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> =
+        let options: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             if name.ends_with('/') {
@@ -577,7 +577,7 @@ mod tests {
     fn zip_file_with_encrypted(path: &Path, entries: &[(&str, &[u8])], encrypted: &[&str]) {
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let plain: zip::write::FileOptions<'_, ()> =
+        let plain: zip::write::FileOptions<'_, '_, ()> =
             zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
         for (name, body) in entries {
             let options = if encrypted.contains(name) {

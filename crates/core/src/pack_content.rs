@@ -172,7 +172,7 @@ mod tests {
     fn pack_with_overrides(path: &Path) {
         let file = std::fs::File::create(path).expect("create archive");
         let mut writer = zip::ZipWriter::new(file);
-        let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+        let options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
         writer
             .start_file("modrinth.index.json", options)
             .expect("start index");

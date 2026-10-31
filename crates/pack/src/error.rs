@@ -42,7 +42,9 @@ pub enum PackError {
     ArchiveInvalid {
         path: PathBuf,
         #[source]
-        source: zip::result::ZipError,
+        // Boxed: the ZIP library's error is large enough to push every result
+        // that carries this one over the size clippy accepts.
+        source: Box<zip::result::ZipError>,
     },
 
     /// Nothing in the archive identifies it as a pack this launcher knows.

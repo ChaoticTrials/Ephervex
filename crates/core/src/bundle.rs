@@ -431,7 +431,13 @@ mod tests {
         let file = std::fs::File::open(archive).expect("open");
         let mut zip = zip::ZipArchive::new(file).expect("read archive");
         (0..zip.len())
-            .map(|index| zip.by_index(index).expect("entry").name().to_owned())
+            .map(|index| {
+                zip.by_index(index)
+                    .expect("entry")
+                    .name()
+                    .expect("entry name")
+                    .into_owned()
+            })
             .collect()
     }
 
@@ -661,7 +667,10 @@ mod tests {
         write_entry(&mut archive, "after.txt", b"after", options).expect("later entry");
 
         let mut zip = zip::ZipArchive::new(archive.finish().expect("finish")).expect("read");
-        let names: Vec<_> = zip.file_names().map(str::to_owned).collect();
+        let names: Vec<String> = zip
+            .file_names()
+            .map(|name| name.expect("entry name").into_owned())
+            .collect();
         assert_eq!(names.len(), 2, "{names:?}");
         assert!(names.iter().all(|name| name != "logs/broken.log"));
         let mut text = String::new();
