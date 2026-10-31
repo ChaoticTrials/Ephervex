@@ -44,7 +44,7 @@ export component DiagnosticBundlePanel inherits VerticalLayout {
         background: Theme.background;
         height: min(300px, part-list.preferred-height + 2px);
         ScrollView {
-            viewport-width: self.width;
+            content-width: self.width;
             part-list := VerticalLayout {
                 padding: 8px;
                 spacing: 6px;
@@ -411,7 +411,7 @@ export component DiagnosticsSurface inherits Rectangle {
     changed host-id => { root.load-java(); }
     init => { root.load-java(); }
     ScrollView {
-        viewport-width: self.width;
+        content-width: self.width;
         body := VerticalLayout {
             // Two columns when the page can hold both: what is wrong on the
             // left, what it is made of on the right.

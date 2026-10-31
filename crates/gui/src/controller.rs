@@ -21830,7 +21830,7 @@ mod tests {
         assert!(source.contains("component MinecraftPreferenceRowCard inherits Rectangle"));
         assert!(source.contains("for row[index] in root.minecraft-preference-rows"));
         assert!(source.contains(": MinecraftPreferenceRowCard {"));
-        assert!(source.contains("ScrollView { viewport-width: self.width;"));
+        assert!(source.contains("ScrollView { content-width: self.width;"));
     }
 
     #[test]

@@ -160,7 +160,7 @@ export component HostRuntimeForm inherits ScrollView {
         max-field.text = root.host.runtime-memory-max;
         args-field.text = root.host.runtime-jvm-args;
     }
-    viewport-width: self.width;
+    content-width: self.width;
     VerticalLayout { alignment: start; width: min(parent.width, 720px); spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
         SectionTitle { title: GuiI18n.text("gui-instance-runtime"); detail: root.for-client ? GuiI18n.text("gui-instance-runtime-detail") : GuiI18n.text("gui-server-runtime-detail"); }
         BodyText { text: root.host.runtime-global; color: Theme.text-muted; wrap: word-wrap; }
@@ -365,7 +365,7 @@ export component ServerPropertiesForm inherits VerticalLayout {
     spacing: 0px;
     ScrollView {
         vertical-stretch: 1;
-        viewport-width: self.visible-width;
+        content-width: self.visible-width;
         VerticalLayout { alignment: start; width: min(parent.width, 1100px); spacing: 14px; padding-right: 12px; padding-bottom: 12px;
             if root.running && !root.host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-properties-running"); color: Theme.text-secondary; wrap: word-wrap; }
             if root.host.server.restart-required : HorizontalLayout { alignment: start; Pill { text: GuiI18n.text("gui-server-restart-required"); tone-color: Theme.warning; } }

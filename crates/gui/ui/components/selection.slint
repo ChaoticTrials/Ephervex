@@ -168,10 +168,10 @@ export component ChoiceBox inherits Rectangle {
             function reveal() {
                 let top = root.highlight * Theme.control-height;
                 let visible = root.visible-items * Theme.control-height;
-                if (top < -list.viewport-y) {
-                    list.viewport-y = -top;
-                } else if (top + Theme.control-height > -list.viewport-y + visible) {
-                    list.viewport-y = -(top + Theme.control-height - visible);
+                if (top < -list.content-y) {
+                    list.content-y = -top;
+                } else if (top + Theme.control-height > -list.content-y + visible) {
+                    list.content-y = -(top + Theme.control-height - visible);
                 }
             }
             init => { self.reveal(); }

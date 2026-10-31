@@ -316,8 +316,8 @@ export component SelectableText inherits Rectangle {
                 return reject;
             }
             selectable-scroll := ScrollView {
-                viewport-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, selectable-input.preferred-width + 16px) : self.visible-width;
-                viewport-height: max(self.visible-height, selectable-input.preferred-height + 16px);
+                content-width: root.wrap == TextWrap.no-wrap ? max(self.visible-width, selectable-input.preferred-width + 16px) : self.visible-width;
+                content-height: max(self.visible-height, selectable-input.preferred-height + 16px);
                 selectable-input := TextInput {
                     x: 8px; y: 8px;
                     width: root.wrap == TextWrap.no-wrap ? max(selectable-scroll.visible-width - 16px, self.preferred-width) : selectable-scroll.visible-width - 16px;

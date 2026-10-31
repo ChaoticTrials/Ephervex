@@ -1587,7 +1587,7 @@ export component AppWindow inherits Window {
                                         SettingsNavItem { label: GuiI18n.text("gui-settings-about"); icon: @image-url("../../../assets/icons/settings-about.svg"); selected: root.settings-tab == "About & Licenses"; clicked => { root.open-settings("About & Licenses"); } }
                                     }
                                 }
-                                Rectangle { horizontal-stretch: 1; background: Theme.surface; ScrollView { viewport-width: self.visible-width; VerticalLayout { width: parent.width; alignment: start; padding-left: 36px; padding-right: 36px; padding-top: 22px; padding-bottom: 36px; spacing: 14px;
+                                Rectangle { horizontal-stretch: 1; background: Theme.surface; ScrollView { content-width: self.visible-width; VerticalLayout { width: parent.width; alignment: start; padding-left: 36px; padding-right: 36px; padding-top: 22px; padding-bottom: 36px; spacing: 14px;
                                 if root.settings-tab == "Minecraft" : PageIntro { title: GuiI18n.text("gui-minecraft-defaults-heading"); subtitle: GuiI18n.text("gui-minecraft-defaults-detail"); }
                                 if root.settings-tab == "Server Properties" : PageIntro { title: GuiI18n.text("gui-server-defaults-heading"); subtitle: GuiI18n.text("gui-server-defaults-intro"); }
                                 if root.settings-tab == "General" : VerticalLayout { alignment: start; spacing: 14px;
@@ -1825,7 +1825,7 @@ export component AppWindow inherits Window {
                                     }
                             // The outline stays put and the rows scroll inside it, so
                             // the list is closed at both ends however far it is scrolled.
-                            if !root.minecraft-raw-open : Panel { vertical-stretch: 1; rows-view := ScrollView { viewport-width: self.visible-width; VerticalLayout { alignment: start; spacing: 0px;
+                            if !root.minecraft-raw-open : Panel { vertical-stretch: 1; rows-view := ScrollView { content-width: self.visible-width; VerticalLayout { alignment: start; spacing: 0px;
                                     if root.minecraft-preference-rows.length == 0 : EmptyState { title: GuiI18n.text("gui-minecraft-no-matches"); message: GuiI18n.text("gui-minecraft-no-matches-detail"); }
                                     // Two columns of rows once each can split on its own: the first half of the
                                     // rows on the left, the rest on the right. The scroll bar's room is kept
@@ -2414,7 +2414,7 @@ export component AppWindow inherits Window {
                                 // text and stacks its buttons rather than scrolling
                                 // sideways into a column centered off screen.
                                 if host.available && host.kind == "client" && pane.surface == "Overview" : ScrollView {
-                                    viewport-width: self.visible-width;
+                                    content-width: self.visible-width;
                                     client-overview := VerticalLayout { alignment: start; x: 0px; y: 0px; width: parent.width; spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room;
                                         property <bool> narrow: self.width < 620px;
                                         ClientOverviewSummary {
@@ -2629,7 +2629,7 @@ export component AppWindow inherits Window {
                                         Rectangle { horizontal-stretch: 1; background: Theme.well; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; VerticalLayout { if log-view.report == "" : EmptyState { icon: @image-url("../../../assets/icons/nav-logs.svg"); title: GuiI18n.text("gui-no-file-open"); message: GuiI18n.text("gui-no-file-open-detail"); } if log-view.report != "" : SelectableText { text: log-view.report; font-size: root.technical-text-size * 1px; } if log-view.report != "" : AppButton { text: GuiI18n.text("gui-copy"); clicked => { root.copy-text(log-view.report); } } } }
                                     }
                                 }
-                                if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { viewport-width: self.visible-width; server-overview := VerticalLayout { alignment: start; x: 0px; y: 0px; width: min(parent.width, 980px); spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room; property <bool> narrow: self.width < 620px; Heading { text: GuiI18n.text("gui-dedicated-server"); overflow: elide; } BodyText { text: host.server.state-detail; wrap: word-wrap; }
+                                if host.available && host.kind == "server" && pane.surface == "Overview" : ScrollView { content-width: self.visible-width; server-overview := VerticalLayout { alignment: start; x: 0px; y: 0px; width: min(parent.width, 980px); spacing: 12px; padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room; padding-bottom: Theme.shadow-room; property <bool> narrow: self.width < 620px; Heading { text: GuiI18n.text("gui-dedicated-server"); overflow: elide; } BodyText { text: host.server.state-detail; wrap: word-wrap; }
                                     if host.server.restart-required : BodyText { text: GuiI18n.text("gui-server-restart-required-detail"); color: Theme.warning; wrap: word-wrap; }
                                     ServerFiles {
                                         open-location(location) => { root.open-server-location(host.id, location); }
@@ -2928,7 +2928,7 @@ export component AppWindow inherits Window {
                     spacing: 10px;
                     ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: self.visible-width;
+                    content-width: self.visible-width;
                     VerticalLayout {
                         alignment: start;
                         spacing: 14px;
@@ -3074,7 +3074,7 @@ export component AppWindow inherits Window {
                     }
                 }
                 if root.modal == "import" : ScrollView {
-                    viewport-width: self.width;
+                    content-width: self.width;
                     VerticalLayout {
                         padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room;
                         padding-bottom: Theme.shadow-room;
@@ -3124,7 +3124,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.import-optional-items.length > 0 : ScrollView {
-                            viewport-width: self.width;
+                            content-width: self.width;
                             height: min(root.import-optional-items.length * 28px, 200px);
                             VerticalLayout {
                                 for item in root.import-optional-items : HorizontalLayout {
@@ -3149,7 +3149,7 @@ export component AppWindow inherits Window {
                             }
                         }
                         if root.import-blocked-items.length > 0 : ScrollView {
-                            viewport-width: self.width;
+                            content-width: self.width;
                             height: min(root.import-blocked-items.length * 64px, 220px);
                             VerticalLayout {
                                 spacing: 6px;
@@ -3186,7 +3186,7 @@ export component AppWindow inherits Window {
                         }
                         if root.import-duplicate-items.length > 0 : BodyText { text: GuiI18n.text("gui-import-duplicate-detail"); color: Theme.text-secondary; wrap: word-wrap; }
                         if root.import-duplicate-items.length > 0 : ScrollView {
-                            viewport-width: self.width;
+                            content-width: self.width;
                             height: min(root.import-duplicate-items.length * 100px, 260px);
                             VerticalLayout {
                                 spacing: 6px;
@@ -3265,7 +3265,7 @@ export component AppWindow inherits Window {
                 if root.modal == "create-server" : VerticalLayout { spacing: 10px;
                     ScrollView {
                         vertical-stretch: 1;
-                        viewport-width: self.visible-width;
+                        content-width: self.visible-width;
                         VerticalLayout {
                             padding-left: Theme.lift-room;
                             padding-top: Theme.lift-room;
@@ -3476,7 +3476,7 @@ export component AppWindow inherits Window {
                     if root.mod-versions.length > 0 : Text { text: GuiI18n.text("gui-mod-compatible-versions"); color: Theme.text-secondary; font-size: Theme.label-size; }
                     if root.mod-versions.length > 0 : Rectangle {
                         vertical-stretch: 1; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
-                        ScrollView { viewport-width: self.width; VerticalLayout { padding: 6px; spacing: 4px;
+                        ScrollView { content-width: self.width; VerticalLayout { padding: 6px; spacing: 4px;
                             for entry in root.mod-versions : Rectangle {
                                 height: 46px; border-radius: Theme.small-radius;
                                 border-width: entry.version-id == root.mod-action-selected ? Theme.selection-outline-width : Theme.strong-border-width;
@@ -3558,7 +3558,7 @@ export component AppWindow inherits Window {
                     BodyText { text: GuiI18n.text("gui-mod-acquire-watching"); color: Theme.text-muted; wrap: word-wrap; }
                     Rectangle {
                         vertical-stretch: 1; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
-                        ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 6px; spacing: 6px;
+                        ScrollView { content-width: self.width; VerticalLayout { alignment: start; padding: 6px; spacing: 6px;
                             for item in root.mod-acquisition-items : Rectangle {
                                 height: 58px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.surface;
                                 HorizontalLayout { padding: 8px; spacing: 8px;
@@ -3584,7 +3584,7 @@ export component AppWindow inherits Window {
                         // Sized to its own content so that the linked-server
                         // list beside it is not squeezed by an empty box.
                         vertical-stretch: 1; max-height: root.mod-removal-dependencies.length * 24px + 18px; border-radius: Theme.card-radius; border-width: Theme.strong-border-width; border-color: Theme.border-strong; background: Theme.background;
-                        ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; padding: 9px; spacing: 4px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; height: 20px; overflow: elide; } } }
+                        ScrollView { content-width: self.width; VerticalLayout { alignment: start; padding: 9px; spacing: 4px; for name in root.mod-removal-dependencies : Text { text: name; color: Theme.text-secondary; font-size: Theme.label-size; height: 20px; overflow: elide; } } }
                     }
                     if root.mod-removal-dependencies.length == 0 && !root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-no-dependencies"); color: Theme.text-muted; wrap: word-wrap; }
                     if root.mod-removal-unprovable : BodyText { text: GuiI18n.text("gui-mod-remove-dependencies-unprovable"); color: Theme.text-muted; wrap: word-wrap; }
@@ -3635,7 +3635,7 @@ export component AppWindow inherits Window {
                     BodyText { text: GuiI18n.text("gui-groups-detail"); wrap: word-wrap; }
                     if root.instance-groups.length == 0 : BodyText { text: GuiI18n.text("gui-groups-none"); color: Theme.text-muted; wrap: word-wrap; }
                     ScrollView {
-                        viewport-width: self.visible-width;
+                        content-width: self.visible-width;
                         VerticalLayout {
                             alignment: start; spacing: 8px;
                             for group in root.instance-groups : Rectangle {
@@ -3720,7 +3720,7 @@ export component AppWindow inherits Window {
                     spacing: 12px;
                     vertical-stretch: 1;
                     ScrollView {
-                        viewport-width: self.width;
+                        content-width: self.width;
                         vertical-stretch: 1;
                         VerticalLayout {
                             padding-left: Theme.lift-room; padding-top: Theme.lift-room; padding-right: Theme.shadow-room;
@@ -3764,7 +3764,7 @@ export component AppWindow inherits Window {
                 if root.modal == "pane-host" : VerticalLayout { spacing: 12px;
                     TextField { text <=> root.pane-host-query; placeholder: GuiI18n.text("gui-filter-hosts"); input-type: InputType.search; edited(text) => { root.pane-host-query-changed(); } }
                     ScrollView {
-                        viewport-width: self.visible-width;
+                        content-width: self.visible-width;
                         VerticalLayout {
                             // The selected card's ring and every card's shadow lie outside it.
                             padding: Theme.shadow-room;
@@ -3824,7 +3824,7 @@ export component AppWindow inherits Window {
                     BodyText { text: root.promote-destination; color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; }
                     if root.promote-servers.length > 0 : BodyText { text: GuiI18n.count("gui-make-persistent-servers", root.promote-servers.length); wrap: word-wrap; }
                     if root.promote-servers.length > 0 : ScrollView {
-                        viewport-width: self.width;
+                        content-width: self.width;
                         height: min(root.promote-servers.length * 28px, 168px);
                         vertical-stretch: 0;
                         VerticalLayout {
@@ -3843,7 +3843,7 @@ export component AppWindow inherits Window {
                     if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; }
                     ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-make-persistent-confirm"); tone: "primary"; clicked => { root.submit-make-persistent(root.pending-action-id); } } }
                 }
-                if root.modal == "absent-mods" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.count("gui-absent-mods-detail", root.absent-mods.length); wrap: word-wrap; } ScrollView { height: min(140px, root.absent-mods.length * 22px); vertical-stretch: 0; viewport-width: self.width; VerticalLayout { spacing: 2px; for name in root.absent-mods : BodyText { text: "\u{2022} " + name; color: Theme.text-secondary; font-size: Theme.caption-size; overflow: elide; } } } BodyText { text: GuiI18n.text("gui-absent-mods-note"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-copy-without-them"); clicked => { root.duplicate-client-deciding(root.pending-action-id, true); } } AppButton { text: GuiI18n.text("gui-copy-with-them"); tone: "primary"; clicked => { root.duplicate-client-deciding(root.pending-action-id, false); } } } }
+                if root.modal == "absent-mods" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.count("gui-absent-mods-detail", root.absent-mods.length); wrap: word-wrap; } ScrollView { height: min(140px, root.absent-mods.length * 22px); vertical-stretch: 0; content-width: self.width; VerticalLayout { spacing: 2px; for name in root.absent-mods : BodyText { text: "\u{2022} " + name; color: Theme.text-secondary; font-size: Theme.caption-size; overflow: elide; } } } BodyText { text: GuiI18n.text("gui-absent-mods-note"); color: Theme.text-muted; font-size: Theme.caption-size; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } } AppButton { text: GuiI18n.text("gui-copy-without-them"); clicked => { root.duplicate-client-deciding(root.pending-action-id, true); } } AppButton { text: GuiI18n.text("gui-copy-with-them"); tone: "primary"; clicked => { root.duplicate-client-deciding(root.pending-action-id, false); } } } }
                 if root.modal == "delete-instance" || root.modal == "delete-server" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value(root.modal == "delete-instance" ? "gui-delete-instance-detail" : "gui-delete-server-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-snapshot-deletion-note; color: Theme.warning; wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-action-linked-servers > 0 : BodyText { text: GuiI18n.count("gui-delete-instance-linked", root.pending-action-linked-servers); color: Theme.warning; wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-deletion-stops-servers : BodyText { text: GuiI18n.count("gui-delete-instance-stops-servers", root.pending-action-stoppable-linked-servers); color: Theme.warning; wrap: word-wrap; } if root.modal == "delete-instance" && root.pending-action-unstoppable-linked-servers > 0 : BodyText { text: GuiI18n.count("gui-delete-instance-unstoppable-servers", root.pending-action-unstoppable-linked-servers); color: Theme.danger; wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } // What happens to the files is the choice, so each outcome is a card of its own.
                     HorizontalLayout { spacing: 12px; padding-right: Theme.shadow-room;
                         Outlined { radius: Theme.card-radius; height: 190px * Theme.text-scale;
@@ -3883,8 +3883,8 @@ export component AppWindow inherits Window {
                     BodyText { text: GuiI18n.value("gui-theme-problems-detail", root.themes-folder); wrap: word-wrap; }
                     ScrollView {
                         vertical-stretch: 1;
-                        viewport-width: self.width;
-                        viewport-height: theme-problem-list.preferred-height;
+                        content-width: self.width;
+                        content-height: theme-problem-list.preferred-height;
                         theme-problem-list := VerticalLayout {
                             alignment: start;
                             spacing: 8px;
@@ -3895,9 +3895,9 @@ export component AppWindow inherits Window {
                 }
                 if root.modal == "license" : ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: self.width;
+                    content-width: self.width;
                     // Without the content's own height the viewport keeps the ScrollView's, and a longer text is centered in it rather than scrolled from the top.
-                    viewport-height: ephervex-license.preferred-height;
+                    content-height: ephervex-license.preferred-height;
                     ephervex-license := HorizontalLayout {
                         alignment: center;
                         Text { text: root.license-text; color: Theme.text-secondary; font-family: Theme.mono-family; font-size: Theme.label-size; wrap: word-wrap; }
@@ -3946,9 +3946,9 @@ export component AppWindow inherits Window {
                         // against. Without it the paragraph takes its
                         // natural width and the reader scrolls sideways
                         // through every line.
-                        viewport-width: self.width;
+                        content-width: self.width;
                         // And its height, or the viewport keeps the ScrollView's and centers a longer license in it instead of scrolling from the top.
-                        viewport-height: third-party-license.preferred-height;
+                        content-height: third-party-license.preferred-height;
                         third-party-license := Text { text: root.third-party-packages[root.third-party-open].text; width: parent.width; color: Theme.text-secondary; font-family: Theme.mono-family; font-size: Theme.label-size; wrap: word-wrap; }
                     }
                     ActionRow { AppButton { text: GuiI18n.text("gui-third-party-back"); clicked => { root.third-party-open = -1; } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } }

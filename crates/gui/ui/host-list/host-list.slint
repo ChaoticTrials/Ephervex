@@ -59,15 +59,15 @@ component HostScroll inherits Rectangle {
         let in-view = top - root.absolute-position.y;
         let below = in-view + card-height + Theme.shadow-room - view.visible-height;
         if in-view < root.top-room {
-            view.viewport-y = min(0px, view.viewport-y + root.top-room - in-view);
+            view.content-y = min(0px, view.content-y + root.top-room - in-view);
         } else if below > 0px {
-            view.viewport-y = max(min(0px, view.visible-height - view.viewport-height), view.viewport-y - below);
+            view.content-y = max(min(0px, view.visible-height - view.content-height), view.content-y - below);
         }
     }
     view := ScrollView {
         width: root.width;
         height: root.height;
-        viewport-width: self.width;
+        content-width: self.width;
         @children
     }
 }

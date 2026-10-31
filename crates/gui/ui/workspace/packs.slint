@@ -69,7 +69,7 @@ export component PackContentPanel inherits Rectangle {
             }
         }
         if root.items.length > 0 : ScrollView {
-            viewport-width: self.width;
+            content-width: self.width;
             VerticalLayout {
                 spacing: 9px;
                 for item in root.items : PackContentCard { item: item; }

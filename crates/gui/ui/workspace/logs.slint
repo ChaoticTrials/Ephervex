@@ -131,8 +131,8 @@ export component LiveLogViewer inherits Rectangle {
             // A pane too narrow for every control scrolls the row sideways
             // rather than cutting it off.
             ScrollView {
-                viewport-width: max(self.width, levels.min-width);
-                viewport-height: self.visible-height;
+                content-width: max(self.width, levels.min-width);
+                content-height: self.visible-height;
                 vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
             levels := HorizontalLayout {
@@ -154,8 +154,8 @@ export component LiveLogViewer inherits Rectangle {
             height: Theme.control-height + 12px;
             background: transparent;
             ScrollView {
-                viewport-width: max(self.width, actions.min-width);
-                viewport-height: self.visible-height;
+                content-width: max(self.width, actions.min-width);
+                content-height: self.visible-height;
                 vertical-scrollbar-policy: ScrollBarPolicy.always-off;
                 horizontal-scrollbar-policy: ScrollBarPolicy.as-needed;
             actions := HorizontalLayout {
@@ -224,14 +224,14 @@ export component LiveLogViewer inherits Rectangle {
             // Measured from the font rather than estimated from its size:
             // the widest line has to be reachable exactly, not
             // approximately.
-            viewport-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.advance + 24px);
+            content-width: root.wrap-lines ? self.visible-width : max(self.visible-width, root.content-columns * root.advance + 24px);
             // A bar the user can find. Wrapped text has nowhere to go
             // sideways, so the bar is gone rather than idle.
             horizontal-scrollbar-policy: root.wrap-lines ? ScrollBarPolicy.always-off : ScrollBarPolicy.always-on;
             private property <int> observed-revision: root.revision;
             changed observed-revision => {
                 if root.follow {
-                    self.viewport-y = min(0px, self.visible-height - self.viewport-height);
+                    self.content-y = min(0px, self.visible-height - self.content-height);
                 }
             }
             // Resuming following does not change any row, because the rows that
@@ -239,11 +239,11 @@ export component LiveLogViewer inherits Rectangle {
             private property <bool> observed-follow: root.follow;
             changed observed-follow => {
                 if root.follow {
-                    self.viewport-y = min(0px, self.visible-height - self.viewport-height);
+                    self.content-y = min(0px, self.visible-height - self.content-height);
                 }
             }
             for chunk[row] in root.chunks : Rectangle {
-                width: output.viewport-width;
+                width: output.content-width;
                 // One line tall, except when wrapping turns one line into
                 // several: a row shorter than its own text overlaps the row
                 // under it.
@@ -334,9 +334,9 @@ export component LiveLogViewer inherits Rectangle {
                             // one row per movement rather than animated, so
                             // the selection and the view stay in step.
                             if self.absolute-position.y + self.mouse-y < output.absolute-position.y {
-                                output.viewport-y = min(0px, output.viewport-y + root.row-height);
+                                output.content-y = min(0px, output.content-y + root.row-height);
                             } else if self.absolute-position.y + self.mouse-y > output.absolute-position.y + output.visible-height {
-                                output.viewport-y = max(min(0px, output.visible-height - output.viewport-height), output.viewport-y - root.row-height);
+                                output.content-y = max(min(0px, output.visible-height - output.content-height), output.content-y - root.row-height);
                             }
                         }
                     }
@@ -365,13 +365,13 @@ export component LiveLogViewer inherits Rectangle {
           //
           // Shown only when there is somewhere to go: a view already at the
           // end would offer a button that does nothing.
-          if output.viewport-y > output.visible-height - output.viewport-height + 2px : IconButton {
+          if output.content-y > output.visible-height - output.content-height + 2px : IconButton {
               x: parent.width - self.width - 18px;
               y: parent.height - self.height - 14px;
               icon: @image-url("../../../../assets/icons/jump-to-end.svg");
               accessible-name: GuiI18n.text("gui-jump-latest");
               clicked => {
-                  output.viewport-y = min(0px, output.visible-height - output.viewport-height);
+                  output.content-y = min(0px, output.visible-height - output.content-height);
                   if !root.follow {
                       root.follow-changed(true);
                   }

@@ -487,7 +487,7 @@ export component TextField inherits Rectangle {
         scroller := Flickable {
             x: root.text-left; width: parent.width - root.text-left - 11px; height: parent.height;
             interactive: false;
-            viewport-width: max(self.width, input.preferred-width + 2px);
+            content-width: max(self.width, input.preferred-width + 2px);
             input := TextInput {
                 x: 0; width: max(scroller.width, self.preferred-width + 2px); height: scroller.height;
                 color: root.enabled ? Theme.text : Theme.text-muted;
@@ -499,10 +499,10 @@ export component TextField inherits Rectangle {
                 accepted => { root.accepted(); }
                 edited => { root.edited(self.text); }
                 cursor-position-changed(position) => {
-                    if (position.x + scroller.viewport-x < 0px) {
-                        scroller.viewport-x = -position.x;
-                    } else if (position.x + scroller.viewport-x > scroller.width - 2px) {
-                        scroller.viewport-x = scroller.width - 2px - position.x;
+                    if (position.x + scroller.content-x < 0px) {
+                        scroller.content-x = -position.x;
+                    } else if (position.x + scroller.content-x > scroller.width - 2px) {
+                        scroller.content-x = scroller.width - 2px - position.x;
                     }
                 }
                 // A field whose value is part of a larger draft has to be able to
@@ -540,8 +540,8 @@ export component MultilineField inherits Rectangle {
     accessible-enabled: enabled;
     scroller := ScrollView {
         x: 6px; y: 6px; width: parent.width - 12px; height: parent.height - 12px;
-        viewport-width: self.visible-width;
-        viewport-height: max(self.visible-height, input.preferred-height + 2px);
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, input.preferred-height + 2px);
         input := TextInput {
             x: 5px; y: 0px;
             width: scroller.visible-width - 10px;
@@ -554,10 +554,10 @@ export component MultilineField inherits Rectangle {
             wrap: char-wrap;
             edited => { root.edited(self.text); }
             cursor-position-changed(position) => {
-                if (position.y + scroller.viewport-y < 0px) {
-                    scroller.viewport-y = -position.y;
-                } else if (position.y + Theme.body-size * 1.6 + scroller.viewport-y > scroller.visible-height) {
-                    scroller.viewport-y = scroller.visible-height - position.y - Theme.body-size * 1.6;
+                if (position.y + scroller.content-y < 0px) {
+                    scroller.content-y = -position.y;
+                } else if (position.y + Theme.body-size * 1.6 + scroller.content-y > scroller.visible-height) {
+                    scroller.content-y = scroller.visible-height - position.y - Theme.body-size * 1.6;
                 }
             }
         }

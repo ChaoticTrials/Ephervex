@@ -20,7 +20,7 @@ export component IsolationFilePanel inherits Rectangle {
         spacing: 6px;
         Heading { text: root.title; font-size: Theme.row-heading-size; }
         ScrollView {
-            viewport-width: self.width;
+            content-width: self.width;
             VerticalLayout {
                 alignment: start;
                 spacing: 4px;
@@ -42,7 +42,7 @@ export component IsolationHistory inherits Rectangle {
         padding: 10px;
         spacing: 5px;
         Heading { text: GuiI18n.text("gui-isolation-history"); font-size: Theme.row-heading-size; }
-        ScrollView { viewport-width: self.width; VerticalLayout { alignment: start; spacing: 4px; for item in root.items : BodyText { text: item; font-size: Theme.caption-size; } } }
+        ScrollView { content-width: self.width; VerticalLayout { alignment: start; spacing: 4px; for item in root.items : BodyText { text: item; font-size: Theme.caption-size; } } }
     }
 }
 
@@ -86,7 +86,7 @@ export component IsolationResultGroups inherits ScrollView {
     in property <[string]> remaining-candidates;
     in property <[string]> pinned;
     in property <[string]> required-dependencies;
-    viewport-width: self.width;
+    content-width: self.width;
     VerticalLayout {
         alignment: start;
         spacing: 8px;
@@ -215,7 +215,7 @@ export component IsolationSurface inherits Rectangle {
                 }
                 if root.candidates.length > 0 : ScrollView {
                     vertical-stretch: 1;
-                    viewport-width: self.width;
+                    content-width: self.width;
                     VerticalLayout {
                         alignment: start;
                         spacing: 6px;
@@ -247,7 +247,7 @@ export component IsolationSurface inherits Rectangle {
                 Heading { text: GuiI18n.text("gui-isolation-setup"); }
                 BodyText { text: root.summary; wrap: word-wrap; }
                 ScrollView {
-                    viewport-width: self.width;
+                    content-width: self.width;
                     VerticalLayout {
                         alignment: start;
                         spacing: 7px;

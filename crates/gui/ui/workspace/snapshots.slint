@@ -64,7 +64,7 @@ export component SnapshotPanel inherits Rectangle {
         if root.has-plain-copies : BodyText { text: GuiI18n.text("gui-snapshot-copy-note"); color: Theme.warning; wrap: word-wrap; }
         if root.items.length == 0 : Rectangle { vertical-stretch: 1; VerticalLayout { alignment: center; spacing: 8px; Heading { text: GuiI18n.text("gui-snapshot-none"); horizontal-alignment: center; } BodyText { text: GuiI18n.text("gui-snapshot-none-detail"); color: Theme.text-muted; wrap: word-wrap; horizontal-alignment: center; } } }
         if root.items.length > 0 : ScrollView {
-            viewport-width: self.width;
+            content-width: self.width;
             VerticalLayout {
                 spacing: 9px;
                 for item in root.items : SnapshotCard {

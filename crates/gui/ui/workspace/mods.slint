@@ -22,7 +22,7 @@ export component ImpactList inherits Rectangle {
     border-color: Theme.border-strong;
     background: Theme.background;
     ScrollView {
-        viewport-width: self.width;
+        content-width: self.width;
         VerticalLayout { alignment: start; padding: 9px; spacing: 3px;
             for entry in root.rows : Text {
                 // A chain through other mods is worth saying, because it
@@ -54,7 +54,7 @@ export component RelationList inherits Rectangle {
     border-color: Theme.border-strong;
     background: Theme.background;
     ScrollView {
-        viewport-width: self.width;
+        content-width: self.width;
         VerticalLayout { alignment: start; padding: 9px; spacing: 3px;
             if root.rows.length == 0 : BodyText {
                 text: root.note;
@@ -117,7 +117,7 @@ export component LinkedTargetsPanel inherits Rectangle {
     // single line.
     min-height: min(root.rows.length, 2) * 68px + 14px;
     ScrollView {
-        viewport-width: self.width;
+        content-width: self.width;
         VerticalLayout { alignment: start; padding: 8px; spacing: 6px;
             for row[index] in root.rows : Rectangle {
                 height: 62px;
@@ -333,7 +333,7 @@ export component ManagedModsPanel inherits Rectangle {
             background: Theme.surface;
             clip: true;
             ScrollView {
-                viewport-width: self.width;
+                content-width: self.width;
                 list := VerticalLayout {
                     for mod[index] in root.host.mods : VerticalLayout {
                         if index > 0 : Rectangle { height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }

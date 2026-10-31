@@ -164,7 +164,7 @@ export component CaseSurface inherits ScrollView {
     // The note as the surface last showed it, so typing after a save is not
     // replaced by the saved text arriving.
     private property <string> shown-note: "";
-    viewport-width: self.width;
+    content-width: self.width;
     init => { root.shown-note = root.note; }
     changed host-id => {
         note-input.text = root.note;
