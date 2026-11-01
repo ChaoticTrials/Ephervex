@@ -264,7 +264,7 @@ export component HostList inherits Rectangle {
                     add-label: GuiI18n.text("gui-modal-new-instance");
                     add => { root.create-instance(); }
                 }
-                for pending in root.pending-instances : PendingCard { item: pending; }
+                for pending in root.pending-instances : PendingCard { item: pending; open-requested(id) => { root.open-client(id); } }
                 for item in root.instances : card := ClientCard {
                     item: item;
                     group-entries: root.instance-group-entries;

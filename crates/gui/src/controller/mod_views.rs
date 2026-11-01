@@ -93,6 +93,9 @@ pub(super) struct HostMods {
     notice: String,
     mods_are_the_users: bool,
     browser: Browser,
+    /// The exact target searched for an instance a pack import has not
+    /// published yet, which has no record to read one from.
+    pending_target: Option<backend::PendingClientTarget>,
 }
 
 /// Every shown host's mods.
@@ -111,6 +114,17 @@ impl ModViews {
                 browser: Browser::on(catalog),
                 ..HostMods::default()
             });
+        }
+    }
+
+    /// Searches `host` on `target` until the import creating it publishes it.
+    pub(super) fn set_pending_target(
+        &mut self,
+        host: InstalledHost,
+        target: Option<backend::PendingClientTarget>,
+    ) {
+        if let Some(mods) = self.hosts.get_mut(&host) {
+            mods.pending_target = target;
         }
     }
 
@@ -225,6 +239,7 @@ impl ModViews {
             offset: 0,
             limit: request_limit(),
             include_incompatible: browser.include_incompatible,
+            pending_target: mods.pending_target.clone(),
             request_id,
         })
     }
@@ -255,6 +270,7 @@ impl ModViews {
             offset: offset.try_into().unwrap_or(0),
             limit: request_limit(),
             include_incompatible: browser.include_incompatible,
+            pending_target: mods.pending_target.clone(),
             request_id,
         })
     }
@@ -327,6 +343,7 @@ impl ModViews {
                 offset: u32::try_from(browser.next_offset).unwrap_or(0),
                 limit: request_limit(),
                 include_incompatible: browser.include_incompatible,
+                pending_target: mods.pending_target.clone(),
                 request_id,
             });
         }

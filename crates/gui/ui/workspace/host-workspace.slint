@@ -368,6 +368,9 @@ export component HostWorkspace inherits Rectangle {
     in property <string> host-kind-label;
     // What a compact header's folder glyph opens, named for the host's kind.
     in property <string> folder-label;
+    // Whether the host has a folder to open yet, and why not when it has none.
+    in property <bool> folder-enabled: true;
+    in property <string> folder-hint;
     in property <int> surface-choice;
     in property <bool> can-split-beside;
     in property <bool> can-split-below;
@@ -406,7 +409,8 @@ export component HostWorkspace inherits Rectangle {
     // A process that may still run, or files that need recovery: the state
     // text says it, in the stamp's own place.
     property <bool> stamp-unsettled: root.status-kind == "orphaned" || root.status-kind == "unknown" || root.status-kind == "needs-recovery" || root.status-kind == "failed";
-    property <string> stamp-label: root.restart-stage == "stopping" || root.status-kind == "stopping" ? GuiI18n.text("gui-stamp-stopping")
+    property <string> stamp-label: root.status-kind == "importing" ? GuiI18n.text("gui-stamp-importing")
+        : root.restart-stage == "stopping" || root.status-kind == "stopping" ? GuiI18n.text("gui-stamp-stopping")
         : root.stamp-busy ? GuiI18n.text("gui-stamp-starting")
         : root.status-kind == "running" ? GuiI18n.text("gui-stamp-running")
         : root.stamp-unsettled ? root.status
@@ -414,14 +418,16 @@ export component HostWorkspace inherits Rectangle {
         : !root.stamp-client ? GuiI18n.text("gui-stamp-stopped")
         : root.stamp-reproduced > 0 ? GuiI18n.count("gui-stamp-reproduced", root.stamp-reproduced)
         : GuiI18n.text("gui-stamp-not-yet");
-    property <string> stamp-detail: root.stamp-busy ? "..."
+    property <string> stamp-detail: root.status-kind == "importing" ? GuiI18n.text("gui-stamp-importing-detail")
+        : root.stamp-busy ? "..."
         : root.status-kind == "running" ? (root.stamp-client ? GuiI18n.text("gui-stamp-in-game") : root.address)
         : root.stamp-unsettled ? root.address
         : root.stamp-problems > 0 ? GuiI18n.count("gui-stamp-problems", root.stamp-problems)
         : !root.stamp-client ? root.address
         : root.stamp-reproduced > 0 ? GuiI18n.text("gui-stamp-reproduced-detail")
         : GuiI18n.text("gui-stamp-not-yet-detail");
-    property <color> stamp-tone: root.status-kind == "running" ? Theme.state-running
+    property <color> stamp-tone: root.status-kind == "importing" ? Theme.state-building
+        : root.status-kind == "running" ? Theme.state-running
         : root.stamp-busy ? (root.stamp-client ? Theme.state-running : Theme.primary-fill)
         : root.stamp-unsettled || root.stamp-problems > 0 ? Theme.state-attention
         : !root.stamp-client ? Theme.well
@@ -551,7 +557,7 @@ export component HostWorkspace inherits Rectangle {
                             alignment: end;
                             if root.show-column-button : IconButton { icon: @image-url("../../../../assets/icons/server.svg"); accessible-name: root.column-button-label; lift: Theme.shadow-offset-card; clicked => { root.show-column(); } }
                             if root.can-split-beside : IconButton { icon: @image-url("../../../../assets/icons/split-beside.svg"); accessible-name: GuiI18n.text("gui-workspace-split"); lift: Theme.shadow-offset-card; clicked => { root.split-beside(); } }
-                            AppButton { text: GuiI18n.text("gui-open-folder"); clicked => { root.open-folder(); } }
+                            AppButton { text: GuiI18n.text("gui-open-folder"); enabled: root.folder-enabled; hint: root.folder-hint; clicked => { root.open-folder(); } }
                             if root.show-launch-as && !root.actions-in-column : LaunchAsButton {
                                 account-entries: root.account-entries;
                                 enabled: root.primary-enabled && !root.occupied;
@@ -643,7 +649,7 @@ export component HostWorkspace inherits Rectangle {
                             selected-index: root.surface-choice;
                             chosen(surface) => { root.surface-selected(surface); }
                         }
-                        IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; clicked => { root.open-folder(); } }
+                        IconButton { icon: @image-url("../../../../assets/icons/folder.svg"); accessible-name: GuiI18n.values("gui-pane-action", root.folder-label, root.pane-label); tooltip: root.folder-label; enabled: root.folder-enabled; hint: root.folder-hint; clicked => { root.open-folder(); } }
                         if root.can-split-below : IconButton { icon: @image-url("../../../../assets/icons/split-below.svg"); accessible-name: GuiI18n.value("gui-pane-split-below", root.pane-label); tooltip: GuiI18n.text("gui-pane-split-below-tooltip"); clicked => { root.split-below(); } }
                         if root.can-close : IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.value("gui-pane-close", root.pane-label); tooltip: GuiI18n.text("gui-pane-close-tooltip"); clicked => { root.close-pane(); } }
                     }

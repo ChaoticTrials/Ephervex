@@ -73,6 +73,10 @@ pub struct ImportRequest {
     /// Checked the way a link typed into the instance is, and before any
     /// archive or network work: a refused one creates nothing.
     pub issue_link: Option<String>,
+    /// The id the instance takes, or `None` for a fresh one. A frontend names
+    /// it to address the instance while the import is still running; one
+    /// that already names an instance is refused.
+    pub instance_id: Option<InstanceId>,
 }
 
 impl ImportRequest {
@@ -86,6 +90,7 @@ impl ImportRequest {
             selection: OptionalSelection::none(),
             skip_blocked: Vec::new(),
             issue_link: None,
+            instance_id: None,
         }
     }
 
@@ -116,6 +121,12 @@ impl ImportRequest {
     #[must_use]
     pub fn with_issue_link(mut self, issue_link: impl Into<String>) -> Self {
         self.issue_link = Some(issue_link.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn with_instance_id(mut self, id: InstanceId) -> Self {
+        self.instance_id = Some(id);
         self
     }
 }
@@ -248,6 +259,7 @@ impl App {
         if let Some(issue_link) = issue_link {
             new_client = new_client.with_issue_link(issue_link);
         }
+        new_client.id = request.instance_id;
         let record = self.registry_for_services().create_client(new_client)?;
 
         let materialized = match self
@@ -768,6 +780,48 @@ mod tests {
             link,
             "the link is in the instance's own metadata, not only on the record returned"
         );
+    }
+
+    /// A frontend names the id to address the instance while it imports.
+    #[tokio::test]
+    async fn an_import_creates_the_instance_under_the_id_it_was_given() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = offline_pack(dir.path());
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let id = InstanceId::new();
+
+        let imported = app
+            .import_pack(
+                &ImportRequest::new(&archive).with_instance_id(id),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("import");
+
+        assert_eq!(imported.record.id, id);
+        assert_eq!(app.current_client(id).expect("published").id, id);
+    }
+
+    #[tokio::test]
+    async fn an_import_under_an_id_another_instance_has_is_refused() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let archive = offline_pack(dir.path());
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let first = import(&app, &archive).await.expect("import");
+
+        let refused = app
+            .import_pack(
+                &ImportRequest::new(&archive).with_instance_id(first.record.id),
+                &OperationReporter::silent("test-import"),
+                &CancellationToken::new(),
+            )
+            .await;
+
+        assert!(refused.is_err(), "a second instance under one id");
+        assert_eq!(app.list_clients().expect("list").len(), 1);
     }
 
     #[tokio::test]

@@ -69,6 +69,7 @@ import { HomePage } from "home/home-page.slint";
 import { ServerPackZone } from "components/server-pack-zone.slint";
 import { CaseSurface } from "workspace/case.slint";
 import { ClientOverviewSummary } from "workspace/overview.slint";
+import { ImportingOverview } from "workspace/importing.slint";
 import { StorageCard } from "home/storage-card.slint";
 import { HostActions } from "workspace/host-actions.slint";
 import { BundleCard, HostStorageCard, LinkedServersCard, ReportCard, RunCard } from "workspace/host-column.slint";
@@ -2330,6 +2331,8 @@ export component AppWindow inherits Window {
                                 pane-label: pane.label;
                                 host-kind-label: self.is-client ? GuiI18n.text("gui-client") : GuiI18n.text("gui-server");
                                 folder-label: self.is-client ? GuiI18n.text("gui-open-instance-folder") : GuiI18n.text("gui-open-server-folder");
+                                folder-enabled: host.available;
+                                folder-hint: HostActions.unavailable-hint(host);
                                 surface-choice: pane.surface-choice;
                                 can-split-beside: pane.can-split-beside;
                                 can-split-below: pane.can-split-below;
@@ -2414,10 +2417,22 @@ export component AppWindow inherits Window {
                                     open-log => { root.show-pane-surface(pane.id, "Logs"); root.log-show(pane.id, "live"); root.dismiss-run-failure(host.kind, host.id); }
                                     dismiss => { root.dismiss-run-failure(host.kind, host.id); }
                                 }
-                                if !host.available : EmptyState {
+                                if !host.available && !host.importing : EmptyState {
                                     icon: @image-url("../../../assets/icons/nav-instances.svg");
                                     title: GuiI18n.text("gui-workspace-host-gone");
                                     message: GuiI18n.text("gui-workspace-host-gone-detail");
+                                }
+                                // An instance a pack import is still creating offers only
+                                // what can wait for it: the rest needs its files.
+                                if host.importing && pane.surface == "Overview" : ImportingOverview {
+                                    host: host;
+                                    pending: root.pending-instances;
+                                    open-surface(surface) => { root.show-pane-surface(pane.id, surface); }
+                                }
+                                if host.importing && pane.surface != "Overview" && pane.surface != "Mods" && pane.surface != "Settings" && pane.surface != "Case" : EmptyState {
+                                    icon: @image-url("../../../assets/icons/nav-instances.svg");
+                                    title: GuiI18n.text("gui-available-after-import-title");
+                                    message: GuiI18n.text("gui-available-after-import");
                                 }
                                 // Never wider than the pane: a narrow pane wraps its
                                 // text and stacks its buttons rather than scrolling
@@ -2494,8 +2509,9 @@ export component AppWindow inherits Window {
                                         } }
                                     }
                                 }
-                                if host.available && host.kind == "client" && pane.surface == "Mods" : ManagedModsPanel {
+                                if (host.available || host.importing) && host.kind == "client" && pane.surface == "Mods" : ManagedModsPanel {
                                     host: host;
+                                    read-only: host.importing;
                                     compact: (pane.overlay ? root.quick-view-width : root.pane-column-width) < 760px * Theme.text-scale;
                                     empty-detail: GuiI18n.text("gui-no-managed-mods-detail");
                                     mods-are-the-users: host.allow-pack-mod-changes;
@@ -2532,8 +2548,9 @@ export component AppWindow inherits Window {
                                     retry-recovery => { root.retry-isolation-recovery(host.kind, host.id); }
                                     close => { root.dismiss-isolation(host.kind, host.id); root.show-pane-surface(pane.id, "Mods"); }
                                 }
-                                if host.available && pane.surface == "Settings" : HostRuntimeForm {
+                                if (host.available || host.importing) && pane.surface == "Settings" : HostRuntimeForm {
                                     host: host;
+                                    importing: host.importing;
                                     error: host.runtime-error;
                                     busy: root.host-busy-kind == host.kind && root.host-busy-id == host.id;
                                     save(min, max, args) => { root.save-host-runtime(host.kind, host.id, min, max, args); }
@@ -2554,8 +2571,9 @@ export component AppWindow inherits Window {
                                     rename(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-rename"; }
                                     delete(id, label) => { root.snapshot-host-kind = host.kind; root.snapshot-host-id = host.id; root.snapshot-action-id = id; root.snapshot-action-label = label; root.modal-error = ""; root.modal = "snapshot-delete"; }
                                 }
-                                if host.available && host.kind == "client" && pane.surface == "Case" : CaseSurface {
+                                if (host.available || host.importing) && host.kind == "client" && pane.surface == "Case" : CaseSurface {
                                     host-id: host.id;
+                                    importing: host.importing;
                                     events: host.events;
                                     steps: host.client.case-steps;
                                     done-count: host.client.case-done;

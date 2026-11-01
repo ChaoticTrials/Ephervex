@@ -246,9 +246,25 @@ export component HostCardFace inherits Rectangle {
     }
 }
 
-// A host that is still being created: the same face, filled in as the work goes.
+// A host that is still being created: the same face, filled in as the work
+// goes. An import's card opens the instance it creates, which can already be
+// worked on.
 export component PendingCard inherits HostCardFace {
     in property <PendingEntityRow> item;
+    callback open-requested(string);
+    property <bool> opens: root.item.instance-id != "";
+    // A button to assistive technology only for a card that opens something.
+    if root.opens : Rectangle {
+        accessible-role: button;
+        accessible-label: GuiI18n.value("gui-open-importing-instance", root.item.name);
+        accessible-action-default => { root.open-requested(root.item.instance-id); }
+    }
+    open-area := TouchArea {
+        enabled: root.opens;
+        mouse-cursor: root.opens ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.open-requested(root.item.instance-id); }
+    }
+    hovered: root.opens && open-area.has-hover;
     name: root.item.name;
     favorable: false;
     minecraft: root.item.target;

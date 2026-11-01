@@ -1270,7 +1270,9 @@ fn registry_failing_path(error: &ephervex_storage::RegistryError) -> Option<Path
         RegistryError::Path(inner) => path_failing_path(inner),
         RegistryError::Lock(inner) => inner.failing_path(),
         RegistryError::Index(inner) => index_failing_path(inner),
-        RegistryError::InstanceUnknown { .. } | RegistryError::ServerUnknown { .. } => None,
+        RegistryError::InstanceUnknown { .. }
+        | RegistryError::ServerUnknown { .. }
+        | RegistryError::InstanceIdTaken { .. } => None,
     }
 }
 

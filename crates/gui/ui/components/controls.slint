@@ -1072,7 +1072,8 @@ export global StateTone {
             return Theme.danger;
         }
         if (state-kind == "starting" || state-kind == "stopping" || state-kind == "restarting"
-            || state-kind == "orphaned" || state-kind == "unknown" || state-kind == "needs-recovery") {
+            || state-kind == "orphaned" || state-kind == "unknown" || state-kind == "needs-recovery"
+            || state-kind == "importing") {
             return Theme.warning;
         }
         return rest;
@@ -1086,7 +1087,7 @@ export global StateTone {
         if (state-kind == "running") {
             return Theme.state-running;
         }
-        if (state-kind == "starting" || state-kind == "stopping" || state-kind == "restarting") {
+        if (state-kind == "starting" || state-kind == "stopping" || state-kind == "restarting" || state-kind == "importing") {
             return Theme.state-building;
         }
         if (state-kind == "failed" || state-kind == "orphaned" || state-kind == "unknown" || state-kind == "needs-recovery") {

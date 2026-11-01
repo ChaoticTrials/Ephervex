@@ -292,6 +292,9 @@ pub enum Command {
         /// The issue the link that offered the pack named, stored on the
         /// instance. Checked again by the import.
         issue_link: Option<String>,
+        /// The id the instance takes, chosen up front so the window can open
+        /// it and hold changes for it while the import runs.
+        instance: InstanceId,
     },
     LaunchClient {
         instance: InstanceId,
@@ -553,6 +556,10 @@ pub enum Command {
         limit: u8,
         /// Whether to also list what the host cannot take, marked as such.
         include_incompatible: bool,
+        /// The exact target of a client a pack import has not published
+        /// yet, searched instead of reading the host. `None` for every
+        /// published host.
+        pending_target: Option<PendingClientTarget>,
         /// Opaque frontend bookkeeping, echoed back unchanged. Two requests
         /// can otherwise carry an identical instance, provider, query, and
         /// offset (a search resubmitted after switching catalog away and
@@ -1528,6 +1535,14 @@ pub struct ModSearchData {
     pub server_support: String,
     /// Why the result cannot be installed on this host, already localized.
     pub blocked_reason: String,
+}
+
+/// The exact Minecraft version and loader a pack import will give its
+/// instance, which the catalogs are searched on before the instance exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingClientTarget {
+    pub minecraft_version: String,
+    pub loader: ephervex_model::LoaderKind,
 }
 
 /// One page of search results, and the request it answers.
@@ -3626,6 +3641,7 @@ fn run_worker(
                 create_linked_server,
                 server_pack,
                 issue_link,
+                instance,
             } => {
                 let paths = app.paths().clone();
                 spawn_import_submission(
@@ -3643,6 +3659,7 @@ fn run_worker(
                         create_linked_server,
                         server_pack,
                         issue_link,
+                        instance,
                     },
                 );
             }
@@ -5176,6 +5193,7 @@ fn run_worker(
                 offset,
                 limit,
                 include_incompatible,
+                pending_target,
                 request_id,
             } => {
                 let paths = app.paths().clone();
@@ -5184,7 +5202,20 @@ fn run_worker(
                         .from_offset(offset)
                         .limited(limit)
                         .including_incompatible(include_incompatible);
-                    let result = runtime.block_on(app.search_mods(host, provider, &request));
+                    let result = runtime.block_on(async {
+                        match &pending_target {
+                            Some(target) => {
+                                app.search_mods_for_pending_client(
+                                    &target.minecraft_version,
+                                    target.loader,
+                                    provider,
+                                    &request,
+                                )
+                                .await
+                            }
+                            None => app.search_mods(host, provider, &request).await,
+                        }
+                    });
                     let answer = match result {
                         Ok(results) => {
                             let total = results.total_hits;
@@ -12771,6 +12802,7 @@ struct ImportSubmission {
     create_linked_server: bool,
     server_pack: Option<PathBuf>,
     issue_link: Option<String>,
+    instance: InstanceId,
 }
 
 /// The name a server takes when nobody types one: its client's or target's
@@ -12803,6 +12835,7 @@ fn spawn_import_submission(
         create_linked_server,
         server_pack,
         issue_link,
+        instance,
     } = submission;
     // Cloned for the setup-failure path, which runs instead of the body rather
     // than after it.
@@ -12832,7 +12865,8 @@ fn spawn_import_submission(
             let mut request = ImportRequest::new(archive)
                 .with_storage(storage_class(persistent))
                 .selecting(selection)
-                .skipping_blocked(skip_blocked);
+                .skipping_blocked(skip_blocked)
+                .with_instance_id(instance);
             if !name.trim().is_empty() {
                 request = request.named(name);
             }

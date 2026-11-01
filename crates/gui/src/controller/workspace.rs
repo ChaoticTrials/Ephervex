@@ -34,6 +34,9 @@ pub(super) struct WorkspaceState {
     /// lists' own filters: a pane shows its host whatever those lists hide.
     clients: Vec<InstanceRow>,
     servers: Vec<ServerRow>,
+    /// The rows standing in for instances a pack import is still creating,
+    /// read only while the instance has no row of its own.
+    importing: HashMap<ephervex_model::InstanceId, InstanceRow>,
     /// What features reported about each shown host, kept between renders.
     reported: HashMap<InstalledHost, HostView>,
     /// The hosts in the order their views were last written.
@@ -57,6 +60,7 @@ impl Default for WorkspaceState {
             quick: None,
             clients: Vec::new(),
             servers: Vec::new(),
+            importing: HashMap::new(),
             reported: HashMap::new(),
             shown: Vec::new(),
             host_views: Rc::new(VecModel::default()),
@@ -172,6 +176,28 @@ impl WorkspaceState {
                 crate::server_statistics_view::forget_console_values(&mut reported.statistics);
             }
         }
+    }
+
+    /// Takes the rows of the instances pack imports are still creating.
+    pub(super) fn set_importing(&mut self, rows: HashMap<ephervex_model::InstanceId, InstanceRow>) {
+        self.importing = rows;
+    }
+
+    /// Whether `host` is an instance shown from what its import declared,
+    /// because it has no row of its own yet.
+    pub(super) fn is_importing(&self, host: InstalledHost) -> bool {
+        match host {
+            InstalledHost::Instance(instance) => {
+                self.importing.contains_key(&instance) && !self.lists_client(instance)
+            }
+            InstalledHost::Server(_) => false,
+        }
+    }
+
+    /// Whether the newest snapshot lists `instance`.
+    pub(super) fn lists_client(&self, instance: ephervex_model::InstanceId) -> bool {
+        let id = instance.to_string();
+        self.clients.iter().any(|row| row.id == id.as_str())
     }
 
     /// Whether a server's row says it runs.
@@ -295,10 +321,11 @@ impl WorkspaceState {
     pub(super) fn host_name(&self, host: InstalledHost) -> String {
         let id = host.id();
         let name = match host {
-            InstalledHost::Instance(_) => self
+            InstalledHost::Instance(instance) => self
                 .clients
                 .iter()
                 .find(|row| row.id == id.as_str())
+                .or_else(|| self.importing.get(&instance))
                 .map(|row| row.name.to_string()),
             InstalledHost::Server(_) => self
                 .servers
@@ -464,12 +491,18 @@ impl WorkspaceState {
             &view.workflow_surface,
         );
         view.available = false;
+        view.importing = false;
         match host {
-            InstalledHost::Instance(_) => {
+            InstalledHost::Instance(instance) => {
                 if let Some(row) = self.clients.iter().find(|row| row.id == id.as_str()) {
                     view.client = row.clone();
                     lifecycle.stamp_client(&mut view.client);
                     view.available = true;
+                } else if let Some(row) = self.importing.get(&instance) {
+                    // Not available: nothing that acts on the instance may be
+                    // offered until the import publishes it.
+                    view.client = row.clone();
+                    view.importing = true;
                 }
                 let linked = self
                     .servers
@@ -782,6 +815,7 @@ fn change_row(row: &mut HostView, reported: &HostView) {
     updated.kind = row.kind.clone();
     updated.id = row.id.clone();
     updated.available = row.available;
+    updated.importing = row.importing;
     updated.client = row.client.clone();
     updated.server = row.server.clone();
     updated.surfaces = row.surfaces.clone();

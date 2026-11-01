@@ -491,6 +491,48 @@ fn a_promotion_refuses_a_destination_another_instance_occupies() {
     assert!(destination.join("someones-file.txt").is_file());
 }
 
+#[test]
+fn a_new_instance_takes_the_id_its_creator_named() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths).expect("open registry");
+    let id = InstanceId::new();
+
+    let created = registry
+        .create_client(NewClient::new("Repro", "1.20.1", LoaderSelection::vanilla()).with_id(id))
+        .expect("create");
+
+    assert_eq!(created.id, id);
+}
+
+#[test]
+fn an_id_an_indexed_instance_has_is_refused_for_a_new_one() {
+    let base = tempfile::tempdir().expect("temp dir");
+    let paths = isolated_paths(&base);
+    let registry = Registry::open(paths).expect("open registry");
+    let original = registry
+        .create_client(NewClient::new(
+            "Repro",
+            "1.20.1",
+            LoaderSelection::vanilla(),
+        ))
+        .expect("create");
+    registry.publish_client(&original).expect("publish");
+
+    let error = registry
+        .create_client(
+            NewClient::new("Second", "1.20.1", LoaderSelection::vanilla())
+                .with_storage(StorageClass::Persistent)
+                .with_id(original.id),
+        )
+        .expect_err("one id names one instance");
+
+    assert!(
+        matches!(error, RegistryError::InstanceIdTaken { id } if id == original.id),
+        "expected the id to be refused, got {error}"
+    );
+}
+
 /// Its launch lock describes a process, and the instance at the new address is
 /// not running one.
 #[test]

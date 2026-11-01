@@ -155,6 +155,9 @@ export component CaseSurface inherits ScrollView {
     in property <int> reproduced;
     // How many steps are checked off.
     in property <int> done-count;
+    // A pack import is still creating the instance, so nothing can have been
+    // reproduced on it yet.
+    in property <bool> importing;
     callback add-step(string);
     callback set-step-done(int, bool);
     callback remove-step(int);
@@ -219,7 +222,7 @@ export component CaseSurface inherits ScrollView {
                     }
                 }
                 if root.reproduced > 0 : AppButton { text: GuiI18n.text("gui-case-reset-count"); clicked => { root.reset-reproduced(); } }
-                AppButton { text: GuiI18n.text("gui-case-reproduced-it"); tone: "primary"; clicked => { root.count-reproduced(); } }
+                AppButton { text: GuiI18n.text("gui-case-reproduced-it"); tone: "primary"; enabled: !root.importing; hint: GuiI18n.text("gui-available-after-import"); clicked => { root.count-reproduced(); } }
             }
         }
         VerticalLayout {

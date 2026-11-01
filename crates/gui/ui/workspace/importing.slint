@@ -1,0 +1,61 @@
+// The Overview of an instance a pack import is still creating: how far the
+// import has got, and what can already be prepared for it.
+
+import { ScrollView } from "std-widgets.slint";
+import { AppButton, InfoBanner } from "../components/controls.slint";
+import { Outlined } from "../components/surface.slint";
+import { BodyText, SectionTitle } from "../components/text.slint";
+import { GuiI18n } from "../globals.slint";
+import { HostView, PendingEntityRow } from "../models.slint";
+import { Theme } from "../theme.slint";
+
+export component ImportingOverview inherits ScrollView {
+    in property <HostView> host;
+    // Every creation under way; the one creating this instance reports here.
+    in property <[PendingEntityRow]> pending;
+    callback open-surface(string);
+    content-width: self.visible-width;
+    VerticalLayout {
+        alignment: start;
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        spacing: 14px;
+        padding-left: Theme.lift-room;
+        padding-top: Theme.lift-room;
+        padding-right: Theme.shadow-room;
+        padding-bottom: Theme.shadow-room;
+        SectionTitle { title: GuiI18n.text("gui-importing-title"); detail: GuiI18n.text("gui-importing-detail"); }
+        // No spacing of its own: the creations that are not this import add
+        // nothing to it.
+        VerticalLayout {
+            spacing: 0px;
+            for row in root.pending : VerticalLayout {
+                spacing: 6px;
+                if row.instance-id == root.host.id : Outlined {
+                    height: Theme.progress-bar-height;
+                    radius: Theme.progress-bar-height / 2;
+                    snap-size: true;
+                    outline-width: Theme.chip-border-width;
+                    fill: Theme.well;
+                    progress: row.indeterminate ? 0 : row.progress;
+                }
+                if row.instance-id == root.host.id : BodyText {
+                    text: (row.indeterminate ? GuiI18n.text("gui-host-card-building") : GuiI18n.value("gui-host-card-building-percent", "\{round(row.progress * 100)}")) + (row.detail != "" ? " | " + row.detail : "");
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+            }
+        }
+        InfoBanner { text: GuiI18n.text("gui-importing-held"); }
+        HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            padding-right: Theme.shadow-room;
+            padding-bottom: Theme.shadow-room;
+            AppButton { text: GuiI18n.text("gui-importing-open-mods"); tone: "primary"; clicked => { root.open-surface("Mods"); } }
+            AppButton { text: GuiI18n.text("gui-importing-open-settings"); clicked => { root.open-surface("Settings"); } }
+            AppButton { text: GuiI18n.text("gui-importing-open-case"); clicked => { root.open-surface("Case"); } }
+        }
+    }
+}

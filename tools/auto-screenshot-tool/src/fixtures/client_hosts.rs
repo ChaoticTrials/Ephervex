@@ -154,6 +154,7 @@ pub(crate) fn client_overview_linked_server(ui: &AppWindow) {
         state: lookup("gui-state-creating").into(),
         server: true,
         linked_client_id: "cavestone".into(),
+        instance_id: SharedString::default(),
         detail: lookup("operation-stage-downloading-files").into(),
         progress: 0.4,
         indeterminate: false,

@@ -46,7 +46,7 @@ use ephervex_mod_platform::{
 };
 use ephervex_model::{
     AttentionReason, DefaultModCatalog, Hash, HashAlgorithm, ImportSourceKind, InstanceId,
-    LoaderSelection, ModOrigin, ModProvider, ServerId,
+    LoaderKind, LoaderSelection, ModOrigin, ModProvider, ServerId,
 };
 use ephervex_pack::{
     ArtifactFetch, MODS_DIR, ManagedMod, ManagedModInstall, ManagedModInstallation, ModIdentity,
@@ -1304,11 +1304,42 @@ impl App {
         query: &ModSearchQuery,
     ) -> CoreResult<ModSearchResults> {
         let host = self.catalog_host(host.into())?;
-        let query = query.clone().for_side(host.search_side());
+        self.search_catalog(&host.target(), host.search_side(), catalog, query)
+            .await
+    }
+
+    /// Searches a provider for mods that fit a client instance a pack import
+    /// is still creating, on the exact Minecraft version and loader the pack
+    /// declared.
+    ///
+    /// The instance is not published until the import finishes, so there is
+    /// no host to read the target from. Filtering is the same as
+    /// [`Self::search_mods`] gives the finished instance.
+    #[instrument(skip(self, query), fields(provider = %catalog))]
+    pub async fn search_mods_for_pending_client(
+        &self,
+        minecraft_version: &str,
+        loader: LoaderKind,
+        catalog: ModProvider,
+        query: &ModSearchQuery,
+    ) -> CoreResult<ModSearchResults> {
+        let target = InstanceTarget::new(minecraft_version.to_owned(), loader);
+        self.search_catalog(&target, HostSide::Client, catalog, query)
+            .await
+    }
+
+    async fn search_catalog(
+        &self,
+        target: &InstanceTarget,
+        side: HostSide,
+        catalog: ModProvider,
+        query: &ModSearchQuery,
+    ) -> CoreResult<ModSearchResults> {
+        let query = query.clone().for_side(side);
         let provider = self.mod_provider(catalog)?;
         Ok(provider
             .search(
-                &host.target(),
+                target,
                 &query,
                 &OperationReporter::silent("browsing-mods"),
                 &CancellationToken::new(),

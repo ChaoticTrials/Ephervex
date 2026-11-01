@@ -23,9 +23,16 @@ export global HostActions {
     pure public function primary-enabled(host: HostView) -> bool {
         return host.available && (host.kind == "client" ? host.client.can-launch || host.client.can-kill : host.server.can-start || host.server.can-stop);
     }
+    // Why nothing acts on the host. Empty while it is available.
+    pure public function unavailable-hint(host: HostView) -> string {
+        if (host.importing) {
+            return GuiI18n.text("gui-available-after-import");
+        }
+        return host.available ? "" : GuiI18n.text("gui-workspace-host-gone");
+    }
     pure public function primary-hint(host: HostView) -> string {
         if (!host.available) {
-            return GuiI18n.text("gui-workspace-host-gone");
+            return HostActions.unavailable-hint(host);
         }
         if (host.kind == "client") {
             return host.client.needs-attention ? GuiI18n.text("gui-hint-needs-attention") : GuiI18n.text("gui-hint-state-changing");
@@ -36,14 +43,14 @@ export global HostActions {
         return host.available && host.kind != "client" && host.server.can-kill;
     }
     pure public function kill-hint(host: HostView) -> string {
-        return !host.available ? GuiI18n.text("gui-workspace-host-gone") : ServerHints.kill(host.server.state-kind);
+        return !host.available ? HostActions.unavailable-hint(host) : ServerHints.kill(host.server.state-kind);
     }
     pure public function restart-enabled(host: HostView) -> bool {
         return host.available && (host.kind == "client" ? host.client.can-kill && host.client.can-restart : host.server.can-restart);
     }
     pure public function restart-hint(host: HostView) -> string {
         if (!host.available) {
-            return GuiI18n.text("gui-workspace-host-gone");
+            return HostActions.unavailable-hint(host);
         }
         if (host.kind == "client") {
             if (!host.client.can-kill) {

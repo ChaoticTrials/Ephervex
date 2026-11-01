@@ -283,6 +283,9 @@ export component ManagedModsPanel inherits Rectangle {
     in property <bool> mods-are-the-users;
     // Whether the catalogs can be searched for this host.
     in property <bool> can-add: true;
+    // The listed mods cannot be changed, as while the host is still being
+    // imported. The catalogs can still be searched.
+    in property <bool> read-only: false;
     // Whether the pane is too narrow for the version and chip columns.
     in property <bool> compact;
     callback filter(string);
@@ -311,8 +314,8 @@ export component ManagedModsPanel inherits Rectangle {
                 horizontal-stretch: 1;
                 edited(text) => { root.filter(text); }
             }
-            AppButton { text: GuiI18n.text("gui-add-local-mods"); clicked => { root.add-jars(); } }
-            IconButton { icon: @image-url("../../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); lift: Theme.shadow-offset-card; clicked => { root.refresh(); } }
+            AppButton { text: GuiI18n.text("gui-add-local-mods"); enabled: !root.read-only; hint: GuiI18n.text("gui-available-after-import"); clicked => { root.add-jars(); } }
+            IconButton { icon: @image-url("../../../../assets/icons/refresh.svg"); accessible-name: GuiI18n.text("gui-refresh-mod-details"); lift: Theme.shadow-offset-card; enabled: !root.read-only; hint: GuiI18n.text("gui-available-after-import"); clicked => { root.refresh(); } }
             if root.can-add : AppButton { text: GuiI18n.text("gui-add-mods"); tone: "primary"; icon: @image-url("../../../../assets/icons/add.svg"); clicked => { root.add-mods(); } }
         }
         @children
@@ -340,7 +343,7 @@ export component ManagedModsPanel inherits Rectangle {
                         ModCard {
                             item: mod;
                             compact: root.compact;
-                            togglable: true;
+                            togglable: !root.read-only;
                             mods-are-the-users: root.mods-are-the-users;
                             manage(path) => { root.manage(path); }
                             toggle(path, on) => { root.toggle(path, on); }
@@ -352,7 +355,7 @@ export component ManagedModsPanel inherits Rectangle {
             }
         }
         if root.host.mods.length > 0 : BodyText {
-            text: GuiI18n.count("gui-mods-shown", root.host.mods.length);
+            text: root.read-only ? GuiI18n.count("gui-mods-shown-importing", root.host.mods.length) : GuiI18n.count("gui-mods-shown", root.host.mods.length);
             color: Theme.text-muted;
             font-size: Theme.caption-size;
         }

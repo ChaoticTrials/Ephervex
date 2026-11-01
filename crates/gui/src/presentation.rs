@@ -2512,6 +2512,52 @@ impl DuplicateFilePresentation {
     }
 }
 
+/// One mod a pack declares for a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackModPresentation {
+    pub logical_path: String,
+    pub file_name: String,
+    /// The catalog that identifies the file, when the pack says.
+    pub provider: Option<ModProvider>,
+    /// The catalog project, empty when the pack does not name one.
+    pub project_id: String,
+    /// Whether the pack lets the user leave it out.
+    pub optional: bool,
+}
+
+impl PackModPresentation {
+    /// The jars a client import would put in `mods/`. Files still waiting for
+    /// their provider are left out: they have no path yet.
+    fn from_analysis(analysis: &PackAnalysis) -> Vec<Self> {
+        analysis
+            .recipe
+            .files
+            .iter()
+            .filter(|file| file.logical_path.starts_with("mods"))
+            .filter(|file| file.requirement(PackSide::Client).is_installable())
+            .map(|file| {
+                let project = file
+                    .identity
+                    .as_ref()
+                    .and_then(ProviderFileIdentity::project);
+                Self {
+                    logical_path: file.logical_path.to_string_lossy().into_owned(),
+                    file_name: file
+                        .logical_path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    provider: project.map(|(provider, _)| provider),
+                    project_id: project
+                        .map(|(_, project)| project.to_owned())
+                        .unwrap_or_default(),
+                    optional: file.requirement(PackSide::Client).needs_decision(),
+                }
+            })
+            .collect()
+    }
+}
+
 /// The provider-neutral facts an import analysis has enough information to
 /// show, independent of whether provider resolution has finished.
 ///
@@ -2527,6 +2573,12 @@ pub struct ImportPresentation {
     pub author: String,
     pub minecraft_version: String,
     pub loader: String,
+    /// The loader the pack declared, which the catalogs are searched by while
+    /// the import runs.
+    pub loader_kind: LoaderKind,
+    /// The mods the pack gives a client, listed for an instance whose files
+    /// are still being downloaded.
+    pub mods: Vec<PackModPresentation>,
     pub required_count: usize,
     pub optional_count: usize,
     pub optional: Vec<ImportOptionPresentation>,
@@ -2552,6 +2604,8 @@ impl ImportPresentation {
             author: analysis.author().unwrap_or_default().to_owned(),
             minecraft_version: analysis.minecraft_version().to_owned(),
             loader: analysis.loader().to_string(),
+            loader_kind: analysis.recipe.loader.kind,
+            mods: PackModPresentation::from_analysis(analysis),
             required_count: analysis.required_file_count(PackSide::Client),
             optional_count: analysis.optional_file_count(PackSide::Client),
             optional: analysis
@@ -2714,6 +2768,8 @@ mod import_tests {
             author: "Example Author".to_owned(),
             minecraft_version: "1.21.1".to_owned(),
             loader: "NeoForge 21.1.42".to_owned(),
+            loader_kind: ephervex_model::LoaderKind::NeoForge,
+            mods: Vec::new(),
             required_count: 18,
             optional_count: 3,
             optional: vec![

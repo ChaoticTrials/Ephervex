@@ -276,6 +276,9 @@ pub struct NewClient {
     /// The issue address to record on the new instance, already validated by
     /// the caller.
     pub issue_link: Option<String>,
+    /// The id the instance takes, or `None` for a fresh one. Named by a caller
+    /// that has to refer to the instance before it is published.
+    pub id: Option<InstanceId>,
 }
 
 impl NewClient {
@@ -293,7 +296,14 @@ impl NewClient {
             source: ImportSource::manual(),
             attention: Vec::new(),
             issue_link: None,
+            id: None,
         }
+    }
+
+    #[must_use]
+    pub const fn with_id(mut self, id: InstanceId) -> Self {
+        self.id = Some(id);
+        self
     }
 
     #[must_use]

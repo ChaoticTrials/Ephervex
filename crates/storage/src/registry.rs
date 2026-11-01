@@ -88,6 +88,9 @@ pub enum RegistryError {
     /// The directory chosen for a new instance already has contents.
     #[error("the instance directory {path} already contains files")]
     RootOccupied { path: PathBuf },
+    /// The id requested for a new instance already names one.
+    #[error("an instance with id {id} already exists")]
+    InstanceIdTaken { id: InstanceId },
     /// An interrupted snapshot restore of this instance or server has not been
     /// rolled back yet.
     #[error("{path} has an interrupted snapshot restore that startup has not recovered")]
@@ -145,6 +148,7 @@ impl RegistryError {
             Self::InstanceMetadataForeign { .. } => "error-registry-instance-metadata-foreign",
             Self::ServerMetadataForeign { .. } => "error-registry-server-metadata-foreign",
             Self::RootOccupied { .. } => "error-registry-root-occupied",
+            Self::InstanceIdTaken { .. } => "error-registry-instance-id-taken",
             Self::RestoreUnfinished { .. } => "error-registry-restore-unfinished",
             Self::HostBusy { .. } => "error-registry-host-busy",
             Self::RecipeBusy { .. } => "error-registry-recipe-busy",
@@ -216,7 +220,17 @@ impl Registry {
 
     /// Creates a client instance: directory, metadata, then index row.
     pub fn create_client(&self, request: NewClient) -> Result<ClientRecord, RegistryError> {
-        let id = InstanceId::new();
+        let id = match request.id {
+            Some(id) => {
+                match self.indexed_client(id) {
+                    Ok(_) => return Err(RegistryError::InstanceIdTaken { id }),
+                    Err(RegistryError::InstanceUnknown { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+                id
+            }
+            None => InstanceId::new(),
+        };
         let root = self.paths.instance_root(request.storage, id);
         ensure_free_root(&root)?;
 

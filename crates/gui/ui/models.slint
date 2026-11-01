@@ -774,6 +774,9 @@ export struct PendingEntityRow {
     state: string,
     server: bool,
     linked-client-id: string,
+    // The instance an import is creating, which the card opens. Empty for
+    // every other creation.
+    instance-id: string,
     // What the work is doing right now, and how far through it is. Empty
     // and indeterminate for a creation with nothing to report.
     detail: string,
@@ -826,8 +829,12 @@ export struct HostView {
     // "client" or "server".
     kind: string,
     id: string,
-    // False once the host has left the registry.
+    // False once the host has left the registry, and while a pack import
+    // is still creating it.
     available: bool,
+    // A pack import is still creating this instance: the pack's facts are
+    // shown, and the changes made here wait for the import to finish.
+    importing: bool,
     // The host's own row; only the one matching `kind` is filled.
     client: InstanceRow,
     server: ServerRow,

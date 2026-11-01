@@ -15,6 +15,7 @@ use ephervex_core::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::AbsentModPolicy;
+use ephervex_model::InstanceId;
 use ephervex_model::ModProvider;
 use slint::{
     ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedString, Timer, TimerMode,
@@ -54,6 +55,7 @@ use crate::workspace_layout::{PaneId, Revealed, Surface, WorkspaceLayout};
 
 mod diagnosis_flow;
 mod home;
+mod importing;
 mod instance_list;
 mod java_runtime;
 mod log_views;
@@ -133,6 +135,9 @@ struct PendingCreation {
     storage_kind: String,
     server: bool,
     linked_client_id: String,
+    /// The instance an import is creating, which its card opens. Empty for
+    /// every other creation.
+    instance_id: String,
     /// What the work is doing right now, for a creation that has stages worth
     /// watching. Empty for one that finishes before anyone could read it.
     detail: String,
@@ -748,8 +753,8 @@ fn register_import_flow(
     commands: &Sender<Command>,
     import_flow: &Rc<RefCell<ImportFlowState>>,
     creations: &Rc<RefCell<CreationTracker>>,
+    workspace: &Workspace,
 ) {
-    let submit_creations = Rc::clone(creations);
     let sender = commands.clone();
     let weak = ui.as_weak();
     let pick_state = Rc::clone(import_flow);
@@ -813,7 +818,20 @@ fn register_import_flow(
     });
 
     register_blocked_file_actions(ui, import_flow);
+    register_import_submission(ui, commands, import_flow, creations, workspace);
+}
 
+/// Submitting the import dialog: the import starts, and its card stands in
+/// for the instance until the import publishes it.
+fn register_import_submission(
+    ui: &AppWindow,
+    commands: &Sender<Command>,
+    import_flow: &Rc<RefCell<ImportFlowState>>,
+    creations: &Rc<RefCell<CreationTracker>>,
+    workspace: &Workspace,
+) {
+    let submit_creations = Rc::clone(creations);
+    let submit_workspace = workspace.clone();
     let sender = commands.clone();
     let weak = ui.as_weak();
     let submit_state = Rc::clone(import_flow);
@@ -849,6 +867,17 @@ fn register_import_flow(
             }
             return;
         };
+        let instance = begin_importing(
+            &submit_state.borrow(),
+            &mut submit_creations.borrow_mut(),
+            &mut submit_workspace.importing.borrow_mut(),
+            name.as_str(),
+            persistent,
+            &request_id,
+        );
+        // The card opens the instance from here on, so its stand-in row has
+        // to be there before anything else is.
+        submit_workspace.sync_importing();
         if let Some(ui) = weak.upgrade() {
             ui.set_modal(SharedString::default());
             ui.set_modal_error(SharedString::default());
@@ -869,9 +898,28 @@ fn register_import_flow(
                 server_pack: (create_server && !server_pack.is_empty())
                     .then(|| PathBuf::from(server_pack.as_str())),
                 issue_link: submission.issue_link,
+                instance,
             },
         );
     });
+}
+
+/// Chooses the id of the instance a submitted import creates, so the window
+/// can open it, and hold changes for it, before the import publishes it.
+fn begin_importing(
+    flow: &ImportFlowState,
+    creations: &mut CreationTracker,
+    importing: &mut importing::ImportingInstances,
+    name: &str,
+    persistent: bool,
+    request_id: &str,
+) -> InstanceId {
+    let instance = InstanceId::new();
+    if let Some(facts) = flow.importing_facts(name, persistent, request_id) {
+        importing.begin(instance, facts);
+        creations.attach_instance(request_id, instance);
+    }
+    instance
 }
 
 /// Gives a prepared import submission its pending card. `None` means the same
@@ -961,6 +1009,17 @@ impl CreationTracker {
         }
     }
 
+    /// Names the instance an import's card stands for, so the card can open it.
+    fn attach_instance(&mut self, request_id: &str, instance: InstanceId) {
+        if let Some(pending) = self
+            .pending
+            .iter_mut()
+            .find(|pending| pending.request_id == request_id)
+        {
+            pending.instance_id = instance.to_string();
+        }
+    }
+
     /// Re-identifies an import's card as the linked server it is now creating
     /// for `instance`, so the work is shown on that instance's row instead of
     /// as a second entry beside it. The request, and with it the key that
@@ -974,6 +1033,7 @@ impl CreationTracker {
             return;
         };
         pending.server = true;
+        pending.instance_id.clear();
         instance.clone_into(&mut pending.linked_client_id);
         server_name.clone_into(&mut pending.name);
         pending.target = lookup("gui-linked-client");
@@ -1043,6 +1103,9 @@ struct BrowserInstallQueue {
     /// it leaves to decide, because what asked for them did not name the
     /// release, as Diagnostics does not.
     confirmed: Vec<BrowserInstall>,
+    /// Requests for an instance a pack import has not published yet. They
+    /// join the queue, in the order they were pressed, once it is published.
+    held: Vec<BrowserInstall>,
 }
 
 impl BrowserInstallQueue {
@@ -1068,6 +1131,38 @@ impl BrowserInstallQueue {
             self.confirmed.push(request.clone());
         }
         self.enqueue(request)
+    }
+
+    /// Keeps a request until its instance exists. Two presses on one row
+    /// still mean one install.
+    fn hold(&mut self, request: BrowserInstall) {
+        if !self.held.contains(&request) {
+            self.held.push(request);
+        }
+    }
+
+    /// Queues what was held for `instance`, which now exists, and hands back
+    /// the one to start now if nothing is running.
+    fn release(&mut self, instance: &str) -> Option<BrowserInstall> {
+        let (released, kept) = std::mem::take(&mut self.held)
+            .into_iter()
+            .partition::<Vec<_>, _>(|request| request.instance == instance);
+        self.held = kept;
+        let mut start = None;
+        for request in released {
+            if let Some(first) = self.enqueue(request) {
+                start = Some(first);
+            }
+        }
+        start
+    }
+
+    /// Drops what was held for `instance`, whose import ended without it,
+    /// and answers how many requests that was.
+    fn discard_held(&mut self, instance: &str) -> usize {
+        let before = self.held.len();
+        self.held.retain(|request| request.instance != instance);
+        before - self.held.len()
     }
 
     /// Whether `request` shows its plan before installing.
@@ -1106,6 +1201,7 @@ impl BrowserInstallQueue {
         self.active
             .iter()
             .chain(self.waiting.iter())
+            .chain(self.held.iter())
             .filter(|request| request.instance == instance && request.provider == provider)
             .map(|request| request.project.as_str())
             .collect()
@@ -2362,6 +2458,44 @@ impl ImportFlowState {
         true
     }
 
+    /// What the window shows of the instance this submission creates while
+    /// the import runs: the pack's target, and its mods with only the
+    /// optional ones that were checked. `name` is what the dialog's field held.
+    fn importing_facts(
+        &self,
+        name: &str,
+        persistent: bool,
+        request_id: &str,
+    ) -> Option<importing::ImportingFacts> {
+        let presentation = self.presentation.as_ref()?;
+        let chosen = self
+            .options
+            .iter()
+            .filter(|option| option.selected)
+            .map(|option| option.logical_path.as_str())
+            .collect::<HashSet<_>>();
+        let name = name.trim();
+        Some(importing::ImportingFacts {
+            request_id: request_id.to_owned(),
+            name: if name.is_empty() {
+                self.suggested_name.clone()
+            } else {
+                name.to_owned()
+            },
+            minecraft: presentation.minecraft_version.clone(),
+            loader: presentation.loader.clone(),
+            loader_kind: presentation.loader_kind,
+            persistent,
+            issue_link: self.issue_link.clone().unwrap_or_default(),
+            mods: presentation
+                .mods
+                .iter()
+                .filter(|entry| !entry.optional || chosen.contains(entry.logical_path.as_str()))
+                .cloned()
+                .collect(),
+        })
+    }
+
     /// The exact `OptionalSelection` the current checkbox state describes.
     fn selection(&self) -> OptionalSelection {
         OptionalSelection::of(
@@ -2468,6 +2602,8 @@ fn drop_intent(ui: &AppWindow, workspace: &WorkspaceState) -> DropIntent {
         // somebody wants imported.
         "" => match mods_lists_on_screen(ui, workspace) {
             ModsListsOnScreen::None => DropIntent::Import,
+            // An instance still being imported has no mods folder to add to.
+            ModsListsOnScreen::One(host) if workspace.is_importing(host) => DropIntent::Ignored,
             ModsListsOnScreen::One(host) => DropIntent::Mods(host),
             ModsListsOnScreen::Several => DropIntent::Ignored,
         },
@@ -2647,6 +2783,7 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         commands: backend.commands.clone(),
         server_list: Rc::default(),
         home: Rc::default(),
+        importing: Rc::default(),
     };
     register_i18n(ui);
     register_toasts(ui);
@@ -3259,11 +3396,13 @@ fn register_callbacks(
         &workspace.server_list,
         lifecycle,
     );
+    register_case_changes(ui, workspace);
+    register_issue_link(ui, workspace);
     register_catalog_actions(ui, commands);
     register_client_actions(ui, commands, creations);
     register_mod_actions(ui, commands, workspace);
     register_create_instance_naming(ui, commands);
-    register_import_flow(ui, commands, import_flow, creations);
+    register_import_flow(ui, commands, import_flow, creations, workspace);
     register_server_pack_choice(ui, commands);
     register_create_server(ui, commands, Rc::clone(creations));
 
@@ -3957,9 +4096,6 @@ fn register_instance_list(
         send(&sender, Command::SetInstanceSort(sort));
     });
 
-    register_case_changes(ui, commands);
-    register_issue_link(ui, commands);
-
     let sender = commands.clone();
     ui.on_set_favorite(move |kind, id, favorite| {
         if let Some(host) = backend::parse_mod_host(&kind, &id) {
@@ -4401,66 +4537,116 @@ fn apply_loader_options(ui: &AppWindow, form: &str, minecraft: &str) {
 }
 
 /// The steps, note, and reproduced count of an instance's case.
-fn register_case_changes(ui: &AppWindow, commands: &Sender<Command>) {
-    fn change(commands: &Sender<Command>, client: &str, change: backend::CaseChange) {
-        if let Ok(client) = client.parse() {
-            send(commands, Command::ChangeCase { client, change });
+fn register_case_changes(ui: &AppWindow, workspace: &Workspace) {
+    /// Sends a change, or holds it while an import is still creating the
+    /// instance.
+    fn change(ui: &AppWindow, workspace: &Workspace, client: &str, change: backend::CaseChange) {
+        let Ok(client) = client.parse() else {
+            return;
+        };
+        if !workspace.importing.borrow().holds(client) {
+            send(&workspace.commands, Command::ChangeCase { client, change });
+            return;
+        }
+        let held = workspace.importing.borrow_mut().hold_case(client, change);
+        match held {
+            Ok(true) => workspace.held_change(ui, client),
+            Ok(false) => {}
+            Err(reason) => ui.invoke_present_toast(
+                backend::localized_error(&ephervex_core::CoreError::CaseRefused { reason }).into(),
+                true,
+            ),
         }
     }
-    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
     ui.on_case_add_step(move |client, text| {
-        change(
-            &sender,
-            &client,
-            backend::CaseChange::AddStep(text.to_string()),
-        );
-    });
-    let sender = commands.clone();
-    ui.on_case_set_step_done(move |client, step, done| {
-        if let Ok(step) = u32::try_from(step) {
+        if let Some(ui) = weak.upgrade() {
             change(
-                &sender,
+                &ui,
+                &cases,
+                &client,
+                backend::CaseChange::AddStep(text.to_string()),
+            );
+        }
+    });
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
+    ui.on_case_set_step_done(move |client, step, done| {
+        if let (Some(ui), Ok(step)) = (weak.upgrade(), u32::try_from(step)) {
+            change(
+                &ui,
+                &cases,
                 &client,
                 backend::CaseChange::SetStepDone { step, done },
             );
         }
     });
-    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
     ui.on_case_remove_step(move |client, step| {
-        if let Ok(step) = u32::try_from(step) {
-            change(&sender, &client, backend::CaseChange::RemoveStep(step));
+        if let (Some(ui), Ok(step)) = (weak.upgrade(), u32::try_from(step)) {
+            change(&ui, &cases, &client, backend::CaseChange::RemoveStep(step));
         }
     });
-    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
     ui.on_case_save_note(move |client, note| {
-        change(
-            &sender,
-            &client,
-            backend::CaseChange::SetNote(note.to_string()),
-        );
+        if let Some(ui) = weak.upgrade() {
+            change(
+                &ui,
+                &cases,
+                &client,
+                backend::CaseChange::SetNote(note.to_string()),
+            );
+        }
     });
-    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
     ui.on_case_count_reproduced(move |client| {
-        change(&sender, &client, backend::CaseChange::CountReproduced);
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &cases, &client, backend::CaseChange::CountReproduced);
+        }
     });
-    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let cases = workspace.clone();
     ui.on_case_reset_reproduced(move |client| {
-        change(&sender, &client, backend::CaseChange::ResetReproduced);
+        if let Some(ui) = weak.upgrade() {
+            change(&ui, &cases, &client, backend::CaseChange::ResetReproduced);
+        }
     });
 }
 
 /// Setting an instance's issue link, and opening it in the browser.
-fn register_issue_link(ui: &AppWindow, commands: &Sender<Command>) {
-    let sender = commands.clone();
+fn register_issue_link(ui: &AppWindow, workspace: &Workspace) {
+    let weak = ui.as_weak();
+    let links = workspace.clone();
     ui.on_set_issue_link(move |client, link| {
-        if let Ok(client) = client.parse() {
+        let (Some(ui), Ok(client)) = (weak.upgrade(), client.parse()) else {
+            return;
+        };
+        if !links.importing.borrow().holds(client) {
             send(
-                &sender,
+                &links.commands,
                 Command::SetIssueLink {
                     client,
                     link: link.to_string(),
                 },
             );
+            return;
+        }
+        // Refused now for what the instance would refuse it for later.
+        match ephervex_core::validated_issue_link(&link) {
+            Ok(link) => {
+                links
+                    .importing
+                    .borrow_mut()
+                    .hold_issue_link(client, link.unwrap_or_default());
+                links.held_change(&ui, client);
+            }
+            Err(error) => {
+                ui.invoke_present_toast(backend::localized_error(&error).into(), true);
+            }
         }
     });
     let weak = ui.as_weak();
@@ -4577,8 +4763,9 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
             provider: provider.to_string(),
             project: project.to_string(),
         };
-        let start = install_queue.installs.borrow_mut().enqueue(request);
-        if let Some(request) = start {
+        if holds_installs(&install_workspace, &request) {
+            install_queue.installs.borrow_mut().hold(request);
+        } else if let Some(request) = install_queue.installs.borrow_mut().enqueue(request) {
             start_browser_install(&sender, &request);
         }
         mark_queued(&install_workspace);
@@ -4601,6 +4788,11 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
             provider: provider.to_string(),
             project: project.to_string(),
         };
+        // Diagnostics reads a run, which an instance still being imported
+        // never had.
+        if holds_installs(&install_workspace, &request) {
+            return;
+        }
         let start = install_queue
             .installs
             .borrow_mut()
@@ -4621,6 +4813,14 @@ fn register_browser_install(ui: &AppWindow, commands: &Sender<Command>, workspac
             .finish_active();
         advance_browser_install(&sender, &abandon_workspace, next);
     });
+}
+
+/// Whether `request` is for an instance a pack import has not published yet,
+/// whose installs wait for it.
+fn holds_installs(workspace: &Workspace, request: &BrowserInstall) -> bool {
+    !request.server
+        && backend::parse_instance_id(&request.instance)
+            .is_some_and(|instance| workspace.importing.borrow().holds(instance))
 }
 
 /// Asks for one queued install's plan.
@@ -5484,6 +5684,8 @@ struct Workspace {
     server_list: Rc<RefCell<ServerListState>>,
     /// The Home page's data, including failed runs of hosts no pane shows.
     home: Rc<RefCell<HomeState>>,
+    /// Instances a pack import is still creating, and the changes held for them.
+    importing: Rc<RefCell<importing::ImportingInstances>>,
 }
 
 impl Workspace {
@@ -5497,6 +5699,8 @@ impl Workspace {
                 .chain(state.quick())
                 .flat_map(WorkspaceLayout::panes)
                 .map(|placed| (placed.pane.id(), placed.pane.host(), placed.pane.surface()))
+                // An instance still being imported has no log to read yet.
+                .filter(|&(_, host, _)| !self.is_importing(host))
                 .collect::<Vec<_>>()
         };
         let mut logs = self.logs.borrow_mut();
@@ -5553,6 +5757,13 @@ impl Workspace {
         self.isolation.borrow_mut().follow(&shown);
         self.diagnosis.borrow_mut().follow(&shown);
         for &host in entered {
+            if let InstalledHost::Instance(instance) = host
+                && self.importing.borrow().knows(instance)
+            {
+                // Nothing can be read from an instance that is not published.
+                self.show_importing(instance);
+                continue;
+            }
             mod_views::publish(self, &self.mods.borrow(), host);
             load_host(ui, host);
             java_runtime::load(&self.commands, host, false);
@@ -5560,12 +5771,163 @@ impl Workspace {
         // What happened to the hosts shown changes whenever one of them runs
         // or stops, which is also when the lists refresh.
         // Only a client shows its history, on the Case tab.
-        for &host in shown
-            .iter()
-            .filter(|host| matches!(host, InstalledHost::Instance(_)))
-        {
-            send(&self.commands, Command::LoadHostEvents(host));
+        for &host in &shown {
+            if let InstalledHost::Instance(instance) = host
+                && !self.importing.borrow().knows(instance)
+            {
+                send(&self.commands, Command::LoadHostEvents(host));
+            }
         }
+    }
+
+    /// Whether `host` is an instance a pack import is still creating, or has
+    /// published without its row having arrived yet.
+    fn is_importing(&self, host: InstalledHost) -> bool {
+        matches!(host, InstalledHost::Instance(instance) if self.importing.borrow().knows(instance))
+    }
+
+    /// Writes what the window knows of an instance a pack import is still
+    /// creating into its view: the pack's mods, and the settings held for it.
+    fn show_importing(&self, instance: InstanceId) {
+        let host = InstalledHost::Instance(instance);
+        let (target, rows, runtime) = {
+            let importing = self.importing.borrow();
+            (
+                importing.target(instance),
+                importing.mod_rows(instance),
+                importing.runtime(instance).cloned(),
+            )
+        };
+        {
+            let mut mods = self.mods.borrow_mut();
+            mods.set_pending_target(host, target);
+            mods.apply_list(host, rows, lookup("gui-importing-mods-notice"), false);
+        }
+        mod_views::publish(self, &self.mods.borrow(), host);
+        self.update(host, |view| {
+            let (min, max, args) = runtime.map_or_else(Default::default, |held| {
+                (held.min_memory_mib, held.max_memory_mib, held.jvm_args)
+            });
+            view.runtime_memory_min = min.into();
+            view.runtime_memory_max = max.into();
+            view.runtime_jvm_args = args.into();
+            view.runtime_pinned = false;
+            view.runtime_global = SharedString::default();
+            view.runtime_revision = view.runtime_revision.wrapping_add(1);
+        });
+    }
+
+    /// Writes the rows standing in for instances pack imports are creating.
+    fn sync_importing(&self) {
+        let rows = self.importing.borrow().rows();
+        self.state.borrow_mut().set_importing(rows);
+    }
+
+    /// Redraws an importing instance after a change was held for it.
+    fn held_change(&self, ui: &AppWindow, instance: InstanceId) {
+        self.sync_importing();
+        self.refresh(ui);
+        if self
+            .state
+            .borrow()
+            .shown()
+            .contains(&InstalledHost::Instance(instance))
+        {
+            self.show_importing(instance);
+        }
+    }
+
+    /// An import published `instance`: sends what was held for it, in the
+    /// order it was made, and queues the mods chosen for it.
+    fn import_published(&self, ui: &AppWindow, instance: InstanceId) {
+        let held = self.importing.borrow_mut().publish(instance);
+        for command in held {
+            send(&self.commands, command);
+        }
+        let start = self
+            .browser
+            .installs
+            .borrow_mut()
+            .release(&instance.to_string());
+        advance_browser_install(&self.commands, self, start);
+        self.settle_importing(ui);
+        self.refresh(ui);
+    }
+
+    /// An import ended without publishing `instance`. What was held for it
+    /// cannot be made anywhere, and the user hears how much was dropped.
+    fn import_failed(&self, ui: &AppWindow, instance: InstanceId) {
+        let discarded = self.importing.borrow_mut().fail(instance)
+            + self
+                .browser
+                .installs
+                .borrow_mut()
+                .discard_held(&instance.to_string());
+        let host = InstalledHost::Instance(instance);
+        self.mods.borrow_mut().set_pending_target(host, None);
+        self.sync_importing();
+        self.refresh(ui);
+        mark_queued(self);
+        if discarded > 0 {
+            ui.invoke_present_toast(
+                lookup_args(
+                    "gui-import-held-changes-discarded",
+                    [("count", Arg::from(discarded))],
+                )
+                .into(),
+                true,
+            );
+        }
+    }
+
+    /// Hands every published instance whose row has arrived over to the
+    /// window's ordinary reading of it.
+    fn settle_importing(&self, ui: &AppWindow) {
+        let settled = {
+            let state = self.state.borrow();
+            self.importing
+                .borrow_mut()
+                .settle(|instance| state.lists_client(instance))
+        };
+        self.sync_importing();
+        if settled.is_empty() {
+            return;
+        }
+        let shown = self.state.borrow().shown();
+        let panes = {
+            let state = self.state.borrow();
+            state
+                .layout()
+                .into_iter()
+                .chain(state.quick())
+                .flat_map(WorkspaceLayout::panes)
+                .map(|placed| (placed.pane.host(), placed.pane.surface()))
+                .collect::<Vec<_>>()
+        };
+        for instance in settled {
+            let host = InstalledHost::Instance(instance);
+            self.mods.borrow_mut().set_pending_target(host, None);
+            if !shown.contains(&host) {
+                continue;
+            }
+            load_host(ui, host);
+            java_runtime::load(&self.commands, host, false);
+            send(&self.commands, Command::LoadHostEvents(host));
+            // Each pane asks for what its surface shows, as it would have
+            // when it opened on a published instance.
+            for &(shown_host, surface) in panes.iter().filter(|(on, _)| *on == host) {
+                apply_pane_change(
+                    ui,
+                    self,
+                    PaneChange {
+                        before: None,
+                        after: Some((shown_host, surface)),
+                    },
+                );
+            }
+        }
+        // Gives a pane on Logs its viewer.
+        self.present(ui, None);
     }
 
     /// Changes what a feature reported about a host, in every pane showing it.
@@ -5792,6 +6154,11 @@ fn apply_pane_change(ui: &AppWindow, workspace: &Workspace, change: PaneChange) 
     let Some((host, surface)) = after else {
         return;
     };
+    // Nothing can be read from an instance that is not published yet; its
+    // surfaces are asked for again once it is.
+    if workspace.is_importing(host) {
+        return;
+    }
     let id = SharedString::from(host.id());
     match surface {
         Surface::Snapshots => ui.invoke_load_snapshots(host.kind().into(), id),
@@ -6286,11 +6653,15 @@ fn register_host_runtime_actions(
 ) {
     let sender = commands.clone();
     let views = workspace.clone();
+    let weak = ui.as_weak();
     ui.on_save_host_runtime(move |kind, id, min, max, args| {
-        let Some(host) = workspace::parse_host(&kind, &id) else {
+        let (Some(ui), Some(host)) = (weak.upgrade(), workspace::parse_host(&kind, &id)) else {
             return;
         };
         clear_runtime_error(&views, host);
+        if hold_runtime(&ui, &views, host, &min, &max, &args) {
+            return;
+        }
         send(
             &sender,
             Command::SaveHostRuntime {
@@ -6304,9 +6675,13 @@ fn register_host_runtime_actions(
 
     let sender = commands.clone();
     let views = workspace.clone();
+    let weak = ui.as_weak();
     ui.on_clear_host_runtime(move |kind, id| {
-        if let Some(host) = workspace::parse_host(&kind, &id) {
+        if let (Some(ui), Some(host)) = (weak.upgrade(), workspace::parse_host(&kind, &id)) {
             clear_runtime_error(&views, host);
+            if hold_runtime(&ui, &views, host, "", "", "") {
+                return;
+            }
             send(
                 &sender,
                 Command::SaveHostRuntime {
@@ -6328,6 +6703,47 @@ fn register_host_runtime_actions(
             );
         }
     });
+}
+
+/// Holds a save of the Settings form while an import is still creating the
+/// instance, answering whether it was held rather than to be sent. A value
+/// the save would refuse is refused now, on the form, the same way.
+fn hold_runtime(
+    ui: &AppWindow,
+    workspace: &Workspace,
+    host: InstalledHost,
+    min: &str,
+    max: &str,
+    args: &str,
+) -> bool {
+    let InstalledHost::Instance(instance) = host else {
+        return false;
+    };
+    if !workspace.importing.borrow().holds(instance) {
+        return false;
+    }
+    let refusal = match crate::jvm_arguments::parse(args) {
+        Err(error) => Some(lookup(error.message_id())),
+        Ok(_) => [min, max]
+            .into_iter()
+            .any(|value| crate::memory_input::parse_optional_mib(value).is_err())
+            .then(|| lookup(crate::memory_input::NotANumber::MESSAGE_ID)),
+    };
+    if let Some(message) = refusal {
+        workspace.update(host, |view| view.runtime_error = message.into());
+        return true;
+    }
+    workspace.importing.borrow_mut().hold_runtime(
+        instance,
+        importing::HeldRuntime {
+            min_memory_mib: min.to_owned(),
+            max_memory_mib: max.to_owned(),
+            jvm_args: args.to_owned(),
+        },
+    );
+    workspace.held_change(ui, instance);
+    ui.invoke_present_toast(lookup("gui-held-until-imported").into(), false);
+    true
 }
 
 /// Forgets why the host's last runtime save was refused, so a new attempt
@@ -8705,6 +9121,7 @@ fn apply_event(
             );
             lifecycle.borrow_mut().servers.observe(&servers);
             workspace.state.borrow_mut().set_rows(clients, servers);
+            workspace.settle_importing(ui);
             workspace.refresh(ui);
             workspace.publish_home(ui);
             // A snapshot rebuilds the rows from records that know nothing of
@@ -8761,10 +9178,16 @@ fn apply_event(
             instance,
             server_name,
         } => {
+            // The import published the instance before it started on the
+            // server, so what was held for it can be made now.
+            let imported = workspace.importing.borrow().instance_of(&request_id);
             creations
                 .borrow_mut()
                 .hand_off_to_linked_server(&request_id, &instance, &server_name);
             apply_pending_creations(ui, &creations.borrow());
+            if let Some(imported) = imported {
+                workspace.import_published(ui, imported);
+            }
         }
         Event::MinecraftReleases(versions) => {
             apply_minecraft_releases(ui, versions);
@@ -9231,8 +9654,16 @@ fn apply_event(
             succeeded,
             request_id,
         } => {
+            let imported = workspace.importing.borrow().instance_of(&request_id);
             creations.borrow_mut().finish(&request_id);
             apply_pending_creations(ui, &creations.borrow());
+            if let Some(imported) = imported {
+                if succeeded {
+                    workspace.import_published(ui, imported);
+                } else {
+                    workspace.import_failed(ui, imported);
+                }
+            }
             apply_import_submission_finished(ui, import_flow, generation, succeeded);
             // An import can install a linked server, and with it a runtime.
             java_runtime::reload_shown(workspace);
@@ -9641,6 +10072,7 @@ fn pending_creation(key: &CreationKey, persistent_import: bool) -> PendingCreati
             CreationKey::Server { client, .. } => client.clone(),
             CreationKey::Client { .. } | CreationKey::Import { .. } => String::new(),
         },
+        instance_id: String::new(),
     }
 }
 
@@ -9680,6 +10112,7 @@ fn apply_pending_creations(ui: &AppWindow, tracker: &CreationTracker) {
                 state: lookup("gui-state-creating").into(),
                 server,
                 linked_client_id: pending.linked_client_id.clone().into(),
+                instance_id: pending.instance_id.clone().into(),
                 detail: pending.detail.clone().into(),
                 progress: pending.progress,
                 indeterminate: pending.detail.is_empty() || pending.indeterminate,
@@ -14732,6 +15165,7 @@ mod tests {
             commands: sender,
             server_list: Rc::default(),
             home: Rc::default(),
+            importing: Rc::default(),
         };
         register_workspace(ui, &workspace);
         log_views::register(ui, &workspace.logs);
@@ -21822,6 +22256,306 @@ mod tests {
     }
 
     #[test]
+    fn a_held_install_joins_the_queue_only_once_its_instance_exists() {
+        let request = |instance: &str, project: &str| BrowserInstall {
+            server: false,
+            instance: instance.to_owned(),
+            provider: "modrinth".to_owned(),
+            project: project.to_owned(),
+        };
+        let mut queue = BrowserInstallQueue::default();
+        queue.hold(request("importing", "jei"));
+        queue.hold(request("importing", "jei"));
+        queue.hold(request("importing", "sodium"));
+        queue.hold(request("other", "utilitix"));
+
+        assert_eq!(
+            queue.outstanding("importing", "modrinth"),
+            ["jei", "sodium"],
+            "a held request is still owed, and two presses are one"
+        );
+        assert_eq!(
+            queue.release("importing"),
+            Some(request("importing", "jei")),
+            "the first press starts as soon as the instance exists"
+        );
+        assert_eq!(
+            queue.finish(&request("importing", "jei")),
+            Some(request("importing", "sodium"))
+        );
+        assert_eq!(queue.discard_held("other"), 1);
+        assert!(queue.outstanding("other", "modrinth").is_empty());
+    }
+
+    /// An instance a pack import is still creating, open on its Mods surface.
+    fn importing_window() -> (
+        AppWindow,
+        Workspace,
+        std::sync::mpsc::Receiver<Command>,
+        InstanceId,
+    ) {
+        let ui = test_window();
+        register_i18n(&ui);
+        ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let instance = InstanceId::new();
+        workspace.importing.borrow_mut().begin(
+            instance,
+            importing::ImportingFacts {
+                request_id: "creation-1".to_owned(),
+                name: "Example Pack".to_owned(),
+                minecraft: "1.21.1".to_owned(),
+                loader: "NeoForge 21.1.42".to_owned(),
+                loader_kind: ephervex_model::LoaderKind::NeoForge,
+                persistent: false,
+                issue_link: String::new(),
+                mods: Vec::new(),
+            },
+        );
+        workspace.sync_importing();
+        workspace.open(&ui, InstalledHost::Instance(instance), Surface::Mods);
+        (ui, workspace, commands, instance)
+    }
+
+    fn import_finished(ui: &AppWindow, workspace: &Workspace, succeeded: bool) {
+        deliver_event(
+            ui,
+            workspace,
+            Event::ImportSubmissionFinished {
+                generation: 1,
+                succeeded,
+                request_id: "creation-1".to_owned(),
+            },
+        );
+    }
+
+    #[test]
+    fn an_install_for_an_instance_still_importing_is_queued_and_planned_once_it_exists() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_mod_browser(&ui, &workspace.commands, &workspace);
+        ui.set_add_mods_host(0);
+        ui.set_modal("add-mods".into());
+        let id = instance.to_string();
+        ui.invoke_search_mods(
+            "client".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        let (request_id, target) = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::SearchMods {
+                    request_id,
+                    pending_target,
+                    ..
+                } => Some((request_id, pending_target)),
+                _ => None,
+            })
+            .expect("a search");
+        assert_eq!(
+            target,
+            Some(backend::PendingClientTarget {
+                minecraft_version: "1.21.1".to_owned(),
+                loader: ephervex_model::LoaderKind::NeoForge,
+            }),
+            "the pack's own target is searched"
+        );
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::ModResults(backend::ModResultsData {
+                host: InstalledHost::Instance(instance),
+                provider: "modrinth".to_owned(),
+                query: "repro".to_owned(),
+                offset: 0,
+                rows: vec![backend::ModSearchData {
+                    project_id: "repro".to_owned(),
+                    title: "Repro Mod".to_owned(),
+                    description: String::new(),
+                    author: String::new(),
+                    icon: String::new(),
+                    note: String::new(),
+                    downloads: String::new(),
+                    server_support: String::new(),
+                    blocked_reason: String::new(),
+                }],
+                total: 1,
+                next_offset: None,
+                request_id,
+                notice: String::new(),
+            }),
+        );
+
+        ui.invoke_install_from_browser(
+            "client".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        render();
+
+        assert!(on_screen(&ui, &lookup("gui-mod-result-queued")));
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::PlanMod { .. })),
+            "nothing is planned for an instance that does not exist yet"
+        );
+
+        import_finished(&ui, &workspace, true);
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::PlanMod { instance: planned, project, .. }
+                if planned == instance && project == "repro"
+        )));
+    }
+
+    #[test]
+    fn steps_written_while_importing_are_shown_and_stored_once_the_instance_exists() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_case_changes(&ui, &workspace);
+        let id = instance.to_string();
+
+        ui.invoke_case_add_step(id.as_str().into(), "Open the world".into());
+
+        let view = ui.get_host_views().row_data(0).expect("a host view");
+        assert!(view.importing);
+        assert!(!view.available, "nothing that needs the files is offered");
+        assert_eq!(view.client.case_steps.row_count(), 1);
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::ChangeCase { .. })),
+            "the step waits for the instance"
+        );
+
+        import_finished(&ui, &workspace, true);
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::ChangeCase {
+                client,
+                change: backend::CaseChange::AddStep(text),
+            } if client == instance && text == "Open the world"
+        )));
+    }
+
+    /// An import that goes on to build a linked server published the instance
+    /// before starting on it, so what was held is made then.
+    #[test]
+    fn held_changes_are_made_when_the_import_moves_on_to_its_linked_server() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_issue_link(&ui, &workspace);
+        let id = instance.to_string();
+        ui.invoke_set_issue_link(id.as_str().into(), "https://example.com/issues/1".into());
+
+        deliver_event(
+            &ui,
+            &workspace,
+            Event::LinkedServerStarted {
+                request_id: "creation-1".to_owned(),
+                instance: id,
+                server_name: "Example Pack Server".to_owned(),
+            },
+        );
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::SetIssueLink { client, link }
+                if client == instance && link == "https://example.com/issues/1"
+        )));
+    }
+
+    #[test]
+    fn a_failed_import_discards_what_was_held_for_it_and_says_how_much() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_browser_install(&ui, &workspace.commands, &workspace);
+        register_case_changes(&ui, &workspace);
+        let shown = toasts(&ui);
+        let id = instance.to_string();
+        ui.invoke_install_from_browser(
+            "client".into(),
+            id.as_str().into(),
+            "modrinth".into(),
+            "repro".into(),
+        );
+        ui.invoke_case_add_step(id.as_str().into(), "Open the world".into());
+
+        import_finished(&ui, &workspace, false);
+
+        assert!(
+            !commands.try_iter().any(|command| matches!(
+                command,
+                Command::PlanMod { .. } | Command::ChangeCase { .. }
+            )),
+            "nothing is sent for an instance that was never created"
+        );
+        let discarded = lookup_args(
+            "gui-import-held-changes-discarded",
+            [("count", Arg::from(2_usize))],
+        );
+        assert!(
+            shown
+                .borrow()
+                .iter()
+                .any(|(message, error)| *error && *message == discarded),
+            "{:?}",
+            shown.borrow()
+        );
+        assert!(
+            workspace
+                .browser
+                .installs
+                .borrow()
+                .outstanding(&id, "modrinth")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_settings_save_while_importing_is_held_and_a_value_the_save_refuses_is_refused_now() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_host_runtime_actions(&ui, &workspace.commands, &workspace);
+        let id = instance.to_string();
+
+        ui.invoke_save_host_runtime(
+            "client".into(),
+            id.as_str().into(),
+            "".into(),
+            "lots".into(),
+            "".into(),
+        );
+        let view = ui.get_host_views().row_data(0).expect("a host view");
+        assert_eq!(
+            view.runtime_error,
+            lookup(crate::memory_input::NotANumber::MESSAGE_ID)
+        );
+
+        ui.invoke_save_host_runtime(
+            "client".into(),
+            id.as_str().into(),
+            "".into(),
+            "4096".into(),
+            "".into(),
+        );
+        assert!(
+            !commands
+                .try_iter()
+                .any(|command| matches!(command, Command::SaveHostRuntime { .. }))
+        );
+
+        import_finished(&ui, &workspace, true);
+
+        assert!(commands.try_iter().any(|command| matches!(
+            command,
+            Command::SaveHostRuntime { max_memory_mib, .. } if max_memory_mib == "4096"
+        )));
+    }
+
+    #[test]
     fn a_queue_reports_every_project_it_still_owes_an_install() {
         let request = |instance: &str, provider: &str, project: &str| BrowserInstall {
             server: false,
@@ -22929,6 +23663,8 @@ mod tests {
             author: "An Author".to_owned(),
             minecraft_version: "1.21.1".to_owned(),
             loader: "NeoForge 21.1.42".to_owned(),
+            loader_kind: ephervex_model::LoaderKind::NeoForge,
+            mods: Vec::new(),
             required_count: 5,
             optional_count: 2,
             optional: if needs_resolution {
@@ -23414,6 +24150,94 @@ mod tests {
             "the archive submitted must be exactly the one the current analysis is for; \
              `begin_submit` takes no archive argument, so nothing else could have supplied one"
         );
+    }
+
+    /// The card of a submitted import opens its instance at once, before any
+    /// snapshot could list it.
+    #[test]
+    fn a_submitted_import_can_be_opened_from_its_card_straight_away() {
+        let ui = test_window();
+        register_i18n(&ui);
+        let (workspace, commands) = test_workspace_sending(&ui);
+        let flow = Rc::new(RefCell::new(ImportFlowState::default()));
+        let creations = Rc::new(RefCell::new(CreationTracker::default()));
+        register_import_flow(&ui, &workspace.commands, &flow, &creations, &workspace);
+        {
+            let mut flow = flow.borrow_mut();
+            let generation = flow.begin_attempt();
+            flow.analyzed(
+                generation,
+                PathBuf::from("pack.mrpack"),
+                Ok(resolved_presentation("Example Pack", false)),
+            );
+        }
+
+        ui.invoke_submit_import("".into(), false, false, "".into());
+
+        let instance = commands
+            .try_iter()
+            .find_map(|command| match command {
+                Command::ImportPack { instance, .. } => Some(instance),
+                _ => None,
+            })
+            .expect("the import starts");
+        let card = ui.get_pending_instances().row_data(0).expect("a card");
+        assert_eq!(card.instance_id, instance.to_string());
+        ui.invoke_open_workspace("client".into(), card.instance_id, "Overview".into());
+        let view = ui.get_host_views().row_data(0).expect("a host view");
+        assert!(view.importing, "the pane shows the instance being imported");
+        assert_eq!(view.client.name, "Example Pack");
+    }
+
+    /// The surfaces that need the instance's files say so and ask for nothing,
+    /// and ask once the instance exists.
+    #[test]
+    fn a_surface_that_needs_the_files_asks_for_nothing_until_the_import_finishes() {
+        let (ui, workspace, commands, instance) = importing_window();
+        register_snapshot_actions(&ui, &workspace.commands);
+        let host = InstalledHost::Instance(instance);
+        let pane = workspace.single_pane().expect("one pane");
+        let reads = |commands: &std::sync::mpsc::Receiver<Command>| {
+            commands
+                .try_iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        Command::LoadSnapshots(_) | Command::OpenLiveLog { .. }
+                    )
+                })
+                .count()
+        };
+
+        workspace.change_pane(&ui, pane, |layout| {
+            layout.show_surface(pane, Surface::Snapshots).is_ok()
+        });
+        workspace.change_pane(&ui, pane, |layout| {
+            layout.show_surface(pane, Surface::Logs).is_ok()
+        });
+        assert_eq!(
+            reads(&commands),
+            0,
+            "nothing is read from an unpublished instance"
+        );
+
+        import_finished(&ui, &workspace, true);
+        workspace.state.borrow_mut().set_rows(
+            vec![InstanceRow {
+                id: instance.to_string().into(),
+                name: "Example Pack".into(),
+                ..InstanceRow::default()
+            }],
+            Vec::new(),
+        );
+        workspace.settle_importing(&ui);
+
+        assert_eq!(
+            reads(&commands),
+            1,
+            "the Logs pane opens its log once the instance exists"
+        );
+        assert!(!workspace.is_importing(host));
     }
 
     #[test]

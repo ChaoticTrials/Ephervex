@@ -539,6 +539,36 @@ fn pressing_a_card_asks_to_open_it_and_pressing_its_star_does_not() {
     assert_eq!(opened.borrow().len(), 1, "the star opened the host");
 }
 
+/// An import's card stands for an instance that can already be worked on, so
+/// it opens that instance. Any other creation has nothing to open yet.
+#[test]
+fn an_import_card_opens_the_instance_it_creates_and_another_creation_does_not() {
+    let ui = list_probe(0);
+    let mut importing = pending("creation-1", "Example Pack");
+    importing.instance_id = "instance-7".into();
+    ui.set_pending_instances(ModelRc::new(VecModel::from(vec![
+        importing,
+        pending("creation-2", "Plain Client"),
+    ])));
+    render(&ui);
+
+    let open = |name: &str| {
+        find_button(
+            &ui,
+            &lookup_args("gui-open-importing-instance", [("value", Arg::from(name))]),
+        )
+    };
+    open("Example Pack")
+        .expect("the import's card is a button")
+        .invoke_accessible_default_action();
+
+    assert_eq!(ui.get_log(), "open-client:instance-7;");
+    assert!(
+        open("Plain Client").is_none(),
+        "only an import opens anything"
+    );
+}
+
 #[test]
 fn a_cards_quick_view_button_asks_for_that_host_without_opening_it() {
     let ui = card_probe(1.0);

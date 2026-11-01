@@ -23,9 +23,13 @@ pub(super) fn load(commands: &Sender<Command>, host: InstalledHost, choices: boo
 }
 
 /// Asks every shown host for its Java again, once the runtimes they can use
-/// may have changed.
+/// may have changed. An instance still being imported is asked once it exists.
 pub(super) fn reload_shown(workspace: &Workspace) {
-    for host in workspace.state.borrow().shown() {
+    let shown = workspace.state.borrow().shown();
+    for host in shown
+        .into_iter()
+        .filter(|&host| !workspace.is_importing(host))
+    {
         load(&workspace.commands, host, true);
     }
 }

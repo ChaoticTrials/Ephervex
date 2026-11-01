@@ -1270,6 +1270,16 @@ after the recipe and optional selections are valid. The normalized recipe is
 stored under `.launcher/source/recipe.json`; provider metadata and the override
 layers needed to reproduce the other side are retained explicitly.
 
+The instance stays unpublished until materialization finishes, so no entry
+point can act on it before then. The desktop frontend still lets the user open
+it while it imports: the frontend names the instance id in the `ImportRequest`,
+shows what the analysis declared, and searches the catalogs on the pack's exact
+target through `App::search_mods_for_pending_client`. Catalog installs, the
+runtime settings, the issue link, and the case's steps and note are held in the
+window and sent in the order they were made once the import publishes the
+instance. Anything that needs the instance's files waits. A failed or canceled
+import drops what was held and says how much.
+
 Resource packs, shader packs, and data packs are not mods. A declared one is an
 ordinary recipe file, and one shipped in an override layer is listed on that
 layer. The mod list never includes them; `App::host_pack_content` lists them

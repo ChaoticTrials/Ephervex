@@ -321,6 +321,8 @@ error-registry-metadata-unsupported-version = The instance metadata at { $path }
 
 error-registry-root-occupied = That instance directory already contains files.
 .action = Choose a different name, or remove { $path } first.
+error-registry-instance-id-taken = An instance with that id already exists.
+.action = Start the import again.
 
 error-registry-host-busy = That instance or server is being started or changed by another operation, such as a snapshot restore, a move to another storage location, or a deletion.
 .action = Wait for the other operation to finish, then try again.
@@ -2494,6 +2496,33 @@ gui-account-manage = Manage accounts
 # A workspace pane whose client or server was deleted while it was shown.
 gui-workspace-host-gone = No longer installed
 gui-workspace-host-gone-detail = This client or server was removed. Choose another host for this pane or close it.
+# An instance a pack import is still creating, opened before the import
+# finishes. Changes made to it wait for the import.
+gui-state-importing = Importing
+gui-stamp-importing = Importing
+gui-stamp-importing-detail = changes wait for the import
+gui-open-importing-instance = Open { $value } while it imports
+gui-importing-title = This pack is still importing
+gui-importing-detail = You can prepare the instance now. Your changes are applied when the import finishes.
+gui-importing-held = Available now: mods from the catalogs, memory and JVM arguments, the issue link, and reproduction steps and notes. Everything else needs the instance's files.
+gui-importing-open-mods = Add mods
+gui-importing-open-settings = Settings
+gui-importing-open-case = Reproduction steps
+gui-available-after-import-title = Not available yet
+gui-available-after-import = Available when the import finishes.
+gui-held-until-imported = Saved. It is applied when the import finishes.
+gui-runtime-held-until-imported = A save is applied when the import finishes.
+gui-java-after-import = Java can be chosen when the import finishes.
+gui-importing-mods-notice = These mods come with the pack and are still downloading. Mods you install from the catalogs are queued and installed when the import finishes.
+gui-mod-importing = Comes with the pack
+gui-mods-shown-importing = { $count ->
+    [one] 1 mod in the pack
+   *[other] { $count } mods in the pack
+}
+gui-import-held-changes-discarded = { $count ->
+    [one] The import did not finish, so 1 change made while it ran was discarded.
+   *[other] The import did not finish, so { $count } changes made while it ran were discarded.
+}
 # Splitting the host workspace into panes that each show one host and one view.
 gui-workspace-split = Split view
 gui-workspace-split-title = Split view

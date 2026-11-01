@@ -146,6 +146,9 @@ export component HostRuntimeForm inherits ScrollView {
     callback cancel-fix();
     callback apply-fix();
     in property <bool> busy;
+    // A pack import is still creating the instance: a save is held until it
+    // finishes, and what needs the instance's files waits for it.
+    in property <bool> importing;
     callback clear();
     callback allow-pack-mod-changes(bool);
     callback open-global-defaults();
@@ -172,6 +175,7 @@ export component HostRuntimeForm inherits ScrollView {
         Text { text: GuiI18n.text("gui-instance-jvm-args"); color: Theme.text-secondary; font-size: Theme.label-size; }
         args-field := TextField { placeholder: GuiI18n.text("gui-instance-jvm-args-placeholder"); accessible-name: GuiI18n.text("gui-instance-jvm-args"); }
         if root.error != "" : BodyText { text: root.error; color: Theme.danger; wrap: word-wrap; }
+        if root.importing : BodyText { text: GuiI18n.text("gui-runtime-held-until-imported"); color: Theme.text-muted; wrap: word-wrap; }
         HorizontalLayout { spacing: 8px;
             if root.host.runtime-pinned : AppButton { text: GuiI18n.text("gui-instance-runtime-clear"); clicked => { root.clear(); } }
             Rectangle { horizontal-stretch: 1; }
@@ -180,9 +184,11 @@ export component HostRuntimeForm inherits ScrollView {
         Divider { }
         SectionTitle { title: GuiI18n.text("gui-allow-pack-mod-changes"); detail: root.for-client ? GuiI18n.text("gui-allow-pack-mod-changes-detail") : GuiI18n.text("gui-allow-pack-mod-changes-server-detail"); }
         // Its position is what the host records, read back after the change.
-        LabeledToggle { width: min(parent.width, 520px); label: root.for-client ? GuiI18n.text("gui-allow-pack-mod-changes-toggle") : GuiI18n.text("gui-allow-pack-mod-changes-server-toggle"); checked: root.host.allow-pack-mod-changes; enabled: !root.host.pack-mod-changes-fixed; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(value); } }
+        LabeledToggle { width: min(parent.width, 520px); label: root.for-client ? GuiI18n.text("gui-allow-pack-mod-changes-toggle") : GuiI18n.text("gui-allow-pack-mod-changes-server-toggle"); checked: root.host.allow-pack-mod-changes; enabled: !root.host.pack-mod-changes-fixed && !root.importing; sets-its-own-position: false; toggled(value) => { root.allow-pack-mod-changes(value); } }
+        if root.importing : BodyText { text: GuiI18n.text("gui-available-after-import"); color: Theme.text-muted; wrap: word-wrap; }
         Divider { }
-        JavaRuntimeSection {
+        if root.importing : SectionTitle { title: GuiI18n.text("gui-java-section"); detail: GuiI18n.text("gui-java-after-import"); }
+        if !root.importing : JavaRuntimeSection {
             host: root.host;
             can-change: !root.busy;
             change-hint: GuiI18n.text("gui-hint-busy");

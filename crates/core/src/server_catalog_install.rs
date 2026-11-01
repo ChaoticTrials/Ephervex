@@ -588,6 +588,62 @@ async fn a_server_search_leaves_client_only_mods_out_and_a_client_search_keeps_t
     assert_eq!(ids(for_client), ["ROOTPROJ", "CLIENTMOD"]);
 }
 
+/// An instance a pack import has not published yet has no record to read a
+/// target from, so the pack's own is searched, as the client would be.
+#[tokio::test]
+async fn a_search_for_a_client_still_being_imported_uses_the_packs_exact_target() {
+    let world = world().await;
+    Mock::given(method("GET"))
+        .and(path("/search"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "hits": [{
+                "project_id": "CLIENTMOD", "slug": "clientmod", "title": "CLIENTMOD",
+                "description": "", "author": "a", "client_side": "required",
+                "server_side": "unsupported", "project_type": "mod",
+                "categories": ["neoforge"], "versions": [MINECRAFT],
+            }],
+            "offset": 0, "limit": 10, "total_hits": 1,
+        })))
+        .mount(&world.catalog)
+        .await;
+
+    let results = world
+        .app
+        .search_mods_for_pending_client(
+            MINECRAFT,
+            ephervex_model::LoaderKind::NeoForge,
+            ModProvider::Modrinth,
+            &ephervex_mod_platform::ModSearchQuery::new(""),
+        )
+        .await
+        .expect("searches");
+
+    let ids = results
+        .hits
+        .into_iter()
+        .map(|hit| hit.project.id)
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["CLIENTMOD"], "a client keeps client-only mods");
+    let asked = world
+        .catalog
+        .received_requests()
+        .await
+        .expect("requests are recorded");
+    let facets = asked
+        .iter()
+        .find(|request| request.url.path() == "/search")
+        .and_then(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "facets")
+                .map(|(_, value)| value.into_owned())
+        })
+        .expect("the search names its facets");
+    assert!(facets.contains(MINECRAFT), "{facets}");
+    assert!(facets.contains("neoforge"), "{facets}");
+}
+
 #[tokio::test]
 async fn a_server_from_a_pack_says_its_mods_are_the_users_only_once_allowed() {
     let world = world().await;
