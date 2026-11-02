@@ -46,6 +46,10 @@ use crate::curseforge::{self, ParsedExport};
 use crate::detect::PackFormat;
 use crate::error::{PackError, PackResult};
 use crate::install::{self, AppliedLayer, MaterializedFiles};
+use crate::logged_mods::{
+    LoggedModListError, LoggedModRow, LoggedMods, has_mod_list, is_crash_report,
+    parse_logged_mod_list,
+};
 use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
 use crate::recipe::{
@@ -84,6 +88,13 @@ pub struct PackAnalysis {
     /// for a caller to show before the user commits to importing, not for
     /// the resulting instance's own attention list.
     pub duplicate_files: Vec<DuplicateProviderFile>,
+    /// The hashed mod list a [`PackFormat::LoggedModList`] import rebuilds
+    /// the instance from.
+    pub logged_mods: Option<LoggedMods>,
+    /// Hashed jars of the mod list that no catalog recognized. Imported
+    /// without them, and named on the instance as needing attention. Empty
+    /// until the catalogs have been asked.
+    pub missing_logged_files: Vec<LoggedModRow>,
 }
 
 impl PackAnalysis {
@@ -117,6 +128,10 @@ impl PackAnalysis {
     #[must_use]
     pub fn needs_provider_resolution(&self) -> bool {
         !self.pending.is_empty()
+            || self
+                .logged_mods
+                .as_ref()
+                .is_some_and(|logged| !logged.resolved)
     }
 
     /// The optional files this side would ask about (optional-file selection).
@@ -237,6 +252,159 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
     Ok((archive, analysis))
 }
 
+/// The most of a crash report or log an import reads, from its end.
+///
+/// A long-running game writes a large `latest.log`, and the table the import
+/// uses is the last one in it, so a longer file is read from its end rather
+/// than refused. The limit keeps such a file from being read into memory whole.
+pub const MAX_LOGGED_MOD_LIST_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Whether `path` reads as a text file, such as a crash report or log, rather
+/// than an archive, judged by its first bytes.
+///
+/// Anything that is not plainly text is left to the archive reader, so a
+/// truncated or mislabeled pack download is still reported as a broken
+/// archive.
+///
+/// # Errors
+///
+/// [`PackError::Unreadable`] when the file cannot be read.
+pub fn reads_as_text(path: &Path) -> PackResult<bool> {
+    use std::io::Read as _;
+
+    let unreadable = |source| PackError::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut head = Vec::with_capacity(TEXT_SNIFF_BYTES);
+    std::fs::File::open(path)
+        .map_err(unreadable)?
+        .take(TEXT_SNIFF_BYTES as u64)
+        .read_to_end(&mut head)
+        .map_err(unreadable)?;
+    Ok(!head.is_empty() && !head.starts_with(b"PK") && !head.contains(&0))
+}
+
+/// How much of a file [`reads_as_text`] looks at.
+const TEXT_SNIFF_BYTES: usize = 8 * 1024;
+
+/// Reads a crash report or log and works out the game its hashed mod list
+/// describes, writing nothing.
+///
+/// The recipe names the game and no files:
+/// the files come from looking the hashes up, which needs the network.
+///
+/// # Errors
+///
+/// [`PackError::FormatUnrecognized`] for a text with no mod list at all,
+/// [`PackError::ModListHashesMissing`] for one whose mod list has no hashes,
+/// and a refusal when the report does not name the exact game.
+#[instrument(fields(path = %path.display()))]
+pub fn analyze_logged_mod_list(path: &Path) -> PackResult<PackAnalysis> {
+    let unreadable = |source| PackError::Unreadable {
+        path: path.to_path_buf(),
+        source,
+    };
+    let bytes = read_tail(path, MAX_LOGGED_MOD_LIST_BYTES).map_err(unreadable)?;
+    let text = String::from_utf8_lossy(&bytes);
+    let list = parse_logged_mod_list(&text).map_err(|error| match error {
+        LoggedModListError::HashesMissing if !has_mod_list(&text) => {
+            PackError::FormatUnrecognized {
+                path: path.to_path_buf(),
+            }
+        }
+        LoggedModListError::HashesMissing => PackError::ModListHashesMissing {
+            path: path.to_path_buf(),
+        },
+        LoggedModListError::MinecraftVersionMissing => PackError::ModListMinecraftVersionMissing {
+            path: path.to_path_buf(),
+        },
+        LoggedModListError::LoaderMissing => PackError::ModListLoaderMissing {
+            path: path.to_path_buf(),
+        },
+    })?;
+
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    // A report has no name of its own, and its file name is often just
+    // `latest.log`, so the instance is named the way a new instance of the
+    // same game is.
+    let mut recipe = PackRecipe::for_manual_instance(
+        ephervex_model::default_instance_name(
+            &list.minecraft_version,
+            list.loader.kind,
+            list.loader.version.as_deref(),
+        ),
+        list.minecraft_version.clone(),
+        list.loader.clone(),
+    );
+    recipe.source_kind = ImportSourceKind::LoggedModList;
+    recipe.provider_metadata.kind = ImportSourceKind::LoggedModList;
+    recipe.archive_name = Some(file_name.clone());
+    info!(
+        minecraft = %recipe.minecraft_version,
+        loader = %recipe.loader,
+        rows = list.rows.len(),
+        hashed = list.hashed().count(),
+        "analyzed a mod list"
+    );
+    let analysis = PackAnalysis {
+        format: PackFormat::LoggedModList,
+        recipe,
+        pending: Vec::new(),
+        rejected_urls: Vec::new(),
+        blocked: Vec::new(),
+        attention: Vec::new(),
+        duplicate_files: Vec::new(),
+        logged_mods: Some(LoggedMods {
+            source: file_name,
+            crash_report: is_crash_report(&text),
+            list,
+            resolved: false,
+            catalogs_not_asked: Vec::new(),
+        }),
+        missing_logged_files: Vec::new(),
+    };
+    Ok(analysis)
+}
+
+/// The last `limit` bytes of a file, or all of it when it is shorter.
+///
+/// The table an import uses is the last one in a log, so a longer log is read
+/// from its end.
+fn read_tail(path: &Path, limit: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    open_tail(path, limit)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// A reader over the last `limit` bytes of a file, or all of it when it is
+/// shorter.
+fn open_tail(path: &Path, limit: u64) -> std::io::Result<std::io::Take<std::fs::File>> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    if length > limit {
+        file.seek(SeekFrom::Start(length - limit))?;
+    }
+    Ok(file.take(limit))
+}
+
+/// A reader over as much of a crash report or log as an import analyzes: the
+/// last [`MAX_LOGGED_MOD_LIST_BYTES`] of it.
+///
+/// # Errors
+///
+/// Any error opening or seeking the file.
+pub fn open_analyzed_mod_list(path: &Path) -> std::io::Result<impl std::io::Read> {
+    open_tail(path, MAX_LOGGED_MOD_LIST_BYTES)
+}
+
 /// Parses an already-identified archive with the provider that owns its format.
 ///
 /// The single dispatch point. A recognized but unsupported format is reported
@@ -261,6 +429,8 @@ pub fn parse_with(
                 blocked: Vec::new(),
                 attention: Vec::new(),
                 duplicate_files: Vec::new(),
+                logged_mods: None,
+                missing_logged_files: Vec::new(),
             })
         }
         PackFormat::CurseForgePack => {
@@ -280,9 +450,14 @@ pub fn parse_with(
                 blocked: Vec::new(),
                 attention: Vec::new(),
                 duplicate_files: Vec::new(),
+                logged_mods: None,
+                missing_logged_files: Vec::new(),
             })
         }
-        PackFormat::PrismExport => Err(PackError::FormatUnsupported { format }),
+        // Not an archive, so never identified as one.
+        PackFormat::PrismExport | PackFormat::LoggedModList => {
+            Err(PackError::FormatUnsupported { format })
+        }
     }
 }
 
@@ -303,6 +478,7 @@ pub(crate) fn reconcile_identities(recipe: &mut PackRecipe) {
         ImportSourceKind::CurseForgePack
         | ImportSourceKind::PrismExport
         | ImportSourceKind::ServerPack
+        | ImportSourceKind::LoggedModList
         | ImportSourceKind::Manual => {}
     }
 }
@@ -372,26 +548,7 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
     if cancel.is_cancelled() {
         return Err(PackError::Canceled);
     }
-    if let Some(unresolved) = analysis.pending.first() {
-        // Materializing an analysis that still has pending entries would lay
-        // down a pack missing every file its provider was never asked about,
-        // and record that as the instance's complete desired state. The caller
-        // resolves first; reaching here means it did not.
-        return Err(PackError::ProviderFilesUnresolved {
-            remaining: analysis.pending.len(),
-            first: unresolved.identity.project_id.clone().unwrap_or_default(),
-        });
-    }
-    if let Some(blocked) = analysis.blocked.first() {
-        // A file a provider refused is not laid down silently either: the
-        // caller resolves each one first, by finding a verified copy in the
-        // shared cache or by an explicit skip. Reaching here means at least
-        // one is still neither.
-        return Err(PackError::ProviderFilesBlocked {
-            remaining: analysis.blocked.len(),
-            first: blocked.identity.project_id.clone().unwrap_or_default(),
-        });
-    }
+    require_resolved(analysis)?;
 
     let mut recipe = analysis.recipe.clone();
     // Recorded before anything is installed, so the recipe describes the
@@ -458,6 +615,134 @@ pub async fn materialize(request: MaterializeRequest<'_>) -> PackResult<Material
         side,
         files,
         layers,
+        recipe,
+        recipe_path,
+    })
+}
+
+/// Refuses an analysis that still has files nobody has resolved or decided
+/// about.
+fn require_resolved(analysis: &PackAnalysis) -> PackResult<()> {
+    if let Some(unresolved) = analysis.pending.first() {
+        // Materializing an analysis that still has pending entries would lay
+        // down a pack missing every file its provider was never asked about,
+        // and record that as the instance's complete desired state. The caller
+        // resolves first; reaching here means it did not.
+        return Err(PackError::ProviderFilesUnresolved {
+            remaining: analysis.pending.len(),
+            first: unresolved.identity.project_id.clone().unwrap_or_default(),
+        });
+    }
+    if let Some(logged) = analysis
+        .logged_mods
+        .as_ref()
+        .filter(|logged| !logged.resolved)
+    {
+        // A mod list names its files only by hash, and nobody asked the
+        // catalogs what they are.
+        return Err(PackError::ProviderFilesUnresolved {
+            remaining: logged.list.hashed().count(),
+            first: logged.source.clone(),
+        });
+    }
+    if let Some(blocked) = analysis.blocked.first() {
+        // A file a provider refused is not laid down silently either: the
+        // caller resolves each one first, by finding a verified copy in the
+        // shared cache or by an explicit skip. Reaching here means at least
+        // one is still neither.
+        return Err(PackError::ProviderFilesBlocked {
+            remaining: analysis.blocked.len(),
+            first: blocked.identity.project_id.clone().unwrap_or_default(),
+        });
+    }
+    Ok(())
+}
+
+/// One request to lay down a side of an analysis that came with no archive.
+///
+/// What [`MaterializeRequest`] is for a recipe whose files all come from the
+/// catalogs, such as one rebuilt from a crash report's mod list.
+#[derive(Debug)]
+pub struct RecipeMaterializeRequest<'a> {
+    pub analysis: &'a PackAnalysis,
+    pub side: PackSide,
+    pub selection: &'a OptionalSelection,
+    pub game_dir: &'a Path,
+    pub source_dir: &'a Path,
+    pub manager: &'a DownloadManager,
+    pub cache: &'a CacheLayout,
+    pub credentials: &'a dyn ArtifactCredentials,
+    pub reporter: &'a OperationReporter,
+    pub cancel: &'a CancellationToken,
+}
+
+/// Installs one side of an archive-free analysis and retains its recipe.
+///
+/// # Errors
+///
+/// The same refusals as [`materialize`] for files still pending or blocked,
+/// and any download or write failure.
+#[instrument(skip_all, fields(side = request.side.as_str(), game_dir = %request.game_dir.display()))]
+pub async fn materialize_recipe(
+    request: RecipeMaterializeRequest<'_>,
+) -> PackResult<MaterializedPack> {
+    let RecipeMaterializeRequest {
+        analysis,
+        side,
+        selection,
+        game_dir,
+        source_dir,
+        manager,
+        cache,
+        credentials,
+        reporter,
+        cancel,
+    } = request;
+    if cancel.is_cancelled() {
+        return Err(PackError::Canceled);
+    }
+    require_resolved(analysis)?;
+
+    let mut recipe = analysis.recipe.clone();
+    recipe.record_selection(side, selection);
+
+    reporter.set_stage(Some("operation-stage-downloading-files".to_owned()));
+    let files = install::install_files(install::FileInstall {
+        recipe: &recipe,
+        side,
+        selection,
+        game_dir,
+        fetch: install::ArtifactFetch {
+            manager,
+            cache,
+            credentials,
+            reporter,
+            cancel,
+        },
+    })
+    .await?;
+
+    reporter.set_stage(Some("operation-stage-retaining-source".to_owned()));
+    let (recipe, recipe_path) = {
+        let (cancel, source_dir) = (cancel.clone(), source_dir.to_path_buf());
+        off_runtime(move || {
+            if cancel.is_cancelled() {
+                return Err(PackError::Canceled);
+            }
+            let recipe_path = SourceStore::new(&source_dir).write_recipe(&recipe)?;
+            Ok((recipe, recipe_path))
+        })
+        .await?
+    };
+    info!(
+        installed = files.installed.len(),
+        preserved = files.skipped.len(),
+        "materialized a recipe"
+    );
+    Ok(MaterializedPack {
+        side,
+        files,
+        layers: Vec::new(),
         recipe,
         recipe_path,
     })
@@ -569,7 +854,9 @@ const fn manifest_entry_for(kind: ImportSourceKind) -> Option<&'static str> {
         ImportSourceKind::ModrinthPack => Some(crate::detect::MODRINTH_INDEX),
         ImportSourceKind::CurseForgePack => Some(crate::detect::CURSEFORGE_MANIFEST),
         ImportSourceKind::PrismExport => Some(crate::detect::PRISM_PACK),
-        ImportSourceKind::ServerPack | ImportSourceKind::Manual => None,
+        ImportSourceKind::ServerPack
+        | ImportSourceKind::LoggedModList
+        | ImportSourceKind::Manual => None,
     }
 }
 
@@ -594,6 +881,19 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn a_long_log_is_read_from_its_end() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let log = directory.path().join("latest.log");
+        std::fs::write(&log, b"startup lines\nthe crash report").expect("write");
+
+        assert_eq!(read_tail(&log, 16).expect("read"), b"the crash report");
+        assert_eq!(
+            read_tail(&log, 1024).expect("read"),
+            b"startup lines\nthe crash report"
+        );
+    }
     use crate::credentials::OpenArtifacts;
 
     fn zip_file(path: &Path, entries: &[(&str, &[u8])]) {

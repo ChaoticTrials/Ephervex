@@ -63,7 +63,8 @@ impl PackPolicy {
         match format {
             PackFormat::ModrinthPack => Self::modrinth(),
             PackFormat::CurseForgePack => Self::curseforge(),
-            PackFormat::PrismExport => Self {
+            // A mod list names no address: its files come from the catalogs.
+            PackFormat::PrismExport | PackFormat::LoggedModList => Self {
                 limits: ExtractionLimits::default(),
                 allowlist: DomainAllowlist::empty(),
             },

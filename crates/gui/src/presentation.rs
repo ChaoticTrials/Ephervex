@@ -154,6 +154,9 @@ pub fn attention_reason_text(reason: &AttentionReason) -> String {
             with_detail("gui-attention-unknown-server-applicability", detail)
         }
         AttentionReason::InterruptedMutation => lookup("gui-attention-interrupted-mutation"),
+        AttentionReason::MissingLoggedFile(detail) => {
+            with_detail("gui-attention-missing-logged-file", detail)
+        }
         AttentionReason::Unknown => lookup("gui-attention-unknown"),
     }
 }
@@ -2814,6 +2817,8 @@ mod import_tests {
             blocked: Vec::new(),
             attention: Vec::new(),
             duplicate_files: Vec::new(),
+            logged_mods: None,
+            missing_logged_files: Vec::new(),
         };
 
         let offered = ImportPresentation::from_analysis(&analysis).name;

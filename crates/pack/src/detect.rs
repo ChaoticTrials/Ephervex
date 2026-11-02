@@ -32,16 +32,21 @@ pub enum PackFormat {
     /// A Prism-compatible instance export: `mmc-pack.json`, usually with an
     /// `instance.cfg`, either at the root or under a single wrapper directory.
     PrismExport,
+    /// Not an archive: a crash report or `latest.log` whose mod list records
+    /// each jar's hashes (see [`crate::logged_mods`]).
+    LoggedModList,
 }
 
 impl PackFormat {
-    /// The manifest entry that identifies this format.
+    /// The manifest entry that identifies this format, for the formats that
+    /// are archives.
     #[must_use]
-    pub const fn manifest_entry(self) -> &'static str {
+    pub const fn manifest_entry(self) -> Option<&'static str> {
         match self {
-            Self::ModrinthPack => MODRINTH_INDEX,
-            Self::CurseForgePack => CURSEFORGE_MANIFEST,
-            Self::PrismExport => PRISM_PACK,
+            Self::ModrinthPack => Some(MODRINTH_INDEX),
+            Self::CurseForgePack => Some(CURSEFORGE_MANIFEST),
+            Self::PrismExport => Some(PRISM_PACK),
+            Self::LoggedModList => None,
         }
     }
 
@@ -52,6 +57,7 @@ impl PackFormat {
             Self::ModrinthPack => ImportSourceKind::ModrinthPack,
             Self::CurseForgePack => ImportSourceKind::CurseForgePack,
             Self::PrismExport => ImportSourceKind::PrismExport,
+            Self::LoggedModList => ImportSourceKind::LoggedModList,
         }
     }
 
@@ -61,7 +67,10 @@ impl PackFormat {
     /// whose importer is not available.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::ModrinthPack | Self::CurseForgePack)
+        matches!(
+            self,
+            Self::ModrinthPack | Self::CurseForgePack | Self::LoggedModList
+        )
     }
 
     /// Whether importing this format needs a provider credential before its
@@ -84,6 +93,7 @@ impl fmt::Display for PackFormat {
             Self::ModrinthPack => "Modrinth",
             Self::CurseForgePack => "CurseForge",
             Self::PrismExport => "Prism",
+            Self::LoggedModList => "Mod list",
         })
     }
 }

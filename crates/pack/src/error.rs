@@ -51,6 +51,20 @@ pub enum PackError {
     #[error("{path} is not a Modrinth, CurseForge, or Prism pack")]
     FormatUnrecognized { path: PathBuf },
 
+    /// A crash report or log whose mod list records no file hashes, so there is
+    /// nothing to look its mods up by.
+    #[error("{path} has no mod list with file hashes")]
+    ModListHashesMissing { path: PathBuf },
+
+    /// A crash report or log that does not name the Minecraft version.
+    #[error("{path} does not name the Minecraft version")]
+    ModListMinecraftVersionMissing { path: PathBuf },
+
+    /// A crash report or log that does not name the Forge or NeoForge build the
+    /// game ran with.
+    #[error("{path} does not name the mod loader build")]
+    ModListLoaderMissing { path: PathBuf },
+
     /// A recognized pack format that this build cannot import.
     #[error("importing {format} packs is not supported")]
     FormatUnsupported { format: PackFormat },
@@ -437,6 +451,9 @@ impl PackError {
             Self::ArchiveInvalid { .. } => "error-pack-archive-invalid",
             Self::FormatUnrecognized { .. } => "error-pack-format-unrecognized",
             Self::FormatUnsupported { .. } => "error-pack-format-unsupported",
+            Self::ModListHashesMissing { .. } => "error-pack-mod-list-hashes-missing",
+            Self::ModListLoaderMissing { .. } => "error-pack-mod-list-loader-missing",
+            Self::ModListMinecraftVersionMissing { .. } => "error-pack-mod-list-minecraft-missing",
             Self::ManifestMissing { .. } => "error-pack-manifest-missing",
             Self::ManifestInvalid { .. } => "error-pack-manifest-invalid",
             Self::ManifestUnsupportedVersion { .. } => "error-pack-manifest-unsupported-version",
@@ -511,6 +528,9 @@ impl PackError {
             Self::Unreadable { path, .. }
             | Self::ArchiveInvalid { path, .. }
             | Self::FormatUnrecognized { path }
+            | Self::ModListHashesMissing { path }
+            | Self::ModListLoaderMissing { path }
+            | Self::ModListMinecraftVersionMissing { path }
             | Self::Unwritable { path, .. }
             | Self::RecipeUnreadable { path, .. }
             | Self::RecipeInvalid { path, .. }
@@ -807,6 +827,15 @@ mod tests {
             },
             PackError::FormatUnsupported {
                 format: PackFormat::CurseForgePack,
+            },
+            PackError::ModListHashesMissing {
+                path: PathBuf::from("/tmp/latest.log"),
+            },
+            PackError::ModListLoaderMissing {
+                path: PathBuf::from("/tmp/latest.log"),
+            },
+            PackError::ModListMinecraftVersionMissing {
+                path: PathBuf::from("/tmp/latest.log"),
             },
             PackError::ManifestMissing {
                 entry: "modrinth.index.json",

@@ -30,6 +30,9 @@ pub enum ImportSourceKind {
     /// complete content of a server. It names no catalog because the archive is
     /// the authority: whoever published it decided what the server contains.
     ServerPack,
+    /// A crash report or `latest.log` whose mod list records each jar's
+    /// hashes, rebuilt by looking those hashes up in the mod catalogs.
+    LoggedModList,
 }
 
 impl fmt::Display for ImportSourceKind {
@@ -40,6 +43,7 @@ impl fmt::Display for ImportSourceKind {
             Self::CurseForgePack => "CurseForge",
             Self::PrismExport => "Prism",
             Self::ServerPack => "Server pack",
+            Self::LoggedModList => "Mod list",
         })
     }
 }
@@ -71,6 +75,9 @@ pub enum AttentionReason {
     /// Launcher-owned staging or rollback state survived an interrupted
     /// operation and must be reviewed before further mutation.
     InterruptedMutation,
+    /// A jar the imported mod list hashed that neither catalog could provide,
+    /// so the instance was built without it.
+    MissingLoggedFile(String),
     /// An advisory reason written by a newer Ephervex.
     ///
     /// Attention is informational state. An unfamiliar reason must keep the
@@ -129,6 +136,7 @@ impl<'de> Deserialize<'de> for AttentionReason {
                 text(stored.detail).map(Self::UnknownServerApplicability)
             }
             "interrupted_mutation" => unit(stored.detail, Self::InterruptedMutation),
+            "missing_logged_file" => text(stored.detail).map(Self::MissingLoggedFile),
             "unknown" => unit(stored.detail, Self::Unknown),
             _ => Ok(Self::Unknown),
         }
@@ -144,6 +152,15 @@ mod tests {
     fn attention_reasons_round_trip_through_json() {
         let reason = AttentionReason::IgnoredUnsafeCustomization("pre-launch command".to_owned());
         let json = serde_json::to_string(&reason).expect("serialize");
+        let back: AttentionReason = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(reason, back);
+    }
+
+    #[test]
+    fn a_missing_logged_file_round_trips_with_its_detail() {
+        let reason = AttentionReason::MissingLoggedFile("private-1.0.jar (private)".to_owned());
+        let json = serde_json::to_string(&reason).expect("serialize");
+        assert!(json.contains("missing_logged_file"), "{json}");
         let back: AttentionReason = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(reason, back);
     }

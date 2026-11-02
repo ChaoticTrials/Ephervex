@@ -34,7 +34,7 @@ use ephervex_model::{InstanceId, StorageClass};
 use ephervex_options::PreferenceApplication;
 use ephervex_pack::{
     MaterializeRequest, MaterializedPack, OptionalSelection, PackAnalysis, PackArchive, PackError,
-    PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, SourceStore,
+    PackPolicy, PackRecipe, PackSide, ProviderFileIdentity, RecipeMaterializeRequest, SourceStore,
 };
 use ephervex_storage::{ClientRecord, ImportSource, NewClient};
 use tokio_util::sync::CancellationToken;
@@ -162,7 +162,7 @@ impl ImportedPack {
 /// one.
 #[derive(Debug)]
 struct MaterializePack<'a> {
-    archive: PackArchive,
+    source: OpenedSource,
     analysis: &'a PackAnalysis,
     record: &'a ClientRecord,
     selection: &'a OptionalSelection,
@@ -228,7 +228,7 @@ impl App {
             .flatten();
         // Everything that can refuse the pack runs before the instance exists.
         reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
-        let (archive, mut analysis) = Self::open_pack(&request.archive)?;
+        let (source, mut analysis) = Self::open_pack(&request.archive)?;
         // Including the provider lookups: a missing API key, a file the pack
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
@@ -264,7 +264,7 @@ impl App {
 
         let materialized = match self
             .materialize(MaterializePack {
-                archive,
+                source,
                 analysis: &analysis,
                 record: &record,
                 selection: &request.selection,
@@ -358,7 +358,7 @@ impl App {
     /// Lays the pack's files down and retains its source recipe.
     async fn materialize(&self, request: MaterializePack<'_>) -> CoreResult<MaterializedPack> {
         let MaterializePack {
-            archive,
+            source,
             analysis,
             record,
             selection,
@@ -367,26 +367,68 @@ impl App {
             cancel,
         } = request;
         let manager = self.artifact_manager()?;
+        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        let source_dir = ephervex_storage::metadata::source_dir(&record.root);
+        let cache = CacheLayout::new(self.paths().cache_dir());
 
-        Ok(ephervex_pack::materialize(MaterializeRequest {
-            archive,
-            analysis,
-            side: PackSide::Client,
-            selection,
-            game_dir: &ephervex_storage::metadata::client_game_dir(&record.root),
-            source_dir: &ephervex_storage::metadata::source_dir(&record.root),
-            manager: &manager,
-            cache: &CacheLayout::new(self.paths().cache_dir()),
-            credentials,
-            reporter,
-            cancel,
-        })
-        .await?)
+        match source {
+            OpenedSource::Archive(archive) => Ok(ephervex_pack::materialize(MaterializeRequest {
+                archive,
+                analysis,
+                side: PackSide::Client,
+                selection,
+                game_dir: &game_dir,
+                source_dir: &source_dir,
+                manager: &manager,
+                cache: &cache,
+                credentials,
+                reporter,
+                cancel,
+            })
+            .await?),
+            OpenedSource::ModList(report) => {
+                let materialized = ephervex_pack::materialize_recipe(RecipeMaterializeRequest {
+                    analysis,
+                    side: PackSide::Client,
+                    selection,
+                    game_dir: &game_dir,
+                    source_dir: &source_dir,
+                    manager: &manager,
+                    cache: &cache,
+                    credentials,
+                    reporter,
+                    cancel,
+                })
+                .await?;
+                if cancel.is_cancelled() {
+                    return Err(PackError::Canceled.into());
+                }
+                keep_mod_list_source(&game_dir, analysis, report).await;
+                Ok(materialized)
+            }
+        }
     }
 
-    /// Opens and validates an archive under this installation's import policy.
-    fn open_pack(archive: &Path) -> CoreResult<(PackArchive, PackAnalysis)> {
-        let (opened, analysis) = ephervex_pack::analyze(archive, &Self::pack_policy())?;
+    /// Opens and validates a pack archive, or a crash report or log, under
+    /// this installation's import policy.
+    fn open_pack(path: &Path) -> CoreResult<(OpenedSource, PackAnalysis)> {
+        let as_mod_list = if ephervex_pack::reads_as_text(path)? {
+            match ephervex_pack::analyze_logged_mod_list(path) {
+                // Text that is no crash report either, such as an error page
+                // saved in place of a pack, is diagnosed as the archive it was
+                // meant to be.
+                Err(PackError::FormatUnrecognized { .. }) => None,
+                other => Some(other?),
+            }
+        } else {
+            None
+        };
+        let (opened, analysis) = if let Some(analysis) = as_mod_list {
+            (OpenedSource::ModList(path.to_path_buf()), analysis)
+        } else {
+            let (archive, analysis) = ephervex_pack::analyze(path, &Self::pack_policy())?;
+            (OpenedSource::Archive(archive), analysis)
+        };
         check_supported_release(&analysis.recipe.minecraft_version)?;
         // Decided from the pinned version alone, so a pack whose loader build
         // cannot be installed is refused before any file is downloaded.
@@ -407,6 +449,68 @@ impl App {
     /// limits for an unusually large pack.
     fn pack_policy() -> PackPolicy {
         PackPolicy::default()
+    }
+}
+
+/// What an import was opened from. An archive stays open, so the import uses
+/// the content that was analyzed. A crash report or log is analyzed whole
+/// before anything is created, and is only reopened for the copy the instance
+/// keeps.
+#[derive(Debug)]
+enum OpenedSource {
+    Archive(PackArchive),
+    /// A crash report or log, kept by path and copied into the instance once
+    /// it exists.
+    ModList(PathBuf),
+}
+
+/// Where a crash report sits in the game directory.
+const CRASH_REPORTS_DIR: &str = "crash-reports";
+/// Where the game writes its log.
+const LATEST_LOG: &str = "logs/latest.log";
+
+/// Copies the crash report or log an instance was rebuilt from into it, so
+/// the logs view and crash review show it before the first launch.
+///
+/// A report keeps its own name when that is a crash report's name, and a log
+/// becomes `logs/latest.log`. As much of the file is copied as was analyzed,
+/// from its end. A copy that fails is reported and not fatal: the instance is
+/// complete without it.
+async fn keep_mod_list_source(game_dir: &Path, analysis: &PackAnalysis, report: PathBuf) {
+    let Some(logged) = analysis.logged_mods.as_ref() else {
+        return;
+    };
+    let relative = if logged.crash_report {
+        let name = ephervex_pack::safe_file_name(&logged.source)
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| {
+                // The logs view lists a crash report by exactly this name.
+                name.starts_with("crash-")
+                    && Path::new(name).extension().is_some_and(|ext| ext == "txt")
+            })
+            .unwrap_or_else(|| "crash-imported.txt".to_owned());
+        PathBuf::from(CRASH_REPORTS_DIR).join(name)
+    } else {
+        PathBuf::from(LATEST_LOG)
+    };
+    let destination = game_dir.join(relative);
+    let copied = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut source = ephervex_pack::open_analyzed_mod_list(&report)?;
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Published whole, so the logs view never reads half a report.
+        ephervex_storage::write_atomic(
+            &destination,
+            ephervex_storage::AtomicWriteOptions::default(),
+            |file| std::io::copy(&mut source, file).map(drop),
+        )
+    })
+    .await;
+    match copied {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => warn!(%error, "imported the mod list without keeping its report"),
+        Err(error) => warn!(%error, "imported the mod list without keeping its report"),
     }
 }
 

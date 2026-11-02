@@ -71,7 +71,7 @@ use ephervex_pack::{
     ArtifactCredentials, BlockedProviderFile, CredentialUnavailable, DuplicateFileReason,
     DuplicateProviderFile, MODS_DIR, PackAnalysis, PackError, PackFileRecipe, PackFormat,
     PendingProviderFile, ProviderFileIdentity, RESOURCEPACKS_DIR, RecipeRelation, SHADERPACKS_DIR,
-    safe_file_name,
+    SideRequirement, safe_file_name,
 };
 use reqwest::header::HeaderName;
 use tokio_util::sync::CancellationToken;
@@ -120,6 +120,10 @@ impl App {
                 self.resolve_curseforge_pack(analysis, skip_blocked, cancel)
                     .await?,
             )),
+            PackFormat::LoggedModList => {
+                self.resolve_logged_mods(analysis, skip_blocked, cancel)
+                    .await
+            }
             // Every other format's manifest describes its own files, so there
             // is nothing to resolve and no credential to spend.
             PackFormat::ModrinthPack | PackFormat::PrismExport | _ => Ok(None),
@@ -137,21 +141,53 @@ impl App {
         // One read of the secret store for the whole import, and the point at
         // which an unconfigured launcher fails without contacting anyone.
         let operation = api.begin_operation()?;
-        let hosts = self.curseforge_artifact_hosts();
         let credential = self.curseforge_artifact_credential(operation.credential().clone())?;
+        self.resolve_curseforge_pending(
+            &operation,
+            analysis,
+            skip_blocked,
+            DeclaredBy::Pack,
+            cancel,
+        )
+        .await?;
+        Ok(credential)
+    }
 
+    /// Resolves the analysis's pending CurseForge files under an operation the
+    /// caller already holds.
+    pub(crate) async fn resolve_curseforge_pending(
+        &self,
+        operation: &CurseForgeOperation<'_>,
+        analysis: &mut PackAnalysis,
+        skip_blocked: &[ProviderFileIdentity],
+        declared_by: DeclaredBy,
+        cancel: &CancellationToken,
+    ) -> CoreResult<()> {
         if analysis.pending.is_empty() {
-            return Ok(credential);
+            return Ok(());
         }
-        let classes = classify_projects(&operation, &analysis.pending, cancel).await?;
+        let hosts = self.curseforge_artifact_hosts();
+        let classes = match declared_by {
+            DeclaredBy::Pack => classify_projects(operation, &analysis.pending, cancel).await?,
+            DeclaredBy::ModList => {
+                let classes = mod_projects(operation, &analysis.pending, cancel).await?;
+                // A jar that matched anything but a readable mod project is
+                // left for the caller to look up elsewhere.
+                analysis.pending.retain(|entry| {
+                    declared_ids(entry).is_ok_and(|(project, _)| classes.contains_key(&project))
+                });
+                classes
+            }
+        };
 
         let pending = std::mem::take(&mut analysis.pending);
         let (mut resolved, blocked, duplicates) = match resolve_files(
-            &operation,
+            operation,
             &pending,
             &classes,
             &hosts,
             &analysis.recipe.minecraft_version,
+            declared_by,
             cancel,
         )
         .await
@@ -204,8 +240,12 @@ impl App {
             "resolved a CurseForge pack's declared files"
         );
         analysis.recipe.files.extend(resolved);
-        analysis.blocked = still_blocked;
-        Ok(credential)
+        match declared_by {
+            DeclaredBy::Pack => analysis.blocked = still_blocked,
+            // A pack's own blocked files may already be listed.
+            DeclaredBy::ModList => analysis.blocked.extend(still_blocked),
+        }
+        Ok(())
     }
 
     /// A blocked file's recipe entry, if the shared cache already holds bytes
@@ -555,6 +595,31 @@ impl PackContentClass {
     }
 }
 
+/// What declared the CurseForge files being resolved, which decides how a
+/// file that cannot be had and two files of one project are treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclaredBy {
+    /// A pack manifest. A file CurseForge will not describe fails the import,
+    /// and one file is kept per project (ADR 0031).
+    Pack,
+    /// A crash report's mod list, matched by hash. A file CurseForge no longer
+    /// describes or serves, or one this launcher will not fetch, is left out
+    /// for the caller to look up elsewhere, and every matched file is kept,
+    /// because the game loaded each of them.
+    ModList,
+}
+
+/// Which resolved files become recipe entries.
+#[derive(Debug, Clone, Copy)]
+enum Keeping<'a> {
+    /// A pack's: one file per project, and a file that cannot be recorded
+    /// fails the import.
+    Winners(&'a BTreeMap<CurseForgeProjectId, CurseForgeFileId>),
+    /// A mod list's: every matched file, leaving out one that cannot be
+    /// recorded for the caller to look up elsewhere.
+    EveryMatch,
+}
+
 /// What [`classify_projects`] learned about one declared project: enough to
 /// route its files, and enough to name and link the project if one of them
 /// turns out to be blocked.
@@ -655,6 +720,45 @@ async fn classify_projects(
         .collect()
 }
 
+/// The projects among `pending` that CurseForge confirms are mods.
+///
+/// What [`classify_projects`] is for a mod list: every matched jar was loaded
+/// from `mods/`, so a project that is anything else, or that cannot be read,
+/// is left out rather than refusing the rest.
+async fn mod_projects(
+    operation: &CurseForgeOperation<'_>,
+    pending: &[PendingProviderFile],
+    cancel: &CancellationToken,
+) -> CoreResult<BTreeMap<CurseForgeProjectId, ClassifiedProject>> {
+    let mut projects: Vec<CurseForgeProjectId> = pending
+        .iter()
+        .filter_map(|entry| declared_ids(entry).ok().map(|(project, _)| project))
+        .collect();
+    projects.sort_unstable();
+    projects.dedup();
+    let classes = operation.project_classes(MINECRAFT_GAME_ID, cancel).await?;
+    let outcomes = operation.exact_projects(&projects, cancel).await?;
+    Ok(projects
+        .into_iter()
+        .zip(outcomes)
+        .filter_map(|(id, outcome)| {
+            let project = outcome.ok()?;
+            let classification = classes.classify(&project).ok()?;
+            (classification == CurseForgeProjectClass::Mods).then(|| {
+                (
+                    id,
+                    ClassifiedProject {
+                        content: PackContentClass::Mods,
+                        browser_path_segment: classification.browser_path_segment(),
+                        name: project.name,
+                        slug: project.slug,
+                    },
+                )
+            })
+        })
+        .collect())
+}
+
 /// What one distribution-restricted file's response said, before it is
 /// attached to each pending entry that declared it.
 struct BlockedFileDetail {
@@ -692,6 +796,7 @@ async fn resolve_files(
     classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
     hosts: &DomainAllowlist,
     minecraft_version: &str,
+    declared_by: DeclaredBy,
     cancel: &CancellationToken,
 ) -> CoreResult<(
     Vec<PackFileRecipe>,
@@ -727,7 +832,21 @@ async fn resolve_files(
     let mut blocked_reasons: BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail> =
         BTreeMap::new();
     for ((project, file), outcome) in distinct.iter().copied().zip(outcomes) {
-        let release = outcome.map_err(CoreError::from)?;
+        let release = match (outcome, declared_by) {
+            (Ok(release), _) => release,
+            // Left out of every map, so no pending entry resolves to it.
+            (
+                Err(
+                    error @ (ModPlatformError::FileUnknown { .. }
+                    | ModPlatformError::FileUnavailable { .. }),
+                ),
+                DeclaredBy::ModList,
+            ) => {
+                debug!(%error, "left out a matched file CurseForge cannot provide");
+                continue;
+            }
+            (Err(error), _) => return Err(error.into()),
+        };
         if release.artifact.distribution.is_restricted() {
             let classified = classes.get(&project);
             blocked_reasons.insert(
@@ -752,14 +871,24 @@ async fn resolve_files(
         by_identity.insert((project, file), release);
     }
 
-    let (winners, duplicates) =
-        resolve_duplicate_projects(&by_identity, classes, minecraft_version);
+    let (winners, duplicates) = match declared_by {
+        DeclaredBy::Pack => {
+            let (winners, duplicates) =
+                resolve_duplicate_projects(&by_identity, classes, minecraft_version);
+            (Some(winners), duplicates)
+        }
+        DeclaredBy::ModList => (None, Vec::new()),
+    };
+    let keeping = match &winners {
+        Some(winners) => Keeping::Winners(winners),
+        None => Keeping::EveryMatch,
+    };
     let (resolved, blocked) = assemble_resolved_files(
         pending,
         &wanted,
         &by_identity,
         &blocked_reasons,
-        &winners,
+        keeping,
         classes,
         hosts,
     )?;
@@ -774,16 +903,21 @@ fn assemble_resolved_files(
     wanted: &[(CurseForgeProjectId, CurseForgeFileId)],
     by_identity: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), CurseForgeFileRelease>,
     blocked_reasons: &BTreeMap<(CurseForgeProjectId, CurseForgeFileId), BlockedFileDetail>,
-    winners: &BTreeMap<CurseForgeProjectId, CurseForgeFileId>,
+    keeping: Keeping<'_>,
     classes: &BTreeMap<CurseForgeProjectId, ClassifiedProject>,
     hosts: &DomainAllowlist,
 ) -> CoreResult<(Vec<PackFileRecipe>, Vec<BlockedProviderFile>)> {
     let mut resolved = Vec::with_capacity(by_identity.len());
     let mut blocked = Vec::with_capacity(blocked_reasons.len());
     for (entry, identity) in pending.iter().zip(wanted) {
-        if winners.get(&identity.0) != Some(&identity.1) {
+        let kept = match keeping {
             // Superseded by a better candidate for the same project; already
             // named in `resolve_duplicate_projects`'s report.
+            Keeping::Winners(winners) => winners.get(&identity.0) == Some(&identity.1),
+            // Every file stays, except one that was left out unresolved.
+            Keeping::EveryMatch => by_identity.contains_key(identity),
+        };
+        if !kept {
             continue;
         }
         if let Some(detail) = blocked_reasons.get(identity) {
@@ -812,7 +946,16 @@ fn assemble_resolved_files(
                         ),
                     })
                 })?;
-            resolved.push(recipe_entry(entry, release, content_class, hosts)?);
+            match (recipe_entry(entry, release, content_class, hosts), keeping) {
+                (Ok(recipe), _) => resolved.push(recipe),
+                // A mod list has the other catalog to try, so a file this
+                // launcher will not fetch is left out rather than failing the
+                // rest.
+                (Err(error), Keeping::EveryMatch) => {
+                    debug!(%error, "left out a matched file this launcher will not fetch");
+                }
+                (Err(error), Keeping::Winners(_)) => return Err(error),
+            }
         } else {
             // Unreachable: every distinct identity was requested and landed
             // in the release map.
@@ -1041,7 +1184,12 @@ fn recipe_entry(
         downloads: address.map(|url| url.to_string()).into_iter().collect(),
         size: release.artifact.size,
         client: entry.client,
-        server: crate::mods::side_requirement(release.server_side),
+        // A manifest says nothing about servers, so the file's own environment
+        // decides, unless the source already knows the server ran it.
+        server: match entry.server {
+            SideRequirement::Unknown => crate::mods::side_requirement(release.server_side),
+            declared => declared,
+        },
         selected: None,
         // The pack asked for this file. Resolving it exactly does not make it
         // anybody else's, and the pack-owned mutation policy depends on that.

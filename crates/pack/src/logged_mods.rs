@@ -60,6 +60,17 @@ impl LoggedModRow {
         self.sha1.is_some()
     }
 
+    /// How the row is named to a user: its file, and its mod id when it has
+    /// one.
+    #[must_use]
+    pub fn label(&self) -> String {
+        if self.mod_id.is_empty() {
+            self.file_name.clone()
+        } else {
+            format!("{} ({})", self.file_name, self.mod_id)
+        }
+    }
+
     /// Whether `name` is the file this row was written for, allowing for the
     /// report having cut a long name to the column width.
     #[must_use]
@@ -89,6 +100,21 @@ impl LoggedModList {
     }
 }
 
+/// A hashed mod list and where it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoggedMods {
+    /// The name of the file it was read from.
+    pub source: String,
+    pub list: LoggedModList,
+    /// Whether the file is a crash report rather than a log.
+    pub crash_report: bool,
+    /// Whether the catalogs have been asked about the list's hashes yet.
+    pub resolved: bool,
+    /// Catalogs that could not be asked, such as CurseForge without an API
+    /// key, so a missing mod may still be on one of them.
+    pub catalogs_not_asked: Vec<ephervex_model::ModProvider>,
+}
+
 /// Why a text could not be read as a hashed mod list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoggedModListError {
@@ -98,6 +124,26 @@ pub enum LoggedModListError {
     MinecraftVersionMissing,
     /// The report names no Forge or NeoForge build.
     LoaderMissing,
+}
+
+/// Whether `text` is a crash report file, as opposed to a log that may have
+/// printed one.
+#[must_use]
+pub fn is_crash_report(text: &str) -> bool {
+    text.trim_start_matches('\u{feff}')
+        .trim_start()
+        .starts_with(REPORT_HEADER)
+}
+
+/// Whether `text` has a `Mod List:` table at all, hashed or not.
+///
+/// Tells a crash report from some other text file, so a file that is neither a
+/// pack nor a report is reported as unrecognized rather than as a report
+/// without hashes.
+#[must_use]
+pub fn has_mod_list(text: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(MOD_LIST_HEADER))
 }
 
 /// Reads the last hashed `Mod List:` table in `text` and the System Details

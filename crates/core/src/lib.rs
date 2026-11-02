@@ -65,6 +65,7 @@ pub mod live_diagnostics;
 pub mod loader;
 mod loader_version_range;
 pub mod local_mods;
+mod logged_mods;
 pub mod logging;
 pub mod minecraft_preferences;
 mod mod_display_cache;
@@ -388,12 +389,13 @@ pub use ephervex_options::{
 };
 pub use ephervex_pack::{
     AppliedLayer, AuxiliaryKind, BlockedProviderFile, DataPackOwner, DuplicateFileReason,
-    DuplicateProviderFile, ExtractionLimits, InstalledStandIn, ManagedMod, ManagedModInstallation,
-    ManagedMutationReport, MaterializedFiles, MaterializedPack, MaterializedServerRecipe,
-    ModIdentity, ModOrigin, OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope,
-    PackAnalysis, PackError, PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide,
-    ProviderFileIdentity, ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan,
-    SideRequirement, UnknownServerFiles,
+    DuplicateProviderFile, ExtractionLimits, InstalledStandIn, LoggedModList, LoggedModRow,
+    LoggedMods, LoggedSide, ManagedMod, ManagedModInstallation, ManagedMutationReport,
+    MaterializedFiles, MaterializedPack, MaterializedServerRecipe, ModIdentity, ModOrigin,
+    OptionalComponent, OptionalSelection, OverrideLayer, OverrideScope, PackAnalysis, PackError,
+    PackFileRecipe, PackFormat, PackPolicy, PackRecipe, PackSide, ProviderFileIdentity,
+    ProviderRecipeMetadata, RecordedMod, ServerReconstructionPlan, SidePlan, SideRequirement,
+    UnknownServerFiles,
 };
 pub use ephervex_server::{
     CaptureHealth, CaptureRetention, CapturedLine, ControlAction, ControlResponse,

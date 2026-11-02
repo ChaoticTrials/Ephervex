@@ -1044,6 +1044,11 @@ pack-import-rejected-addresses = { $count ->
        *[other] { $count } download addresses were refused by the download policy.
     }
 .action = Ephervex only downloads pack files from the hosts Modrinth's own pack validation accepts.
+pack-import-missing-logged-files = { $count ->
+        [one] { $count } mod in the mod list could not be downloaded automatically and was left out:
+       *[other] { $count } mods in the mod list could not be downloaded automatically and were left out:
+    }
+pack-import-curseforge-not-asked = CurseForge was not searched for them because no API key is set. Set one with `ephervex api set-curseforge-key` and import again to search it too.
 pack-recipe-missing = This instance was not imported from a pack, so it has no pack recipe.
 pack-recipe-layer-missing = One of the pack's file layers was not kept, so a server made from this recipe would be missing it.
 
@@ -1206,7 +1211,16 @@ error-pack-archive-invalid = That file is not a readable archive.
 .action = A pack is a ZIP file. Check that { $path } downloaded completely.
 
 error-pack-format-unrecognized = Ephervex does not recognize that file as a modpack.
-.action = Choose a Modrinth `.mrpack` file or a CurseForge modpack export.
+.action = Choose a Modrinth `.mrpack` file, a CurseForge modpack export, or a crash report or `latest.log` with mod hashes.
+
+error-pack-mod-list-hashes-missing = { $path } has no mod list with file hashes.
+.action = Ephervex rebuilds a pack from a crash report or `latest.log` only when its mod list records a SHA1 and Murmur2 hash for each mod, as LibX writes it.
+
+error-pack-mod-list-minecraft-missing = { $path } does not say which Minecraft version the game ran.
+.action = Ephervex reproduces exact versions and will not guess one.
+
+error-pack-mod-list-loader-missing = { $path } does not say which Forge or NeoForge build the game ran.
+.action = Ephervex reproduces exact versions and will not guess one.
 
 # A recognized but unsupported format is said out loud rather than reported as
 # a broken file.
@@ -2000,6 +2014,7 @@ gui-attention-best-effort-server-conversion = This server was converted on a bes
 gui-attention-manual-download-required = { $detail } must be downloaded manually
 gui-attention-unknown-server-applicability = { $detail } declares no server side and was left out
 gui-attention-interrupted-mutation = An interrupted change left files that need review
+gui-attention-missing-logged-file = { $detail } is in the imported mod list, but could not be downloaded automatically
 gui-attention-unknown = A newer Ephervex recorded a problem this version cannot describe
 # The Home page's greeting by time of day, and the same without an account name.
 gui-home-greeting-morning = Good morning

@@ -296,11 +296,14 @@ struct LaunchArgs {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    /// The pack archive, as a file or as an https address.
+    /// The pack archive, as a file or as an https address, or a crash report or
+    /// `latest.log` whose mod list records each mod's hashes.
     ///
     /// The format is detected from its contents, not its name: a `.mrpack`
     /// renamed to `.zip` still imports. An address is downloaded first, and
-    /// Ephervex asks before it downloads from a host for the first time.
+    /// Ephervex asks before it downloads from a host for the first time. A
+    /// crash report or log is rebuilt by looking each hash up in the preferred
+    /// mod catalog first and the other one second.
     #[arg(value_name = "ARCHIVE_OR_URL")]
     archive: String,
     /// The instance's name. Defaults to the pack's own name.
@@ -9013,12 +9016,15 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         "loader:    {}",
         terminal_safe(&analysis.loader().to_string())
     );
-    outln!(
-        "files:     {} required, {} optional",
-        analysis.required_file_count(PackSide::Client),
-        analysis.optional_file_count(PackSide::Client)
-    );
-    if analysis.needs_provider_resolution() {
+    // A mod list's files are known only once its hashes are looked up.
+    if analysis.logged_mods.is_none() {
+        outln!(
+            "files:     {} required, {} optional",
+            analysis.required_file_count(PackSide::Client),
+            analysis.optional_file_count(PackSide::Client)
+        );
+    }
+    if analysis.needs_provider_resolution() && analysis.logged_mods.is_none() {
         // The counts above come from the pack's own manifest. Which files they
         // are is a question only the provider can answer, and answering it
         // needs the key.
@@ -9040,6 +9046,14 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
     }
     for layer in analysis.layers() {
         outln!("layer:     {}", layer.as_str());
+    }
+    if let Some(logged) = &analysis.logged_mods {
+        outln!(
+            "mod list:  {} ({} of {} jars hashed)",
+            terminal_safe(&logged.source),
+            logged.list.hashed().count(),
+            logged.list.rows.len()
+        );
     }
     if analysis.has_files_for(PackSide::Server) {
         eprintln!(
@@ -9099,8 +9113,40 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
     if let Some(applied) = &imported.preferences {
         print_rejected_raw_lines(applied);
     }
+    print_missing_logged_files(&imported.analysis);
     report_rejected_addresses(&imported.analysis.rejected_urls, json);
     Ok(())
+}
+
+/// Names the jars of a mod list that neither catalog recognized.
+fn print_missing_logged_files(analysis: &PackAnalysis) {
+    if analysis.missing_logged_files.is_empty() {
+        return;
+    }
+    eprintln!(
+        "{}",
+        ephervex_i18n::lookup_args(
+            "pack-import-missing-logged-files",
+            [(
+                "count",
+                MessageArg::from(analysis.missing_logged_files.len())
+            )]
+        )
+    );
+    for row in &analysis.missing_logged_files {
+        eprintln!("  {}", terminal_safe(&row.label()));
+    }
+    let curseforge_not_asked = analysis.logged_mods.as_ref().is_some_and(|logged| {
+        logged
+            .catalogs_not_asked
+            .contains(&ephervex_model::ModProvider::CurseForge)
+    });
+    if curseforge_not_asked {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup("pack-import-curseforge-not-asked")
+        );
+    }
 }
 
 /// Prints one side's plan out of a retained recipe.
@@ -9218,6 +9264,31 @@ fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
     .collect::<Vec<_>>(),
             "has_server_files": analysis.has_files_for(PackSide::Server),
             "rejected_addresses": analysis.rejected_urls,
+            "mod_list": analysis.logged_mods.as_ref().map(|logged| serde_json::json!({
+                "source": logged.source,
+                "jars": logged.list.rows.len(),
+                "hashed": logged.list.hashed().count(),
+                "server": logged.list.side == ephervex_core::LoggedSide::Server,
+                "catalogs_not_asked": logged
+                    .catalogs_not_asked
+                    .iter()
+                    .map(|provider| provider.as_str())
+                    .collect::<Vec<_>>(),
+            })),
+            // Null until the catalogs have been asked.
+            "missing": analysis
+                .logged_mods
+                .as_ref()
+                .is_some_and(|logged| logged.resolved)
+                .then(|| analysis
+                .missing_logged_files
+                .iter()
+                .map(|row| serde_json::json!({
+                    "file": row.file_name,
+                    "mod_id": row.mod_id,
+                    "version": row.version,
+                }))
+                .collect::<Vec<_>>()),
         })
 }
 

@@ -51,6 +51,7 @@ pub const fn provider_directory(kind: ImportSourceKind) -> &'static str {
         ImportSourceKind::PrismExport => "prism",
         ImportSourceKind::Manual => "manual",
         ImportSourceKind::ServerPack => "server-pack",
+        ImportSourceKind::LoggedModList => "logged-mod-list",
     }
 }
 
