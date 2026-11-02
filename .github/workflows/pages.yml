@@ -1,11 +1,15 @@
+# The site, its screenshots, and the options feed are all built from the tip of
+# main. The screenshot tool renders the GUI's own components, so it only builds
+# against the application source it was written with.
+#
+# Application changes alone do not rebuild the site: it follows when the website
+# changes or a release is published, so screenshots do not run ahead of the text
+# that describes them. The options feed rebuilds it on its own because the
+# application reads that file between releases.
+#
 # The Release workflow publishes with GITHUB_TOKEN, so its release event cannot
 # start another workflow. workflow_run covers that path; release covers releases
 # published by a maintainer.
-#
-# The site is built from the latest published release, so nothing deploys before
-# the first one. A manual run with "from_current_commit" builds from the chosen
-# commit instead, which is how the site and the options feed go live before a
-# release exists and how a build is forced again afterwards.
 name: Pages
 
 on:
@@ -23,11 +27,6 @@ on:
     workflows: [Release]
     types: [completed]
   workflow_dispatch:
-    inputs:
-      from_current_commit:
-        description: Build the site from this commit instead of the latest published release, and deploy it even before any release exists
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -37,90 +36,25 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.latest.outputs.tag }}
-    steps:
-      - name: Find the latest published release
-        id: latest
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          response=$(mktemp)
-          trap 'rm -f "$response"' EXIT
-          status=$(curl --silent --show-error --location --retry 3 \
-            --output "$response" --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
-            --header "Authorization: Bearer $GH_TOKEN" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/latest")
-          case "$status" in
-            200)
-              tag=$(jq -er '.tag_name | select(type == "string" and test("^v[0-9][A-Za-z0-9._-]*$"))' "$response")
-              printf 'tag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
-              echo "Building Pages with application source from $tag"
-              ;;
-            404)
-              echo 'No published full release yet; Pages will deploy after the first release.'
-              ;;
-            *)
-              cat "$response" >&2
-              exit 1
-              ;;
-          esac
-
   build:
-    needs: release
-    if: needs.release.outputs.tag != '' || (github.event_name == 'workflow_dispatch' && inputs.from_current_commit)
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pages: read
     steps:
-      - name: Check out application source
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ (github.event_name == 'workflow_dispatch' && inputs.from_current_commit) && github.sha || needs.release.outputs.tag }}
-          path: source
-          persist-credentials: false
-
-      - name: Check out current website source
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.sha }}
-          path: current
-          persist-credentials: false
-
-      - name: Apply current website and capture sources
-        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-        run: |
-          set -euo pipefail
-          for directory in web tools/auto-screenshot-tool assets; do
-            rm -rf "source/$directory"
-            mkdir -p "source/$(dirname "$directory")"
-            cp -a "current/$directory" "source/$directory"
-          done
-
-      # The application reads this file as its options feed between releases, so
-      # it comes from main, never from the release tag the docs were built from.
-      - name: Check out the options feed from main
+      - name: Check out source
         uses: actions/checkout@v7
         with:
           ref: main
-          path: feed
-          sparse-checkout: crates/options/data/minecraft-options.json
-          sparse-checkout-cone-mode: false
+          path: source
           persist-credentials: false
 
-      - name: Use the options dataset from main
+      - name: Check the options feed
         run: |
           set -euo pipefail
-          feed=feed/crates/options/data/minecraft-options.json
-          jq -e '.format_version == 1 and (.revision | type == "number") and (.releases | length > 0)' "$feed" >/dev/null
-          install -D -m 644 "$feed" source/crates/options/data/minecraft-options.json
+          jq -e '.format_version == 1 and (.revision | type == "number") and (.releases | length > 0)' \
+            source/crates/options/data/minecraft-options.json >/dev/null
 
       - name: Install screenshot build dependencies
         run: |
@@ -163,10 +97,11 @@ jobs:
         working-directory: source/web
         run: npm run build
 
+      # The application reads this file as its options feed between releases.
       - name: Publish the options feed
         run: |
           set -euo pipefail
-          feed=feed/crates/options/data/minecraft-options.json
+          feed=source/crates/options/data/minecraft-options.json
           install -D -m 644 "$feed" source/web/build/assets/minecraft-options.json
           cmp "$feed" source/web/build/assets/minecraft-options.json
 
