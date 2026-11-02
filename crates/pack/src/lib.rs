@@ -60,6 +60,7 @@ pub mod detect;
 pub mod error;
 pub mod import;
 pub mod install;
+pub mod logged_mods;
 pub mod managed;
 mod mod_ids;
 pub mod modrinth;
@@ -88,6 +89,9 @@ pub use install::{
     AppliedLayer, ArtifactFetch, FileInstall, MaterializedFiles, MaterializedServerRecipe,
     RestoredState, ServerMaterializeRequest, apply_overrides, apply_retained_overrides,
     install_files, materialize_server_recipe, put_aside_path, restore_file,
+};
+pub use logged_mods::{
+    LoggedModList, LoggedModListError, LoggedModRow, LoggedSide, parse_logged_mod_list,
 };
 pub use managed::{
     DISABLED_SUFFIX, InstalledStandIn, MODS_DIR, ManagedModInstall, ManagedModInstallation,
