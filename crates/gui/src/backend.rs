@@ -17010,6 +17010,30 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_shows_the_issue_link_saved_on_an_instance() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let client = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Survival", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        let link = "https://example.com/issues/42";
+        app.set_client_issue_link(client.id, Some(link))
+            .expect("link saved");
+
+        let snapshot = snapshot(&app).expect("snapshot");
+
+        let row = snapshot
+            .instances
+            .iter()
+            .find(|row| row.id == client.id.to_string())
+            .expect("the instance is listed");
+        assert_eq!(row.issue_link, link);
+    }
+
+    #[test]
     fn a_runtime_row_names_its_architecture_and_every_setting_that_pins_it() {
         without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");

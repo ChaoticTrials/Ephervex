@@ -641,6 +641,9 @@ impl Registry {
     }
 
     /// Lists every indexed client instance, newest first.
+    ///
+    /// Each record is its index row with the issue link read from the
+    /// instance's metadata, the only place it is kept.
     pub fn list_clients(&self) -> Result<Vec<ClientRecord>, RegistryError> {
         let connection = self.index.connection();
         let mut statement = connection.prepare(&format!(
@@ -650,7 +653,9 @@ impl Registry {
 
         let mut records = Vec::new();
         for row in rows {
-            records.push(row??);
+            let mut record = row??;
+            record.issue_link = metadata_issue_link(&record);
+            records.push(record);
         }
         Ok(records)
     }
@@ -1958,6 +1963,23 @@ pub(crate) fn canonical_client_at(
 /// could reach the index alone.
 pub(crate) fn client_index_is_newer(row: &ClientRecord, canonical: &ClientRecord) -> bool {
     row.attention.contains(&AttentionReason::MissingRoot) && row.updated_at > canonical.updated_at
+}
+
+/// The issue link a client's metadata holds, for a row the index read.
+///
+/// Missing, unreadable, or foreign metadata reads as no link, so one damaged
+/// instance cannot fail a listing of all of them.
+fn metadata_issue_link(row: &ClientRecord) -> Option<String> {
+    if !row.root.is_dir() {
+        return None;
+    }
+    match canonical_client_at(&row.root, row.id) {
+        Ok(canonical) => canonical.issue_link,
+        Err(error) => {
+            tracing::debug!(id = %row.id, %error, "could not read the issue link of a listed instance");
+            None
+        }
+    }
 }
 
 /// The client as its canonical metadata holds it at the row's root, or the row
@@ -5088,6 +5110,64 @@ mod tests {
             Some(JavaOverride::new("/opt/jdk/bin/java"))
         );
         assert!(!current.attention.contains(&AttentionReason::MissingRoot));
+    }
+
+    #[test]
+    fn listed_clients_carry_the_issue_link_from_their_metadata() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let link = "https://example.invalid/issues/1";
+        let linked = registry
+            .create_published_client(
+                NewClient::new("linked", "1.20.1", LoaderSelection::vanilla())
+                    .with_issue_link(link),
+            )
+            .expect("create linked");
+        let unlinked = registry
+            .create_published_client(NewClient::new(
+                "unlinked",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create unlinked");
+
+        let listed = registry.list_clients().expect("list");
+
+        let link_of = |id| {
+            listed
+                .iter()
+                .find(|record| record.id == id)
+                .expect("listed")
+                .issue_link
+                .clone()
+        };
+        assert_eq!(link_of(linked.id).as_deref(), Some(link));
+        assert_eq!(link_of(unlinked.id), None);
+    }
+
+    #[test]
+    fn a_client_with_unreadable_metadata_is_still_listed_without_an_issue_link() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("damaged", "1.20.1", LoaderSelection::vanilla())
+                    .with_issue_link("https://example.invalid/issues/1"),
+            )
+            .expect("create");
+        std::fs::write(
+            client
+                .root
+                .join(crate::paths::LAUNCHER_METADATA_DIR)
+                .join(metadata::CLIENT_METADATA_FILE),
+            b"not json",
+        )
+        .expect("damage metadata");
+
+        let listed = registry.list_clients().expect("list");
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].issue_link, None);
     }
 
     #[test]

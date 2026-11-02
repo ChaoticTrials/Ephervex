@@ -4957,13 +4957,6 @@ fn print_instance_list(app: &App, args: &InstanceListArgs, json: bool) -> anyhow
     let organized = Organized::load(app)?;
 
     if json {
-        // The index rows lack the issue link, which only the metadata holds.
-        for record in records.values_mut() {
-            record.issue_link = app
-                .current_client(record.id)
-                .ok()
-                .and_then(|current| current.issue_link);
-        }
         let values: Vec<_> = listed
             .iter()
             .filter_map(|facts| records.get(&facts.id))
