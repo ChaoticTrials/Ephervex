@@ -466,6 +466,40 @@ mod tests {
         })
     }
 
+    /// How the test game's shell handles `SIGTERM` once its `trap` has run.
+    #[derive(Debug, Clone, Copy)]
+    enum TermTrap {
+        Ignored,
+        Caught,
+    }
+
+    /// Waits for the game's `SIGTERM` trap; `Running` comes before the script runs.
+    async fn trapping_term(pid: u32, trap: TermTrap) {
+        let line = match trap {
+            TermTrap::Ignored => "SigIgn:",
+            TermTrap::Caught => "SigCgt:",
+        };
+        let sigterm = 1_u64 << (15 - 1);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let status = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                .expect("the game exited before it set up its SIGTERM trap");
+            let mask = status
+                .lines()
+                .find_map(|status_line| status_line.strip_prefix(line))
+                .and_then(|bits| u64::from_str_radix(bits.trim(), 16).ok())
+                .expect("the process status has the signal mask");
+            if mask & sigterm != 0 {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the game never set up its {trap:?} trap for SIGTERM"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test]
     async fn a_hosted_game_is_recorded_under_the_runner_and_its_whole_run_is_reported() {
         let mut hosted = Hosted::start("echo from-stdout; echo from-stderr >&2; sleep 0.3");
@@ -519,6 +553,7 @@ mod tests {
     async fn a_graceful_stop_terminates_the_game_but_never_escalates() {
         let mut hosted = Hosted::start("trap '' TERM; while :; do sleep 0.1; done");
         let pid = hosted.running().await;
+        trapping_term(pid, TermTrap::Ignored).await;
         let socket = hosted.socket();
 
         let stopping = tokio::spawn({
@@ -545,7 +580,8 @@ mod tests {
     #[tokio::test]
     async fn a_graceful_stop_lets_a_game_that_honors_it_exit_by_itself() {
         let mut hosted = Hosted::start("trap 'exit 0' TERM; while :; do sleep 0.1; done");
-        hosted.running().await;
+        let pid = hosted.running().await;
+        trapping_term(pid, TermTrap::Caught).await;
         let socket = hosted.socket();
 
         let response = send_control_to(&socket, &ControlAction::Stop, Some(std::process::id()))
@@ -638,6 +674,7 @@ mod tests {
     async fn the_first_termination_request_stops_the_game_and_the_second_kills_it() {
         let mut hosted = Hosted::start("trap '' TERM; while :; do sleep 0.1; done");
         let pid = hosted.running().await;
+        trapping_term(pid, TermTrap::Ignored).await;
 
         hosted.terminations.send(()).expect("first request");
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
