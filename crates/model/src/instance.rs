@@ -33,6 +33,11 @@ pub enum ImportSourceKind {
     /// A crash report or `latest.log` whose mod list records each jar's
     /// hashes, rebuilt by looking those hashes up in the mod catalogs.
     LoggedModList,
+    /// An importer a newer Ephervex knows. Which importer made an instance is
+    /// advisory, so an unfamiliar one keeps the record readable instead of
+    /// making it disappear.
+    #[serde(other)]
+    Unknown,
 }
 
 impl fmt::Display for ImportSourceKind {
@@ -44,6 +49,7 @@ impl fmt::Display for ImportSourceKind {
             Self::PrismExport => "Prism",
             Self::ServerPack => "Server pack",
             Self::LoggedModList => "Mod list",
+            Self::Unknown => "Unknown",
         })
     }
 }
@@ -173,6 +179,13 @@ mod tests {
         .expect("unknown advisory state stays readable");
 
         assert_eq!(reason, AttentionReason::Unknown);
+    }
+
+    #[test]
+    fn an_unknown_source_kind_keeps_the_record_readable() {
+        let kind: ImportSourceKind =
+            serde_json::from_str(r#""future_importer""#).expect("readable");
+        assert_eq!(kind, ImportSourceKind::Unknown);
     }
 
     #[test]

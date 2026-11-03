@@ -1703,7 +1703,7 @@ fn client_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ClientRecord, Index
                 version: row.get(6).unwrap_or_default(),
             },
             source: ImportSource {
-                kind: source_kind_from_sql(&source_kind)?,
+                kind: source_kind_from_sql(&source_kind),
                 reference: row.get(8).unwrap_or_default(),
             },
             java_override: from_json_option::<JavaOverride>(
@@ -1765,7 +1765,7 @@ fn server_from_row(row: &Row<'_>) -> rusqlite::Result<Result<ServerRecord, Index
             network: from_json::<ServerNetworkSettings>(&network, "servers.network")?,
             operator_setup: from_json_option(operator_setup.as_deref(), "servers.operator_setup")?,
             source: ImportSource {
-                kind: source_kind_from_sql(&source_kind)?,
+                kind: source_kind_from_sql(&source_kind),
                 reference: row.get(11).unwrap_or_default(),
             },
             java_override: from_json_option::<JavaOverride>(
@@ -1843,21 +1843,21 @@ const fn source_kind_to_sql(value: ImportSourceKind) -> &'static str {
         ImportSourceKind::PrismExport => "prism_export",
         ImportSourceKind::ServerPack => "server_pack",
         ImportSourceKind::LoggedModList => "logged_mod_list",
+        ImportSourceKind::Unknown => "unknown",
     }
 }
 
-fn source_kind_from_sql(value: &str) -> Result<ImportSourceKind, IndexError> {
+/// Which importer made a host, read leniently: the value is advisory, and one a
+/// newer build wrote must not make the whole listing unreadable.
+fn source_kind_from_sql(value: &str) -> ImportSourceKind {
     match value {
-        "manual" => Ok(ImportSourceKind::Manual),
-        "modrinth_pack" => Ok(ImportSourceKind::ModrinthPack),
-        "curseforge_pack" => Ok(ImportSourceKind::CurseForgePack),
-        "prism_export" => Ok(ImportSourceKind::PrismExport),
-        "server_pack" => Ok(ImportSourceKind::ServerPack),
-        "logged_mod_list" => Ok(ImportSourceKind::LoggedModList),
-        other => Err(IndexError::MalformedRow {
-            column: "source_kind",
-            value: other.to_owned(),
-        }),
+        "manual" => ImportSourceKind::Manual,
+        "modrinth_pack" => ImportSourceKind::ModrinthPack,
+        "curseforge_pack" => ImportSourceKind::CurseForgePack,
+        "prism_export" => ImportSourceKind::PrismExport,
+        "server_pack" => ImportSourceKind::ServerPack,
+        "logged_mod_list" => ImportSourceKind::LoggedModList,
+        _ => ImportSourceKind::Unknown,
     }
 }
 
@@ -3254,6 +3254,29 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn a_source_kind_from_a_newer_build_still_lists_the_instance() {
+        // Which importer made an instance is advisory: an unfamiliar one must
+        // not make the whole listing unreadable.
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let record = registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+
+        registry
+            .index()
+            .connection()
+            .execute(
+                "UPDATE instances SET source_kind = 'future_importer' WHERE id = ?1",
+                params![record.id.to_string()],
+            )
+            .expect("tamper");
+
+        let listed = registry.client(record.id).expect("still readable");
+        assert_eq!(listed.source.kind, ImportSourceKind::Unknown);
     }
 
     #[test]

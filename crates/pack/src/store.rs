@@ -52,6 +52,7 @@ pub const fn provider_directory(kind: ImportSourceKind) -> &'static str {
         ImportSourceKind::Manual => "manual",
         ImportSourceKind::ServerPack => "server-pack",
         ImportSourceKind::LoggedModList => "logged-mod-list",
+        ImportSourceKind::Unknown => "unknown",
     }
 }
 

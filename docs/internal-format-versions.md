@@ -54,6 +54,13 @@ Unknown values are handled according to what the value authorizes:
 
 - `AttentionReason` is advisory. An unknown tagged reason becomes `Unknown`,
   so a newer warning cannot hide an otherwise readable instance or server.
+- `ImportSourceKind`, the importer an instance came from, is advisory too. An
+  unknown value in metadata, a recipe, or the index becomes `Unknown`. Release
+  1.0.0 parses it strictly, so it cannot read an instance a later build imported
+  from a crash report or log (`logged_mod_list`): its instance list fails until
+  that instance is deleted. Builds after 1.0.0 read such a value instead, and
+  a record they save again keeps `unknown` in place of the value they did not
+  know.
 - Configuration preferences that are designed to round-trip future values use
   their explicit unrecognized representation or retain the unknown TOML key.
 - Loader, storage, server installation, server launch, pack side, side

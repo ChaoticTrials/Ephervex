@@ -613,6 +613,7 @@ pub(crate) fn reconcile_identities(recipe: &mut PackRecipe) {
         | ImportSourceKind::PrismExport
         | ImportSourceKind::ServerPack
         | ImportSourceKind::LoggedModList
+        | ImportSourceKind::Unknown
         | ImportSourceKind::Manual => {}
     }
 }
@@ -990,6 +991,7 @@ const fn manifest_entry_for(kind: ImportSourceKind) -> Option<&'static str> {
         ImportSourceKind::PrismExport => Some(crate::detect::PRISM_PACK),
         ImportSourceKind::ServerPack
         | ImportSourceKind::LoggedModList
+        | ImportSourceKind::Unknown
         | ImportSourceKind::Manual => None,
     }
 }
