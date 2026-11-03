@@ -1048,6 +1048,16 @@ pack-import-missing-logged-files = { $count ->
         [one] { $count } mod in the mod list could not be downloaded automatically and was left out:
        *[other] { $count } mods in the mod list could not be downloaded automatically and were left out:
     }
+pack-analysis-carries-logged-mods = The pack carries a crash report or log with mod hashes. Import with `--logged-mods` to make the instance match it.
+pack-import-no-logged-mods = The pack carries no crash report or log with mod hashes for its Minecraft version and loader, so it was imported as published.
+pack-import-disabled-unlisted = { $count ->
+        [one] { $count } pack mod is not in the mod list and was disabled:
+       *[other] { $count } pack mods are not in the mod list and were disabled:
+    }
+pack-import-unlisted-left-enabled = { $count ->
+        [one] { $count } pack mod is not in the mod list but stayed enabled, because it could not be disabled:
+       *[other] { $count } pack mods are not in the mod list but stayed enabled, because they could not be disabled:
+    }
 pack-import-curseforge-not-asked = CurseForge was not searched for them because no API key is set. Set one with `ephervex api set-curseforge-key` and import again to search it too.
 pack-recipe-missing = This instance was not imported from a pack, so it has no pack recipe.
 pack-recipe-layer-missing = One of the pack's file layers was not kept, so a server made from this recipe would be missing it.

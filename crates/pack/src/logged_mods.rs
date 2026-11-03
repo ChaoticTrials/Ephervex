@@ -103,16 +103,34 @@ impl LoggedModList {
 /// A hashed mod list and where it was read from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoggedMods {
-    /// The name of the file it was read from.
+    /// The file it was read from: its own name for a report imported on its
+    /// own, or its path in the game directory, such as `logs/latest.log`, for
+    /// one a pack carries.
     pub source: String,
     pub list: LoggedModList,
     /// Whether the file is a crash report rather than a log.
     pub crash_report: bool,
+    /// Whether the import uses this list. Always for a report imported on its
+    /// own; for one a pack carries, only once the user asks for it.
+    pub requested: bool,
     /// Whether the catalogs have been asked about the list's hashes yet.
     pub resolved: bool,
     /// Catalogs that could not be asked, such as CurseForge without an API
     /// key, so a missing mod may still be on one of them.
     pub catalogs_not_asked: Vec<ephervex_model::ModProvider>,
+    /// The jars the pack carrying this list ships in its own client layers'
+    /// `mods/`, which are already present and need no lookup, and whose names
+    /// a catalog file cannot also take. Filled in once the list is requested.
+    pub shipped_jars: Vec<ShippedJar>,
+}
+
+/// A jar a pack ships in `mods/` itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShippedJar {
+    pub file_name: String,
+    /// `None` when the jar could not be read from the archive. Its name is
+    /// still the pack's.
+    pub sha1: Option<Hash>,
 }
 
 /// Why a text could not be read as a hashed mod list.
@@ -124,6 +142,21 @@ pub enum LoggedModListError {
     MinecraftVersionMissing,
     /// The report names no Forge or NeoForge build.
     LoaderMissing,
+}
+
+/// Where the game writes its log, relative to the game directory.
+pub const LATEST_LOG: &str = "logs/latest.log";
+/// Where the game writes crash reports, relative to the game directory.
+pub const CRASH_REPORTS_DIR: &str = "crash-reports";
+
+/// Whether `name` is a crash report's file name, the one the game gives it and
+/// the logs view lists it by.
+#[must_use]
+pub fn is_crash_report_name(name: &str) -> bool {
+    name.starts_with("crash-")
+        && std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext == "txt")
 }
 
 /// Whether `text` is a crash report file, as opposed to a log that may have

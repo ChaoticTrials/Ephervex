@@ -75,7 +75,7 @@ use ephervex_pack::{
 };
 use reqwest::header::HeaderName;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult};
@@ -115,31 +115,17 @@ impl App {
         skip_blocked: &[ProviderFileIdentity],
         cancel: &CancellationToken,
     ) -> CoreResult<Option<Arc<AuthenticatedSource>>> {
-        match analysis.format {
-            PackFormat::CurseForgePack => Ok(Some(
-                self.resolve_curseforge_pack(analysis, skip_blocked, cancel)
-                    .await?,
-            )),
-            PackFormat::LoggedModList => {
-                self.resolve_logged_mods(analysis, skip_blocked, cancel)
-                    .await
-            }
-            // Every other format's manifest describes its own files, so there
-            // is nothing to resolve and no credential to spend.
-            PackFormat::ModrinthPack | PackFormat::PrismExport | _ => Ok(None),
+        if analysis.format != PackFormat::CurseForgePack {
+            // Every other format's manifest describes its own files, so the
+            // only thing to look up is a mod list, if there is one.
+            return self
+                .resolve_logged_mods(analysis, skip_blocked, None, cancel)
+                .await;
         }
-    }
-
-    #[instrument(skip_all, fields(pending = analysis.pending.len()))]
-    async fn resolve_curseforge_pack(
-        &self,
-        analysis: &mut PackAnalysis,
-        skip_blocked: &[ProviderFileIdentity],
-        cancel: &CancellationToken,
-    ) -> CoreResult<Arc<AuthenticatedSource>> {
         let api = self.curseforge_api()?;
         // One read of the secret store for the whole import, and the point at
-        // which an unconfigured launcher fails without contacting anyone.
+        // which an unconfigured launcher fails without contacting anyone. A
+        // mod list the pack carries is looked up under the same operation.
         let operation = api.begin_operation()?;
         let credential = self.curseforge_artifact_credential(operation.credential().clone())?;
         self.resolve_curseforge_pending(
@@ -150,7 +136,11 @@ impl App {
             cancel,
         )
         .await?;
-        Ok(credential)
+        // Looked up once the pack's own files are known, so only what the
+        // pack lacks is asked about.
+        self.resolve_logged_mods(analysis, skip_blocked, Some(&operation), cancel)
+            .await?;
+        Ok(Some(credential))
     }
 
     /// Resolves the analysis's pending CurseForge files under an operation the

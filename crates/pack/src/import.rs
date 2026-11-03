@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, DownloadManager, OperationReporter};
 use ephervex_model::{AttentionReason, ImportSourceKind, LoaderSelection};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::archive::{EntryDecision, PackArchive};
 use crate::blocking::off_runtime;
@@ -47,8 +47,8 @@ use crate::detect::PackFormat;
 use crate::error::{PackError, PackResult};
 use crate::install::{self, AppliedLayer, MaterializedFiles};
 use crate::logged_mods::{
-    LoggedModListError, LoggedModRow, LoggedMods, has_mod_list, is_crash_report,
-    parse_logged_mod_list,
+    CRASH_REPORTS_DIR, LATEST_LOG, LoggedModListError, LoggedModRow, LoggedMods, LoggedSide,
+    ShippedJar, has_mod_list, is_crash_report, is_crash_report_name, parse_logged_mod_list,
 };
 use crate::modrinth::{self, ParsedPack};
 use crate::policy::PackPolicy;
@@ -89,7 +89,8 @@ pub struct PackAnalysis {
     /// the resulting instance's own attention list.
     pub duplicate_files: Vec<DuplicateProviderFile>,
     /// The hashed mod list a [`PackFormat::LoggedModList`] import rebuilds
-    /// the instance from.
+    /// the instance from, or one a pack carries in its client overrides,
+    /// which an import applies only when asked to.
     pub logged_mods: Option<LoggedMods>,
     /// Hashed jars of the mod list that no catalog recognized. Imported
     /// without them, and named on the instance as needing attention. Empty
@@ -131,7 +132,7 @@ impl PackAnalysis {
             || self
                 .logged_mods
                 .as_ref()
-                .is_some_and(|logged| !logged.resolved)
+                .is_some_and(|logged| logged.requested && !logged.resolved)
     }
 
     /// The optional files this side would ask about (optional-file selection).
@@ -224,7 +225,7 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
             path: path.to_path_buf(),
         });
     };
-    let analysis = parse_with(format, &mut archive, policy)?;
+    let mut analysis = parse_with(format, &mut archive, policy)?;
     archive.require_extractable_layers(
         analysis
             .recipe
@@ -240,6 +241,8 @@ pub fn analyze(path: &Path, policy: &PackPolicy) -> PackResult<(PackArchive, Pac
             .map(|layer| layer.archive_prefix.as_str()),
         crate::recipe::is_mod_file_path,
     )?;
+    // Only once the layers are known to be within the archive's limits.
+    analysis.logged_mods = carried_mod_list(&mut archive, &analysis.recipe);
     info!(
         format = %analysis.format,
         pack = %analysis.recipe.original_name,
@@ -362,8 +365,10 @@ pub fn analyze_logged_mod_list(path: &Path) -> PackResult<PackAnalysis> {
             source: file_name,
             crash_report: is_crash_report(&text),
             list,
+            requested: true,
             resolved: false,
             catalogs_not_asked: Vec::new(),
+            shipped_jars: Vec::new(),
         }),
         missing_logged_files: Vec::new(),
     };
@@ -403,6 +408,135 @@ fn open_tail(path: &Path, limit: u64) -> std::io::Result<std::io::Take<std::fs::
 /// Any error opening or seeking the file.
 pub fn open_analyzed_mod_list(path: &Path) -> std::io::Result<impl std::io::Read> {
     open_tail(path, MAX_LOGGED_MOD_LIST_BYTES)
+}
+
+/// How many of a pack's newest crash reports are read looking for a list.
+const CARRIED_REPORTS_TRIED: usize = 5;
+/// The largest carried log or report that is read. Analysis reads it whether
+/// or not the import goes on to use it, so it is held well below the entry
+/// ceiling.
+const MAX_CARRIED_LOG_BYTES: u64 = 256 * 1024 * 1024;
+
+/// A hashed mod list the pack's client layers carry, if any.
+///
+/// `logs/latest.log` is preferred, and the newest `crash-reports/crash-*.txt`
+/// is the fallback when the log has no hashed table. A later layer's copy of a
+/// file wins, as it would on disk. Nothing found, or nothing readable, is not
+/// a failure: importing the pack does not depend on it.
+fn carried_mod_list(archive: &mut PackArchive, recipe: &PackRecipe) -> Option<LoggedMods> {
+    let prefixes = client_layers_last_first(recipe);
+
+    let found = |relative: String, bytes: Vec<u8>| {
+        let text = String::from_utf8_lossy(&bytes);
+        parse_logged_mod_list(&text)
+            .ok()
+            // A log of another game would replace the pack's versions with
+            // ones it was never built for, and a dedicated server's lists none
+            // of the client's own mods.
+            .filter(|list| {
+                list.minecraft_version == recipe.minecraft_version
+                    && list.loader == recipe.loader
+                    && list.side == LoggedSide::Client
+            })
+            .map(|list| LoggedMods {
+                crash_report: is_crash_report(&text),
+                source: relative,
+                list,
+                requested: false,
+                resolved: false,
+                catalogs_not_asked: Vec::new(),
+                shipped_jars: Vec::new(),
+            })
+    };
+
+    if let Some(logged) = read_carried(archive, &prefixes, LATEST_LOG)
+        .and_then(|bytes| found(LATEST_LOG.to_owned(), bytes))
+    {
+        return Some(logged);
+    }
+    // Crash report names carry their time, so sorting them puts the newest
+    // last. An older report is used when a newer one has no usable list.
+    let mut reports: Vec<String> = prefixes
+        .iter()
+        .flat_map(|prefix| archive.layer_file_names(prefix, CRASH_REPORTS_DIR))
+        .filter(|name| is_crash_report_name(name))
+        .collect();
+    reports.sort_unstable();
+    reports.dedup();
+    reports
+        .into_iter()
+        .rev()
+        .take(CARRIED_REPORTS_TRIED)
+        .find_map(|name| {
+            let relative = format!("{CRASH_REPORTS_DIR}/{name}");
+            let bytes = read_carried(archive, &prefixes, &relative)?;
+            found(relative, bytes)
+        })
+}
+
+/// The SHA-1 of every jar the pack's client layers ship directly in `mods/`,
+/// counting for each name only the copy that ends up on disk.
+///
+/// Read only when a carried mod list is applied. Each jar is streamed from
+/// the archive and hashed, never held in memory whole.
+#[must_use]
+pub fn shipped_jars(archive: &mut PackArchive, recipe: &PackRecipe) -> Vec<ShippedJar> {
+    let mut jars = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for prefix in client_layers_last_first(recipe) {
+        for name in archive.layer_file_names(&prefix, crate::managed::MODS_DIR) {
+            if Path::new(&name).extension().is_none_or(|ext| ext != "jar")
+                || !seen.insert(name.clone())
+            {
+                continue;
+            }
+            let relative = format!("{}/{name}", crate::managed::MODS_DIR);
+            let sha1 = archive
+                .hash_layer_file(&prefix, &relative)
+                .unwrap_or_else(|error| {
+                    debug!(%error, jar = %name, "could not hash a shipped jar");
+                    None
+                });
+            jars.push(ShippedJar {
+                file_name: name,
+                sha1,
+            });
+        }
+    }
+    jars
+}
+
+/// The prefixes of the layers a client applies, the one applied last first,
+/// since its copy of a file is the one that ends up on disk.
+fn client_layers_last_first(recipe: &PackRecipe) -> Vec<String> {
+    let mut layers: Vec<(u8, String)> = recipe
+        .override_layers
+        .iter()
+        .filter(|layer| layer.scope.applies_to(PackSide::Client))
+        .map(|layer| (layer.scope.order(), layer.archive_prefix.clone()))
+        .collect();
+    layers.sort_by_key(|layer| std::cmp::Reverse(layer.0));
+    layers.into_iter().map(|(_, prefix)| prefix).collect()
+}
+
+/// The copy of a game-directory file the first of `prefixes` that has one
+/// carries.
+fn read_carried(archive: &mut PackArchive, prefixes: &[String], relative: &str) -> Option<Vec<u8>> {
+    // As much as a report imported on its own is read: its end.
+    let keep = usize::try_from(MAX_LOGGED_MOD_LIST_BYTES).unwrap_or(usize::MAX);
+    for prefix in prefixes {
+        match archive.read_layer_file_tail(prefix, relative, keep, MAX_CARRIED_LOG_BYTES) {
+            Ok(Some(bytes)) => return Some(bytes),
+            Ok(None) => {}
+            // This layer's copy is the one that ends up on disk, so an earlier
+            // layer's copy would describe another file.
+            Err(error) => {
+                debug!(%error, file = relative, "could not read a carried log");
+                return None;
+            }
+        }
+    }
+    None
 }
 
 /// Parses an already-identified archive with the provider that owns its format.
@@ -636,7 +770,7 @@ fn require_resolved(analysis: &PackAnalysis) -> PackResult<()> {
     if let Some(logged) = analysis
         .logged_mods
         .as_ref()
-        .filter(|logged| !logged.resolved)
+        .filter(|logged| logged.requested && !logged.resolved)
     {
         // A mod list names its files only by hash, and nobody asked the
         // catalogs what they are.
@@ -881,6 +1015,39 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    #[test]
+    fn a_carried_mod_list_nobody_asked_for_does_not_hold_up_materializing() {
+        let report = "---- Minecraft Crash Report ----\n\tMinecraft Version: 1.21.1\n\tNeoForge: 21.1.77\n\tMod List: \n\t\ta.jar |A |a |1.0 |Manifest: NOSIGNATURE|SHA1: da39a3ee5e6b4b0d3255bfef95601890afd80709|Murmur2: 1\n";
+        let list = parse_logged_mod_list(report).expect("hashed list");
+        let logged = |requested| LoggedMods {
+            source: "logs/latest.log".to_owned(),
+            list: list.clone(),
+            crash_report: true,
+            requested,
+            resolved: false,
+            catalogs_not_asked: Vec::new(),
+            shipped_jars: Vec::new(),
+        };
+        let mut analysis = PackAnalysis {
+            format: PackFormat::ModrinthPack,
+            recipe: PackRecipe::for_manual_instance("Pack", "1.21.1", list.loader.clone()),
+            pending: Vec::new(),
+            rejected_urls: Vec::new(),
+            blocked: Vec::new(),
+            attention: Vec::new(),
+            duplicate_files: Vec::new(),
+            logged_mods: Some(logged(false)),
+            missing_logged_files: Vec::new(),
+        };
+
+        assert!(require_resolved(&analysis).is_ok());
+        analysis.logged_mods = Some(logged(true));
+        assert!(matches!(
+            require_resolved(&analysis),
+            Err(PackError::ProviderFilesUnresolved { .. })
+        ));
+    }
 
     #[test]
     fn a_long_log_is_read_from_its_end() {

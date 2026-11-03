@@ -195,6 +195,7 @@ pub use loader::{IncompatibleMod, LoaderVersionChange, LoaderVersionPlan};
 pub use local_mods::{
     LocalModOffer, LocalModPlan, LocalModRefusal, LocalModReport, MAX_LOCAL_MOD_BYTES,
 };
+pub use logged_mods::UnlistedMods;
 pub use logging::{DEFAULT_LOG_DIRECTIVES, init_tracing};
 pub use minecraft_preferences::{
     MinecraftPreferenceEntry, MinecraftPreferencePreview, MinecraftPreferenceSnapshot,

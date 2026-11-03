@@ -84,7 +84,7 @@ pub use error::{PackError, PackResult};
 pub use import::{
     MAX_LOGGED_MOD_LIST_BYTES, MaterializeRequest, MaterializedPack, PackAnalysis,
     RecipeMaterializeRequest, analyze, analyze_logged_mod_list, has_retained_recipe, materialize,
-    materialize_recipe, open_analyzed_mod_list, reads_as_text, retained_recipe,
+    materialize_recipe, open_analyzed_mod_list, reads_as_text, retained_recipe, shipped_jars,
 };
 pub use install::{
     AppliedLayer, ArtifactFetch, FileInstall, MaterializedFiles, MaterializedServerRecipe,
@@ -92,8 +92,9 @@ pub use install::{
     install_files, materialize_server_recipe, put_aside_path, restore_file,
 };
 pub use logged_mods::{
-    LoggedModList, LoggedModListError, LoggedModRow, LoggedMods, LoggedSide, has_mod_list,
-    is_crash_report, parse_logged_mod_list,
+    CRASH_REPORTS_DIR, LATEST_LOG, LoggedModList, LoggedModListError, LoggedModRow, LoggedMods,
+    LoggedSide, ShippedJar, has_mod_list, is_crash_report, is_crash_report_name,
+    parse_logged_mod_list,
 };
 pub use managed::{
     DISABLED_SUFFIX, InstalledStandIn, MODS_DIR, ManagedModInstall, ManagedModInstallation,

@@ -77,6 +77,10 @@ pub struct ImportRequest {
     /// it to address the instance while the import is still running; one
     /// that already names an instance is refused.
     pub instance_id: Option<InstanceId>,
+    /// Whether to make the instance match a hashed mod list the pack carries
+    /// in its overrides. Off by default, because it changes what the pack
+    /// installs. A crash report or log imported on its own is always used.
+    pub logged_mods: bool,
 }
 
 impl ImportRequest {
@@ -91,6 +95,7 @@ impl ImportRequest {
             skip_blocked: Vec::new(),
             issue_link: None,
             instance_id: None,
+            logged_mods: false,
         }
     }
 
@@ -124,6 +129,14 @@ impl ImportRequest {
         self
     }
 
+    /// Makes the instance match the hashed mod list the pack carries, when it
+    /// carries one.
+    #[must_use]
+    pub const fn applying_logged_mods(mut self, apply: bool) -> Self {
+        self.logged_mods = apply;
+        self
+    }
+
     #[must_use]
     pub const fn with_instance_id(mut self, id: InstanceId) -> Self {
         self.instance_id = Some(id);
@@ -144,6 +157,9 @@ pub struct ImportedPack {
     /// own settings is a far better outcome than an import undone over a GUI
     /// scale.
     pub preferences: Option<PreferenceApplication>,
+    /// What making the instance match a mod list the pack carries did to the
+    /// pack's mods the list does not name.
+    pub unlisted: crate::logged_mods::UnlistedMods,
 }
 
 impl ImportedPack {
@@ -180,6 +196,14 @@ impl App {
     #[instrument(skip(self), fields(archive = %archive.display()))]
     pub fn analyze_pack(&self, archive: &Path) -> CoreResult<PackAnalysis> {
         let (_, analysis) = Self::open_pack(archive)?;
+        Ok(analysis)
+    }
+
+    /// What importing `request` would do, as [`Self::analyze_pack`] reports
+    /// it, with a mod list the pack carries applied only when the request
+    /// asks for it.
+    pub fn analyze_import(&self, request: &ImportRequest) -> CoreResult<PackAnalysis> {
+        let (_, analysis) = Self::open_for_import(request)?;
         Ok(analysis)
     }
 
@@ -228,7 +252,7 @@ impl App {
             .flatten();
         // Everything that can refuse the pack runs before the instance exists.
         reporter.set_stage(Some("operation-stage-reading-archive".to_owned()));
-        let (source, mut analysis) = Self::open_pack(&request.archive)?;
+        let (source, mut analysis) = Self::open_for_import(request)?;
         // Including the provider lookups: a missing API key, a file the pack
         // declares that no longer exists, and a file whose author does not
         // permit third-party downloads all fail here, with nothing created.
@@ -262,7 +286,7 @@ impl App {
         new_client.id = request.instance_id;
         let record = self.registry_for_services().create_client(new_client)?;
 
-        let materialized = match self
+        let (materialized, unlisted) = match self
             .materialize(MaterializePack {
                 source,
                 analysis: &analysis,
@@ -329,6 +353,7 @@ impl App {
             materialized,
             analysis,
             preferences,
+            unlisted,
         })
     }
 
@@ -356,7 +381,13 @@ impl App {
     }
 
     /// Lays the pack's files down and retains its source recipe.
-    async fn materialize(&self, request: MaterializePack<'_>) -> CoreResult<MaterializedPack> {
+    ///
+    /// Returns the pack's mods it disabled because a mod list the instance
+    /// was made to match does not name them.
+    async fn materialize(
+        &self,
+        request: MaterializePack<'_>,
+    ) -> CoreResult<(MaterializedPack, crate::logged_mods::UnlistedMods)> {
         let MaterializePack {
             source,
             analysis,
@@ -372,20 +403,38 @@ impl App {
         let cache = CacheLayout::new(self.paths().cache_dir());
 
         match source {
-            OpenedSource::Archive(archive) => Ok(ephervex_pack::materialize(MaterializeRequest {
-                archive,
-                analysis,
-                side: PackSide::Client,
-                selection,
-                game_dir: &game_dir,
-                source_dir: &source_dir,
-                manager: &manager,
-                cache: &cache,
-                credentials,
-                reporter,
-                cancel,
-            })
-            .await?),
+            OpenedSource::Archive(archive) => {
+                let materialized = ephervex_pack::materialize(MaterializeRequest {
+                    archive,
+                    analysis,
+                    side: PackSide::Client,
+                    selection,
+                    game_dir: &game_dir,
+                    source_dir: &source_dir,
+                    manager: &manager,
+                    cache: &cache,
+                    credentials,
+                    reporter,
+                    cancel,
+                })
+                .await?;
+                // A pack made to match a mod list keeps only the mods the
+                // list names. The others are disabled rather than deleted, so
+                // they can be turned back on.
+                let disabled = match &analysis.logged_mods {
+                    Some(logged) => {
+                        crate::logged_mods::disable_unlisted_mods(
+                            &game_dir,
+                            logged,
+                            &materialized.recipe,
+                            cancel,
+                        )
+                        .await?
+                    }
+                    None => crate::logged_mods::UnlistedMods::default(),
+                };
+                Ok((materialized, disabled))
+            }
             OpenedSource::ModList(report) => {
                 let materialized = ephervex_pack::materialize_recipe(RecipeMaterializeRequest {
                     analysis,
@@ -404,9 +453,26 @@ impl App {
                     return Err(PackError::Canceled.into());
                 }
                 keep_mod_list_source(&game_dir, analysis, report).await;
-                Ok(materialized)
+                Ok((materialized, crate::logged_mods::UnlistedMods::default()))
             }
         }
+    }
+
+    /// Opens what `request` imports, keeping a mod list the pack carries only
+    /// when the request asks for it.
+    fn open_for_import(request: &ImportRequest) -> CoreResult<(OpenedSource, PackAnalysis)> {
+        let (mut source, mut analysis) = Self::open_pack(&request.archive)?;
+        if let OpenedSource::Archive(archive) = &mut source {
+            if request.logged_mods {
+                if let Some(logged) = analysis.logged_mods.as_mut() {
+                    logged.requested = true;
+                    logged.shipped_jars = ephervex_pack::shipped_jars(archive, &analysis.recipe);
+                }
+            } else {
+                analysis.logged_mods = None;
+            }
+        }
+        Ok((source, analysis))
     }
 
     /// Opens and validates a pack archive, or a crash report or log, under
@@ -464,11 +530,6 @@ enum OpenedSource {
     ModList(PathBuf),
 }
 
-/// Where a crash report sits in the game directory.
-const CRASH_REPORTS_DIR: &str = "crash-reports";
-/// Where the game writes its log.
-const LATEST_LOG: &str = "logs/latest.log";
-
 /// Copies the crash report or log an instance was rebuilt from into it, so
 /// the logs view and crash review show it before the first launch.
 ///
@@ -483,15 +544,11 @@ async fn keep_mod_list_source(game_dir: &Path, analysis: &PackAnalysis, report: 
     let relative = if logged.crash_report {
         let name = ephervex_pack::safe_file_name(&logged.source)
             .map(|name| name.to_string_lossy().into_owned())
-            .filter(|name| {
-                // The logs view lists a crash report by exactly this name.
-                name.starts_with("crash-")
-                    && Path::new(name).extension().is_some_and(|ext| ext == "txt")
-            })
+            .filter(|name| ephervex_pack::is_crash_report_name(name))
             .unwrap_or_else(|| "crash-imported.txt".to_owned());
-        PathBuf::from(CRASH_REPORTS_DIR).join(name)
+        PathBuf::from(ephervex_pack::CRASH_REPORTS_DIR).join(name)
     } else {
-        PathBuf::from(LATEST_LOG)
+        PathBuf::from(ephervex_pack::LATEST_LOG)
     };
     let destination = game_dir.join(relative);
     let copied = tokio::task::spawn_blocking(move || -> std::io::Result<()> {

@@ -608,6 +608,104 @@ impl PackArchive {
         self.read_into_memory(index).map(Some)
     }
 
+    /// The last `keep` bytes of a file of an override layer, so a long log can
+    /// be read without being held in memory whole.
+    ///
+    /// `None` when the layer has no such file. See [`Self::stream_layer_file`]
+    /// for the limits it is read under.
+    pub(crate) fn read_layer_file_tail(
+        &mut self,
+        prefix: &str,
+        relative: &str,
+        keep: usize,
+        ceiling: u64,
+    ) -> PackResult<Option<Vec<u8>>> {
+        let mut tail: std::collections::VecDeque<u8> = std::collections::VecDeque::new();
+        let found = self.stream_layer_file(prefix, relative, ceiling, &mut |chunk| {
+            tail.extend(chunk);
+            let excess = tail.len().saturating_sub(keep);
+            tail.drain(..excess);
+            Ok(())
+        })?;
+        Ok(found.then(|| tail.into()))
+    }
+
+    /// The SHA-1 of a file of an override layer, streamed rather than read
+    /// into memory. `None` when the layer has no such file.
+    pub(crate) fn hash_layer_file(
+        &mut self,
+        prefix: &str,
+        relative: &str,
+    ) -> PackResult<Option<ephervex_model::Hash>> {
+        use sha1::Digest as _;
+
+        let mut hasher = sha1::Sha1::new();
+        let ceiling = self.limits.max_entry_bytes;
+        let found = self.stream_layer_file(prefix, relative, ceiling, &mut |chunk| {
+            hasher.update(chunk);
+            Ok(())
+        })?;
+        Ok(found
+            .then(|| {
+                ephervex_model::Hash::new(
+                    ephervex_model::HashAlgorithm::Sha1,
+                    &hex::encode(hasher.finalize()),
+                )
+            })
+            .flatten())
+    }
+
+    /// Streams one file of an override layer to `sink`, returning whether the
+    /// layer has it.
+    ///
+    /// Held to `ceiling` and the per-entry ceiling, so a hostile entry is
+    /// still bounded, but not charged to the archive's total budget: nothing
+    /// read here is written anywhere, and extraction charges the same entry
+    /// when it writes it.
+    fn stream_layer_file(
+        &mut self,
+        prefix: &str,
+        relative: &str,
+        ceiling: u64,
+        sink: &mut dyn FnMut(&[u8]) -> PackResult<()>,
+    ) -> PackResult<bool> {
+        let mut components = self.under_pack_root(prefix);
+        components.extend(entry_components(relative).unwrap_or_default());
+        let Some(index) = self.file_index(&components) else {
+            return Ok(false);
+        };
+        let allowance = self.allowance_after(
+            0,
+            &[("entry-size", ceiling.min(self.limits.max_entry_bytes))],
+        );
+        let path = self.path.clone();
+        let mut entry = self
+            .zip
+            .by_index(index)
+            .map_err(|source| PackError::ArchiveInvalid {
+                path: path.clone(),
+                source: Box::new(source),
+            })?;
+        allowance.check(entry.size())?;
+        stream_entry(&mut entry, allowance, &path, sink)?;
+        Ok(true)
+    }
+
+    /// The names of the files directly inside one directory of an override
+    /// layer. `directory` is its path in the game directory.
+    pub(crate) fn layer_file_names(&self, prefix: &str, directory: &str) -> Vec<String> {
+        let mut parent = self.under_pack_root(prefix);
+        parent.extend(entry_components(directory).unwrap_or_default());
+        self.entry_names()
+            .filter(|name| !is_directory_name(name))
+            .filter_map(|name| {
+                let parts = entry_components(&name)?;
+                (parts.len() == parent.len() + 1 && parts.starts_with(&parent))
+                    .then(|| parts[parent.len()].clone())
+            })
+            .collect()
+    }
+
     /// Reads one entry into memory, bounded by the manifest and entry ceilings.
     fn read_into_memory(&mut self, index: usize) -> PackResult<Vec<u8>> {
         let allowance = self.allowance(&[

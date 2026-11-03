@@ -234,7 +234,7 @@ impl ModPresence {
 /// `rename(2)` silently replaces its destination, which for a mod toggle would
 /// destroy the user's other copy. `RENAME_NOREPLACE` makes the check atomic;
 /// where the filesystem or a sandbox lacks it, an existence check stands in.
-fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_without_replacing(from: &Path, to: &Path) -> std::io::Result<()> {
     use rustix::fs::{CWD, RenameFlags, renameat_with};
     use rustix::io::Errno;
 

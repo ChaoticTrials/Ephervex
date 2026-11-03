@@ -325,6 +325,14 @@ struct ImportArgs {
     /// Take every optional file the pack offers.
     #[arg(long, conflicts_with = "optional")]
     all_optional: bool,
+    /// Make the instance match the crash report or `latest.log` the pack
+    /// carries, when its mod list records each mod's hashes.
+    ///
+    /// Mods the list names but the pack lacks are added, a pack mod the list
+    /// names at another version is replaced, and pack mods the list does not
+    /// name are disabled. Without this flag the pack imports as published.
+    #[arg(long)]
+    logged_mods: bool,
     /// Agree to download from this address without being asked.
     ///
     /// Only meaningful when the pack is named by an address. Without it, an
@@ -8803,7 +8811,11 @@ async fn run_inspect(app: &mut App, args: &ImportArgs, json: bool) -> anyhow::Re
         || PathBuf::from(&args.archive),
         |pack| pack.path().to_path_buf(),
     );
-    let analysis = app.analyze_pack(&archive)?;
+    let analysis = if args.logged_mods {
+        app.analyze_import(&ImportRequest::new(&archive).applying_logged_mods(true))?
+    } else {
+        app.analyze_pack(&archive)?
+    };
     print_analysis(&analysis, json);
     Ok(())
 }
@@ -8825,7 +8837,8 @@ async fn run_import(app: &mut App, args: &ImportArgs, json: bool) -> anyhow::Res
     };
     let mut request = ImportRequest::new(&archive)
         .with_storage(args.storage.class())
-        .selecting(selection);
+        .selecting(selection)
+        .applying_logged_mods(args.logged_mods);
     if let Some(name) = &args.name {
         request = request.named(name);
     }
@@ -8836,6 +8849,9 @@ async fn run_import(app: &mut App, args: &ImportArgs, json: bool) -> anyhow::Res
     let imported = app
         .import_pack(&request, &reporter, &CancellationToken::new())
         .await?;
+    if args.logged_mods && imported.analysis.logged_mods.is_none() && !json {
+        eprintln!("{}", ephervex_i18n::lookup("pack-import-no-logged-mods"));
+    }
     print_imported(app, &imported, json)
 }
 
@@ -9017,14 +9033,15 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
         terminal_safe(&analysis.loader().to_string())
     );
     // A mod list's files are known only once its hashes are looked up.
-    if analysis.logged_mods.is_none() {
+    let is_mod_list = analysis.format == ephervex_core::PackFormat::LoggedModList;
+    if !is_mod_list {
         outln!(
             "files:     {} required, {} optional",
             analysis.required_file_count(PackSide::Client),
             analysis.optional_file_count(PackSide::Client)
         );
     }
-    if analysis.needs_provider_resolution() && analysis.logged_mods.is_none() {
+    if !analysis.pending.is_empty() {
         // The counts above come from the pack's own manifest. Which files they
         // are is a question only the provider can answer, and answering it
         // needs the key.
@@ -9054,6 +9071,12 @@ fn print_analysis(analysis: &PackAnalysis, json: bool) {
             logged.list.hashed().count(),
             logged.list.rows.len()
         );
+        if analysis.format != ephervex_core::PackFormat::LoggedModList && !logged.requested {
+            eprintln!(
+                "{}",
+                ephervex_i18n::lookup("pack-analysis-carries-logged-mods")
+            );
+        }
     }
     if analysis.has_files_for(PackSide::Server) {
         eprintln!(
@@ -9072,6 +9095,15 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
         value["pack"] = analysis_json(&imported.analysis);
         value["installed"] = json_paths(&imported.materialized.files.installed);
         value["preserved"] = json_paths(&imported.materialized.files.skipped);
+        value["disabled_unlisted"] = json_paths(&imported.unlisted.disabled);
+        value["unlisted_left_enabled"] = json_paths(&imported.unlisted.left_enabled);
+        value["logged_mods_applied"] = serde_json::Value::Bool(
+            imported
+                .analysis
+                .logged_mods
+                .as_ref()
+                .is_some_and(|logged| logged.requested),
+        );
         value["recipe"] = serde_json::json!({
                     "path": json_path(&imported.materialized.recipe_path),
                     "files": imported.recipe().files.len(),
@@ -9114,6 +9146,33 @@ fn print_imported(app: &App, imported: &ImportedPack, json: bool) -> anyhow::Res
         print_rejected_raw_lines(applied);
     }
     print_missing_logged_files(&imported.analysis);
+    if !imported.unlisted.disabled.is_empty() {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "pack-import-disabled-unlisted",
+                [("count", MessageArg::from(imported.unlisted.disabled.len()))]
+            )
+        );
+        for path in &imported.unlisted.disabled {
+            eprintln!("  {}", terminal_safe(&path.display().to_string()));
+        }
+    }
+    if !imported.unlisted.left_enabled.is_empty() {
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(
+                "pack-import-unlisted-left-enabled",
+                [(
+                    "count",
+                    MessageArg::from(imported.unlisted.left_enabled.len())
+                )]
+            )
+        );
+        for path in &imported.unlisted.left_enabled {
+            eprintln!("  {}", terminal_safe(&path.display().to_string()));
+        }
+    }
     report_rejected_addresses(&imported.analysis.rejected_urls, json);
     Ok(())
 }
@@ -9269,6 +9328,7 @@ fn analysis_json(analysis: &PackAnalysis) -> serde_json::Value {
                 "jars": logged.list.rows.len(),
                 "hashed": logged.list.hashed().count(),
                 "server": logged.list.side == ephervex_core::LoggedSide::Server,
+                "requested": logged.requested,
                 "catalogs_not_asked": logged
                     .catalogs_not_asked
                     .iter()

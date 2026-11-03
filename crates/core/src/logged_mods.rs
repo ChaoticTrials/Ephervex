@@ -11,21 +11,22 @@
 //! third-party downloads is offered for manual download the same way.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ephervex_download::AuthenticatedSource;
-use ephervex_download::OperationReporter;
+use ephervex_download::{AuthenticatedSource, OperationReporter, hash_file};
 use ephervex_mod_platform::{
-    ModPlatformError, ModProviderApi as _, ModVersionInfo, RecognizedFile, SideSupport,
+    CurseForgeOperation, ModPlatformError, ModProviderApi as _, ModVersionInfo, RecognizedFile,
+    SideSupport,
 };
 use ephervex_model::{AttentionReason, Hash, HashAlgorithm, ModOrigin, ModProvider};
 use ephervex_pack::{
     BlockedProviderFile, LoggedModRow, LoggedSide, MODS_DIR, PackAnalysis, PackError,
-    PackFileRecipe, PendingProviderFile, ProviderFileIdentity, SideRequirement, safe_file_name,
+    PackFileRecipe, PackSide, PendingProviderFile, ProviderFileIdentity, SideRequirement,
+    disabled_path, safe_file_name,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use crate::app::App;
 use crate::curseforge_pack::DeclaredBy;
@@ -44,13 +45,14 @@ impl App {
         &self,
         analysis: &mut PackAnalysis,
         skip_blocked: &[ProviderFileIdentity],
+        curseforge: Option<&CurseForgeOperation<'_>>,
         cancel: &CancellationToken,
     ) -> CoreResult<Option<Arc<AuthenticatedSource>>> {
         // Worked on a copy, so a failure part way leaves the analysis as it
         // was and a retry starts from the same place.
         let mut working = analysis.clone();
         let credential = self
-            .resolve_logged_mods_in(&mut working, skip_blocked, cancel)
+            .resolve_logged_mods_in(&mut working, skip_blocked, curseforge, cancel)
             .await?;
         *analysis = working;
         Ok(credential)
@@ -60,16 +62,35 @@ impl App {
         &self,
         analysis: &mut PackAnalysis,
         skip_blocked: &[ProviderFileIdentity],
+        curseforge: Option<&CurseForgeOperation<'_>>,
         cancel: &CancellationToken,
     ) -> CoreResult<Option<Arc<AuthenticatedSource>>> {
         let Some(logged) = analysis.logged_mods.clone() else {
             return Ok(None);
         };
-        if logged.resolved {
+        if !logged.requested || logged.resolved {
             return Ok(None);
         }
         let side = logged.list.side;
-        let mut seen = BTreeSet::new();
+        // A pack carrying its own log already has some of these jars, byte
+        // for byte, so only the rest are looked up.
+        let mut seen = sha1_digests(
+            analysis
+                .recipe
+                .files
+                .iter()
+                // An optional file the user may not take is looked up too.
+                .filter(|file| file.requirement(PackSide::Client) == SideRequirement::Required)
+                .flat_map(|file| &file.hashes)
+                .chain(analysis.blocked.iter().flat_map(|file| &file.hashes))
+                .chain(
+                    logged
+                        .shipped_jars
+                        .iter()
+                        .filter_map(|jar| jar.sha1.as_ref()),
+                ),
+        );
+        let pack_files = analysis.recipe.files.len();
         let mut wanted: Vec<LoggedModRow> = logged
             .list
             .hashed()
@@ -110,9 +131,9 @@ impl App {
                 ModProvider::CurseForge => {
                     let Some((authenticated, held)) = self
                         .find_on_curseforge(
+                            curseforge,
                             analysis,
                             &mut wanted,
-                            side,
                             skip_blocked,
                             another_follows,
                             cancel,
@@ -132,23 +153,9 @@ impl App {
         if cancel.is_cancelled() {
             return Err(PackError::Canceled.into());
         }
-        keep_unique_paths(analysis, &logged.list, &mut wanted);
+        settle_found_files(analysis, &logged, pack_files, &mut wanted);
 
-        info!(
-            hashed = logged.list.hashed().count(),
-            missing = wanted.len(),
-            "looked up a mod list's hashes"
-        );
-        for row in &wanted {
-            analysis
-                .attention
-                .push(AttentionReason::MissingLoggedFile(row.label()));
-        }
-        if let Some(logged) = analysis.logged_mods.as_mut() {
-            logged.resolved = true;
-            logged.catalogs_not_asked = not_asked;
-        }
-        analysis.missing_logged_files = wanted;
+        record_missing(analysis, wanted, not_asked);
         Ok(credential)
     }
 
@@ -161,29 +168,38 @@ impl App {
     /// rows stay wanted, so the other catalog can be asked for the same bytes.
     async fn find_on_curseforge(
         &self,
+        held: Option<&CurseForgeOperation<'_>>,
         analysis: &mut PackAnalysis,
         wanted: &mut Vec<LoggedModRow>,
-        side: LoggedSide,
         skip_blocked: &[ProviderFileIdentity],
         hold_blocked: bool,
         cancel: &CancellationToken,
     ) -> CoreResult<Option<(Arc<AuthenticatedSource>, Vec<BlockedProviderFile>)>> {
-        let api = self.curseforge_api()?;
-        let operation = match api.begin_operation() {
-            Ok(operation) => operation,
-            Err(ModPlatformError::CredentialMissing { .. }) => {
-                debug!("no CurseForge key, so the mod list was not looked up there");
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
+        let begun;
+        let operation = if let Some(held) = held {
+            held
+        } else {
+            begun = match self.curseforge_api()?.begin_operation() {
+                Ok(operation) => operation,
+                Err(ModPlatformError::CredentialMissing { .. }) => {
+                    debug!("no CurseForge key, so the mod list was not looked up there");
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+            &begun
         };
-        let pending = fingerprint_matches(&operation, wanted, side, cancel).await?;
+        let side = analysis
+            .logged_mods
+            .as_ref()
+            .map_or(LoggedSide::Client, |logged| logged.list.side);
+        let pending = fingerprint_matches(operation, wanted, side, cancel).await?;
         let blocked_before = analysis.blocked.len();
         analysis
             .pending
             .extend(pending.iter().map(|(_, entry)| entry.clone()));
         self.resolve_curseforge_pending(
-            &operation,
+            operation,
             analysis,
             skip_blocked,
             DeclaredBy::ModList,
@@ -327,6 +343,138 @@ async fn fingerprint_matches(
     Ok(found)
 }
 
+/// What making an instance match a mod list did to the jars it does not name,
+/// each relative to the game directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UnlistedMods {
+    pub disabled: Vec<PathBuf>,
+    /// Jars the list does not name that stayed enabled: their disabled name
+    /// was taken, or they could not be read.
+    pub left_enabled: Vec<PathBuf>,
+}
+
+/// Disables every jar in `mods/` that `list` does not name.
+///
+/// A jar is named by its SHA-1, or, for one the report could not hash, by its
+/// file name. A second jar with the same bytes as one already kept is
+/// disabled too. A jar the recipe installed is known by the hash it was
+/// verified against, and a jar the pack ships by the hash taken from the
+/// archive; only the others are read.
+pub(crate) async fn disable_unlisted_mods(
+    game_dir: &Path,
+    logged: &ephervex_pack::LoggedMods,
+    recipe: &ephervex_pack::PackRecipe,
+    cancel: &CancellationToken,
+) -> CoreResult<UnlistedMods> {
+    let list = &logged.list;
+    let listed: BTreeSet<String> =
+        sha1_digests(list.rows.iter().filter_map(|row| row.sha1.as_ref()));
+    // Shipped jars first, so a declared file at the same path, which the
+    // installer laid down and the layer then replaced, is not trusted.
+    let mut verified: BTreeMap<PathBuf, String> = BTreeMap::new();
+    for jar in &logged.shipped_jars {
+        if let Some(sha1) = &jar.sha1 {
+            verified.insert(
+                game_dir.join(MODS_DIR).join(&jar.file_name),
+                sha1.digest().to_owned(),
+            );
+        }
+    }
+    for file in &recipe.files {
+        if let Some(sha1) = file
+            .hashes
+            .iter()
+            .find(|hash| hash.algorithm == HashAlgorithm::Sha1)
+        {
+            verified
+                .entry(game_dir.join(&file.logical_path))
+                .or_insert_with(|| sha1.digest().to_owned());
+        }
+    }
+    let mods = game_dir.join(MODS_DIR);
+    let unreadable = |source| PackError::Unreadable {
+        path: mods.clone(),
+        source,
+    };
+    let mut names = Vec::new();
+    match tokio::fs::read_dir(&mods).await {
+        Ok(mut entries) => {
+            while let Some(entry) = entries.next_entry().await.map_err(unreadable)? {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(UnlistedMods::default());
+        }
+        Err(source) => return Err(unreadable(source).into()),
+    }
+    names.sort();
+
+    let mut outcome = UnlistedMods::default();
+    let mut kept = BTreeSet::new();
+    for name in names {
+        if cancel.is_cancelled() {
+            return Err(PackError::Canceled.into());
+        }
+        let path = mods.join(&name);
+        let relative = PathBuf::from(MODS_DIR).join(&name);
+        let is_jar = path.extension().is_some_and(|ext| ext == "jar")
+            && tokio::fs::metadata(&path)
+                .await
+                .is_ok_and(|metadata| metadata.is_file());
+        if !is_jar
+            || list
+                .rows
+                .iter()
+                .any(|row| row.sha1.is_none() && row.names_file(&name))
+        {
+            continue;
+        }
+        let digest = match verified.get(&path) {
+            Some(digest) => digest.clone(),
+            None => match hash_file(&path, HashAlgorithm::Sha1).await {
+                Ok(hash) => hash.digest().to_owned(),
+                // One unreadable jar is reported, not a reason to undo the
+                // instance.
+                Err(error) => {
+                    warn!(%error, jar = %name, "left a jar that could not be read enabled");
+                    outcome.left_enabled.push(relative);
+                    continue;
+                }
+            },
+        };
+        // A listed jar stays, once: the pack may ship the same bytes the
+        // catalog lookup also installed.
+        if listed.contains(&digest) && kept.insert(digest) {
+            continue;
+        }
+        let target = disabled_path(&path);
+        let renamed = {
+            let (from, to) = (path.clone(), target);
+            tokio::task::spawn_blocking(move || crate::mods::rename_without_replacing(&from, &to))
+                .await
+                .map_err(|_| PackError::WorkerFailed)?
+        };
+        match renamed {
+            Ok(()) => outcome.disabled.push(relative),
+            // The pack ships a disabled copy under that name already, which is
+            // its file and is not replaced. The jar stays as it is.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                warn!(jar = %name, "left a jar the mod list does not name enabled, since its disabled name is taken");
+                outcome.left_enabled.push(relative);
+            }
+            Err(source) => {
+                return Err(PackError::Unwritable {
+                    path: path.clone(),
+                    source,
+                }
+                .into());
+            }
+        }
+    }
+    Ok(outcome)
+}
+
 /// Puts back the blocked CurseForge files the other catalog could not serve
 /// either, for a manual download, and stops wanting their rows.
 fn restore_held_blocked(
@@ -347,23 +495,99 @@ fn restore_held_blocked(
     }
 }
 
-/// Keeps one file per destination: two catalog files with one name cannot
-/// both be installed. The first stays, and the jar behind the other is wanted
-/// again, which names it as missing.
-fn keep_unique_paths(
+/// Names the rows no catalog could provide on the analysis, and marks the
+/// list as looked up.
+fn record_missing(
     analysis: &mut PackAnalysis,
-    list: &ephervex_pack::LoggedModList,
+    missing: Vec<LoggedModRow>,
+    not_asked: Vec<ModProvider>,
+) {
+    info!(missing = missing.len(), "looked up a mod list's hashes");
+    for row in &missing {
+        analysis
+            .attention
+            .push(AttentionReason::MissingLoggedFile(row.label()));
+    }
+    if let Some(logged) = analysis.logged_mods.as_mut() {
+        logged.resolved = true;
+        logged.catalogs_not_asked = not_asked;
+    }
+    analysis.missing_logged_files = missing;
+}
+
+/// Fits the files found for the list in with the pack's own.
+///
+/// The list names the version the game ran, so a pack file, declared or
+/// blocked, of a project a found file belongs to is dropped, unless the list
+/// names that file's own bytes too. Each destination then holds one file:
+/// a name the pack ships in its overrides stays the pack's, a found file comes
+/// before a pack file of the same name, and the jar behind a found file that
+/// cannot be placed is wanted again, which names it as missing.
+///
+/// `pack_files` is how many of the recipe's files the pack declared; the rest
+/// were found for the list.
+fn settle_found_files(
+    analysis: &mut PackAnalysis,
+    logged: &ephervex_pack::LoggedMods,
+    pack_files: usize,
     wanted: &mut Vec<LoggedModRow>,
 ) {
-    let mut paths = BTreeSet::new();
+    let listed = sha1_digests(logged.list.rows.iter().filter_map(|row| row.sha1.as_ref()));
+    let project = |identity: Option<&ProviderFileIdentity>| {
+        let identity = identity?;
+        Some((identity.provider?, identity.project_id.clone()?))
+    };
+    let found = analysis
+        .recipe
+        .files
+        .split_off(pack_files.min(analysis.recipe.files.len()));
+
+    // Found files are placed first: a name the pack ships stays the pack's,
+    // and among found files the first takes a name.
+    let mut paths: BTreeSet<PathBuf> = logged
+        .shipped_jars
+        .iter()
+        .map(|jar| PathBuf::from(MODS_DIR).join(&jar.file_name))
+        .collect();
     let mut displaced = BTreeSet::new();
+    let mut placed = Vec::with_capacity(found.len());
+    for entry in found {
+        if paths.insert(entry.logical_path.clone()) {
+            placed.push(entry);
+        } else {
+            displaced.extend(sha1_digests(entry.hashes.iter()));
+        }
+    }
+
+    // Only a placed file supersedes the pack's version of its project.
+    let placed_projects: BTreeSet<(ModProvider, String)> = placed
+        .iter()
+        .filter_map(|entry| project(entry.identity.as_ref()))
+        .collect();
+    let superseded = |identity: Option<&ProviderFileIdentity>, hashes: &[Hash]| {
+        project(identity).is_some_and(|project| placed_projects.contains(&project))
+            && sha1_digests(hashes.iter()).is_disjoint(&listed)
+    };
+    analysis
+        .recipe
+        .files
+        .retain(|entry| !superseded(entry.identity.as_ref(), &entry.hashes));
+    // A blocked file is kept only when the list names it: one it does not
+    // name would be disabled anyway, so it is not asked for by hand.
+    // A blocked file without a SHA-1 cannot be told apart, so it stays.
+    analysis.blocked.retain(|blocked| {
+        let digests = sha1_digests(blocked.hashes.iter());
+        digests.is_empty() || !digests.is_disjoint(&listed)
+    });
     analysis.recipe.files.retain(|entry| {
         let unique = paths.insert(entry.logical_path.clone());
         if !unique {
+            // A pack file the list names is wanted again too.
             displaced.extend(sha1_digests(entry.hashes.iter()));
         }
         unique
     });
+    analysis.recipe.files.extend(placed);
     // A blocked file is placed by name once it is supplied by hand.
     analysis.blocked.retain(|blocked| {
         let unique = blocked
@@ -376,10 +600,11 @@ fn keep_unique_paths(
         }
         unique
     });
-    let mut seen: BTreeSet<String> =
-        sha1_digests(wanted.iter().filter_map(|row| row.sha1.as_ref()));
+    let mut seen = sha1_digests(wanted.iter().filter_map(|row| row.sha1.as_ref()));
     wanted.extend(
-        list.hashed()
+        logged
+            .list
+            .hashed()
             .filter(|row| {
                 row.sha1.as_ref().is_some_and(|sha1| {
                     displaced.contains(sha1.digest()) && seen.insert(sha1.digest().to_owned())
@@ -1159,5 +1384,302 @@ mod tests {
         let resource_packs = ephervex_storage::metadata::client_game_dir(&imported.record.root)
             .join("resourcepacks");
         assert!(!resource_packs.join("bravo-1.0.jar").exists());
+    }
+
+    const ALPHA_OLD: &[u8] = b"alpha mod jar, an older build";
+    const DELTA: &[u8] = b"delta mod jar the log never names";
+
+    fn mrpack(path: &Path, entries: &[(&str, &[u8])]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        let options: zip::write::FileOptions<'_, '_, ()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let index = br#"{"formatVersion": 1, "game": "minecraft", "versionId": "1.0",
+            "name": "Repro Pack", "files": [],
+            "dependencies": {"minecraft": "1.21.1", "neoforge": "21.1.77"}}"#;
+        writer
+            .start_file("modrinth.index.json", options)
+            .expect("start index");
+        writer.write_all(index).expect("write index");
+        for (name, body) in entries {
+            writer.start_file(*name, options).expect("start entry");
+            writer.write_all(body).expect("write entry");
+        }
+        writer.finish().expect("finish archive");
+    }
+
+    /// A pack shipping an old alpha, bravo as logged, and delta the log does
+    /// not name, with a log listing alpha's newer build, bravo, and charlie.
+    fn pack_carrying_a_log(dir: &Path) -> std::path::PathBuf {
+        let log = format!("[17:08:03] [Render thread/INFO]: {}", client_report());
+        let archive = dir.join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[
+                ("overrides/mods/alpha-0.9.jar", ALPHA_OLD),
+                ("overrides/mods/bravo.jar", BRAVO),
+                ("overrides/mods/delta.jar", DELTA),
+                ("overrides/logs/latest.log", log.as_bytes()),
+            ],
+        );
+        archive
+    }
+
+    async fn import_pack(app: &App, archive: &Path, apply: bool) -> ImportedPack {
+        app.import_pack(
+            &ImportRequest::new(archive)
+                .with_storage(StorageClass::Temporary)
+                .applying_logged_mods(apply),
+            &OperationReporter::silent("import-pack"),
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("import")
+    }
+
+    #[test]
+    fn a_pack_carrying_a_hashed_log_says_so_before_import() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(directory.path())).expect("open app");
+        let archive = pack_carrying_a_log(directory.path());
+
+        let analysis = app.analyze_pack(&archive).expect("analysis");
+
+        let logged = analysis.logged_mods.as_ref().expect("the carried log");
+        assert_eq!(logged.source, "logs/latest.log");
+        assert_eq!(logged.list.hashed().count(), 3);
+        assert!(
+            !analysis.needs_provider_resolution(),
+            "a carried log is looked up only once the user asks for it"
+        );
+    }
+
+    #[test]
+    fn a_log_of_another_game_version_is_not_offered() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(directory.path())).expect("open app");
+        let other =
+            client_report().replace("Minecraft Version: 1.21.1", "Minecraft Version: 1.20.1");
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(&archive, &[("overrides/logs/latest.log", other.as_bytes())]);
+
+        let analysis = app.analyze_pack(&archive).expect("analysis");
+
+        assert!(analysis.logged_mods.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_pack_imports_as_published_unless_asked_to_match_its_log() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        modrinth_knows_alpha(&server, "client_and_server").await;
+        let app = app_against(directory.path(), &server, false);
+        let archive = pack_carrying_a_log(directory.path());
+
+        let imported = import_pack(&app, &archive, false).await;
+
+        assert_eq!(
+            mods_of(&imported),
+            ["alpha-0.9.jar", "bravo.jar", "delta.jar"]
+        );
+        assert!(imported.unlisted.disabled.is_empty());
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "no catalog is asked about a log the user did not choose"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pack_made_to_match_its_log_adds_what_it_lacks_and_disables_the_rest() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        modrinth_knows_alpha(&server, "client_and_server").await;
+        let app = app_against(directory.path(), &server, false);
+        let archive = pack_carrying_a_log(directory.path());
+
+        let imported = import_pack(&app, &archive, true).await;
+
+        assert_eq!(
+            mods_of(&imported),
+            [
+                "alpha-0.9.jar.disabled",
+                "alpha-1.0.jar",
+                "bravo.jar",
+                "delta.jar.disabled"
+            ]
+        );
+        assert_eq!(
+            imported.unlisted.disabled,
+            [
+                std::path::PathBuf::from("mods/alpha-0.9.jar"),
+                std::path::PathBuf::from("mods/delta.jar")
+            ]
+        );
+        assert_eq!(
+            asked(&server, "/v2/version_files").await,
+            [sha1_hex(ALPHA), sha1_hex(CHARLIE)],
+            "bravo ships with the pack, so it is not looked up"
+        );
+        assert_eq!(imported.analysis.missing_logged_files.len(), 1, "charlie");
+    }
+
+    #[test]
+    fn a_pack_whose_log_has_no_hashes_offers_its_newest_crash_report() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(directory.path())).expect("open app");
+        let older = report(
+            "Integrated Server (map_client.txt)",
+            &[row("old-1.0.jar", "old", ALPHA_OLD)],
+        );
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[
+                (
+                    "overrides/logs/latest.log",
+                    b"[17:02:15] [main/INFO]: no crash here\n",
+                ),
+                (
+                    "overrides/crash-reports/crash-2026-01-01_10.00.00-client.txt",
+                    older.as_bytes(),
+                ),
+                (
+                    "overrides/crash-reports/crash-2026-02-01_10.00.00-client.txt",
+                    client_report().as_bytes(),
+                ),
+            ],
+        );
+
+        let analysis = app.analyze_pack(&archive).expect("analysis");
+
+        let logged = analysis.logged_mods.as_ref().expect("the carried report");
+        assert_eq!(
+            logged.source,
+            "crash-reports/crash-2026-02-01_10.00.00-client.txt"
+        );
+        assert!(logged.crash_report);
+        assert_eq!(logged.list.hashed().count(), 3);
+    }
+
+    #[test]
+    fn a_dedicated_server_report_in_a_client_pack_is_not_offered() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(directory.path())).expect("open app");
+        let server_report = report(
+            "Dedicated Server (map_server.txt)",
+            &[row("alpha-1.0.jar", "alpha", ALPHA)],
+        );
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[(
+                "overrides/crash-reports/crash-2026-02-01_10.00.00-server.txt",
+                server_report.as_bytes(),
+            )],
+        );
+
+        let analysis = app.analyze_pack(&archive).expect("analysis");
+
+        assert!(analysis.logged_mods.is_none());
+    }
+
+    #[test]
+    fn an_older_crash_report_is_used_when_the_newest_has_no_hashed_list() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let app = App::open_at(Paths::rooted_at(directory.path())).expect("open app");
+        let unhashed = report(
+            "Integrated Server (map_client.txt)",
+            &["\t\tearly.jar |Early |early |1.0 |Manifest: NOSIGNATURE".to_owned()],
+        );
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[
+                (
+                    "overrides/crash-reports/crash-2026-01-01_10.00.00-client.txt",
+                    client_report().as_bytes(),
+                ),
+                (
+                    "overrides/crash-reports/crash-2026-02-01_10.00.00-client.txt",
+                    unhashed.as_bytes(),
+                ),
+            ],
+        );
+
+        let analysis = app.analyze_pack(&archive).expect("analysis");
+
+        assert_eq!(
+            analysis
+                .logged_mods
+                .as_ref()
+                .map(|logged| logged.source.as_str()),
+            Some("crash-reports/crash-2026-01-01_10.00.00-client.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_jar_whose_disabled_name_the_pack_already_ships_stays_and_the_import_completes() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        modrinth_knows_alpha(&server, "client_and_server").await;
+        let app = app_against(directory.path(), &server, false);
+        let log = client_report();
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[
+                ("overrides/mods/delta.jar", DELTA),
+                ("overrides/mods/delta.jar.disabled", ALPHA_OLD),
+                ("overrides/logs/latest.log", log.as_bytes()),
+            ],
+        );
+
+        let imported = import_pack(&app, &archive, true).await;
+
+        assert_eq!(
+            mods_of(&imported),
+            ["alpha-1.0.jar", "delta.jar", "delta.jar.disabled"]
+        );
+        assert!(imported.unlisted.disabled.is_empty());
+        assert_eq!(
+            imported.unlisted.left_enabled,
+            [std::path::PathBuf::from("mods/delta.jar")],
+            "the jar that could not be disabled is reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_catalog_file_cannot_take_the_name_of_a_jar_the_pack_ships() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let server = MockServer::start().await;
+        modrinth_knows_alpha(&server, "client_and_server").await;
+        let app = app_against(directory.path(), &server, false);
+        let log = client_report();
+        let archive = directory.path().join("repro.mrpack");
+        mrpack(
+            &archive,
+            &[
+                // The pack's own patched build under the catalog file's name.
+                ("overrides/mods/alpha-1.0.jar", ALPHA_OLD),
+                ("overrides/logs/latest.log", log.as_bytes()),
+            ],
+        );
+
+        let imported = import_pack(&app, &archive, true).await;
+
+        assert_eq!(mods_of(&imported), ["alpha-1.0.jar.disabled"]);
+        assert!(
+            imported
+                .analysis
+                .missing_logged_files
+                .iter()
+                .any(|row| row.mod_id == "alpha"),
+            "the logged alpha could not be placed, so it is named as missing"
+        );
     }
 }
