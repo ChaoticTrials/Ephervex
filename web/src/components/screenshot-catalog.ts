@@ -47,6 +47,8 @@ export const catalogGroups: CatalogGroup[] = [
       {state: 'import-modpack-resolving', title: 'Reading a pack'},
       {state: 'import-modpack-ready', title: 'Pack ready to import'},
       {state: 'import-modpack-duplicates', title: 'Duplicate projects in a pack'},
+      {state: 'import-modpack-logged-prompt', title: 'A pack carrying a hashed log'},
+      {state: 'import-crash-report', title: 'Rebuilding a pack from a crash report'},
       {state: 'import-modpack-manual-download', title: 'Manual CurseForge download', regions: {'blocked-file': 'Open in Browser'}},
       {state: 'import-modpack-credential-missing', title: 'CurseForge key missing'},
       {state: 'import-modpack-running', title: 'Import in progress'},

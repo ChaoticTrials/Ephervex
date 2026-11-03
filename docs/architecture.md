@@ -1317,6 +1317,18 @@ stays an ordinary download failure. A cache that cannot be *read* is neither: it
 is a local storage failure, reported as itself rather than recovered from by
 fetching.
 
+A crash report or `latest.log` whose mod list records each jar's hashes enters
+the same flow without an archive (ADR 0059). `ephervex-pack` reads the last
+hashed `Mod List:` table and the exact game from the report, and its recipe
+starts with no files. `ephervex-core` looks each hashed jar up in the preferred
+catalog by SHA-1 or by CurseForge fingerprint, then in the other one, and turns
+the matches into ordinary recipe entries; CurseForge matches go through the same
+exact file resolution a CurseForge export does. The recipe is installed and
+retained without an archive, and the report is copied into the instance. A pack
+whose client layers carry such a list reports it at analysis, and an import
+asked to apply it adds what the pack lacks, replaces superseded pack files, and
+disables the pack mods the list does not name.
+
 ## Mod-installation data flow
 
 ```text

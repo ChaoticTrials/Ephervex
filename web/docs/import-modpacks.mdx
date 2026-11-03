@@ -1,6 +1,6 @@
 ---
 title: Import Modpacks
-description: Import Modrinth and CurseForge packs from files or links.
+description: Import Modrinth and CurseForge packs from files or links, or rebuild one from a crash report.
 ---
 
 import Tabs from '@theme/Tabs';
@@ -10,9 +10,10 @@ import {manualDownloadCallouts} from '@site/src/components/screenshot-callouts';
 
 # Import Modpacks
 
-Ephervex imports Modrinth `.mrpack` archives and CurseForge modpack exports.
-It reads the pack's Minecraft release and loader selection rather than choosing
-newer versions for you. Other launcher exports, including Prism and MultiMC,
+Ephervex imports Modrinth `.mrpack` archives and CurseForge modpack exports,
+and can rebuild a pack from a crash report or `latest.log` whose mod list
+records each mod's hashes. It reads the pack's Minecraft release and loader
+selection rather than choosing newer versions for you. Other launcher exports, including Prism and MultiMC,
 are not supported. The archive is identified by its contents, so changing its
 file extension does not change its format. Release builds include the
 CurseForge API access needed for imports; no key setup is required.
@@ -160,6 +161,85 @@ ephervex config pack-hosts --forget example.com
 
 `--inspect` on a URL downloads the archive and asks for host approval before
 reporting its contents; it does not create an instance.
+
+</TabItem>
+</Tabs>
+
+## Rebuild a pack from a crash report or log
+
+LibX can add a SHA1 and a Murmur2 hash for each mod to the `Mod List` of a crash
+report. The game prints the same report into `latest.log` when it crashes. From
+either file Ephervex creates a client instance for the exact Minecraft release
+and Forge or NeoForge build the report names, and installs each mod it can find
+by its hash. A file whose mod list has no hashes is refused.
+
+Each hash is looked up in your preferred mod catalog first and in the other one
+only for what the first did not have. Set the preferred catalog under
+**Settings > Providers & APIs > Preferred catalog**. A mod is matched by its exact file, never
+by its name or version. A mod neither catalog can provide is left out and listed
+on the new instance as needing attention. CurseForge is searched only when an
+API key is available. The report itself is copied into the instance, so the
+logs view and crash review show it.
+
+A report written by a dedicated server still creates a client instance. Mods
+the catalog says no client runs are kept for the server side, and the desktop
+turns on **Also create a linked server**.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+Select **Import Modpack**, then **Browse**, and choose the crash report or log.
+The import dialog shows the mod list and, once the catalogs are searched, the
+mods that will be left out.
+
+<ThemeScreenshot state="import-crash-report" alt="Import dialog for a crash report showing its mod list, two mods that will be left out, and a note that CurseForge was not searched" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+Pass the file like an archive. `--inspect` reads it without searching the
+catalogs:
+
+```bash
+ephervex import crash-2026-11-02_17.08.01-client.txt --inspect
+ephervex import logs/latest.log --name "Crash Repro"
+```
+
+The command lists the mods it left out after the import.
+
+</TabItem>
+</Tabs>
+
+### Match a pack to the log it carries
+
+A pack can carry the reporter's `logs/latest.log` or crash reports in its
+overrides. When the log's mod list has hashes and names the pack's own
+Minecraft release and loader, Ephervex offers to make the instance match it.
+The log is preferred; otherwise the newest crash report with such a list is
+used. Applying it adds the mods the pack lacks, replaces a pack mod the list
+names at another version, and disables the pack mods the list does not name.
+Disabled mods stay in the instance and can be turned back on. A server created
+from the instance later installs them again.
+
+<Tabs groupId="interface" queryString="interface">
+<TabItem value="gui" label="Desktop" default>
+
+The import dialog asks whether to import the logged mods as well. Neither
+answer is preselected, and the pack cannot be imported until you choose.
+
+<ThemeScreenshot state="import-modpack-logged-prompt" alt="Import the logged mods question over the import dialog, naming logs/latest.log, with No and Yes" />
+
+</TabItem>
+<TabItem value="cli" label="CLI">
+
+The pack imports as published unless you pass `--logged-mods`:
+
+```bash
+ephervex import pack.mrpack --inspect
+ephervex import pack.mrpack --logged-mods
+```
+
+`--inspect` says when a pack carries such a list.
 
 </TabItem>
 </Tabs>

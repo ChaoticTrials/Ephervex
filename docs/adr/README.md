@@ -64,3 +64,4 @@ trail survives. Number 0056 is unused.
 | [0055](0055-resource-shader-and-data-packs-are-recognized-by-location-and-kept-out-of-the-mod-list.md) | Resource packs, shader packs, and data packs are recognized by location and kept out of the mod list | Accepted |
 | [0057](0057-workbench-is-the-built-in-look-in-a-light-and-a-dark-palette.md) | Workbench is the built-in look, in a light and a dark palette | Accepted (amends ADR 0041, ADR 0042 and ADR 0049) |
 | [0058](0058-a-host-keeps-a-bounded-history-under-the-state-root.md) | A host keeps a bounded history under the state root | Accepted |
+| [0059](0059-a-hashed-mod-list-is-an-import-source.md) | A hashed mod list is an import source | Accepted |
