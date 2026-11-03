@@ -746,6 +746,29 @@ fn render_import_flow(ui: &AppWindow, state: &ImportFlowState) {
         })
         .collect();
     ui.set_import_duplicate_items(model(duplicate_rows));
+
+    let facts = state.presentation.as_ref();
+    ui.set_import_mod_list_line(
+        facts
+            .map(ImportPresentation::mod_list_line)
+            .unwrap_or_default()
+            .into(),
+    );
+    ui.set_import_mod_list_prompt(
+        facts
+            .filter(|_| state.awaits_mod_list_answer())
+            .map(ImportPresentation::mod_list_prompt)
+            .unwrap_or_default()
+            .into(),
+    );
+    let missing: Vec<SharedString> = facts
+        .map(|facts| facts.missing_logged.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(SharedString::from)
+        .collect();
+    ui.set_import_missing_items(model(missing));
+    ui.set_import_curseforge_not_asked(facts.is_some_and(|facts| facts.curseforge_not_asked));
 }
 
 fn register_import_flow(
@@ -766,6 +789,7 @@ fn register_import_flow(
         // dialog happens to close.
         let generation = pick_state.borrow_mut().begin_attempt();
         if let Some(ui) = weak.upgrade() {
+            ui.set_import_create_server(false);
             set_server_pack(&ui, ServerPackTarget::Import, None);
             render_import_flow(&ui, &pick_state.borrow());
         }
@@ -777,6 +801,7 @@ fn register_import_flow(
     ui.on_open_import_modal(move || {
         open_state.borrow_mut().reset();
         if let Some(ui) = weak.upgrade() {
+            ui.set_import_create_server(false);
             set_server_pack(&ui, ServerPackTarget::Import, None);
             render_import_flow(&ui, &open_state.borrow());
             ui.set_modal_error(SharedString::default());
@@ -815,6 +840,26 @@ fn register_import_flow(
     let edited_state = Rc::clone(import_flow);
     ui.on_import_name_edited(move |_text| {
         edited_state.borrow_mut().mark_name_edited();
+    });
+
+    let sender = commands.clone();
+    let weak = ui.as_weak();
+    let answer_state = Rc::clone(import_flow);
+    ui.on_answer_import_mod_list(move |apply| {
+        let rerun = answer_state.borrow_mut().answer_mod_list(apply);
+        if let Some((generation, archive)) = rerun {
+            send(
+                &sender,
+                Command::AnalyzeImport {
+                    generation,
+                    archive,
+                    logged_mods: true,
+                },
+            );
+        }
+        if let Some(ui) = weak.upgrade() {
+            render_import_flow(&ui, &answer_state.borrow());
+        }
     });
 
     register_blocked_file_actions(ui, import_flow);
@@ -899,6 +944,7 @@ fn register_import_submission(
                     .then(|| PathBuf::from(server_pack.as_str())),
                 issue_link: submission.issue_link,
                 instance,
+                logged_mods: submission.logged_mods,
             },
         );
     });
@@ -1364,6 +1410,8 @@ struct PreparedImportSubmission {
     selection: OptionalSelection,
     skip_blocked: Vec<ProviderFileIdentity>,
     issue_link: Option<String>,
+    /// Whether the user chose to apply the mod list the pack carries.
+    logged_mods: bool,
 }
 
 /// A change to a host's mods that isolation has asked the worker for.
@@ -2247,6 +2295,12 @@ struct ImportFlowState {
     /// state-specific affordance (like opening Providers & APIs for a
     /// credential problem) without ever pattern-matching `error`'s text.
     error_kind: ImportErrorKind,
+    /// The user's answer to whether a mod list the pack carries is applied.
+    /// `None` until asked and answered; nothing is chosen for them.
+    mod_list_answer: Option<bool>,
+    /// Set while the same archive is analyzed again with its mod list
+    /// applied, so the name typed and the optional files chosen survive it.
+    reanalyzing: bool,
 }
 
 impl ImportFlowState {
@@ -2309,15 +2363,28 @@ impl ImportFlowState {
             return false;
         }
         self.archive = archive;
-        self.options.clear();
+        let reanalyzing = std::mem::take(&mut self.reanalyzing);
+        let previous = std::mem::take(&mut self.options);
         self.error.clear();
         self.error_kind = ImportErrorKind::default();
-        self.name_edited = false;
+        if !reanalyzing {
+            self.name_edited = false;
+        }
         self.suggested_name.clear();
         match result {
             Ok(presentation) => {
                 self.suggested_name.clone_from(&presentation.name);
                 self.options = options_from(&presentation);
+                if reanalyzing {
+                    for option in &mut self.options {
+                        if let Some(chosen) = previous
+                            .iter()
+                            .find(|chosen| chosen.logical_path == option.logical_path)
+                        {
+                            option.selected = chosen.selected;
+                        }
+                    }
+                }
                 self.blocked = blocked_from(&presentation, &self.skipped);
                 self.phase = if presentation.needs_provider_resolution {
                     ImportPhase::Resolving
@@ -2413,7 +2480,39 @@ impl ImportFlowState {
     /// unaccounted for: [`Self::skip_blocked_file`] or a watcher match
     /// clears each one, or the pack simply had none.
     fn is_ready(&self) -> bool {
-        matches!(self.phase, ImportPhase::Ready) && self.blocked.is_empty()
+        matches!(self.phase, ImportPhase::Ready)
+            && self.blocked.is_empty()
+            && !self.awaits_mod_list_answer()
+    }
+
+    /// Whether the pack carries a mod list the user has not yet answered for.
+    fn awaits_mod_list_answer(&self) -> bool {
+        self.mod_list_answer.is_none()
+            && self
+                .presentation
+                .as_ref()
+                .and_then(|facts| facts.mod_list.as_ref())
+                .is_some_and(|list| list.offered)
+    }
+
+    /// Records the answer about a carried mod list. With yes, returns the
+    /// analysis to run again with the list applied; with no, the pack imports
+    /// as published and there is nothing more to run.
+    fn answer_mod_list(&mut self, apply: bool) -> Option<(u64, PathBuf)> {
+        if !self.awaits_mod_list_answer() {
+            return None;
+        }
+        self.mod_list_answer = Some(apply);
+        if !apply {
+            return None;
+        }
+        // A fresh generation, so a result still on its way for the analysis
+        // without the list cannot land on this one.
+        self.next_generation = self.next_generation.saturating_add(1);
+        self.tracked_generation = Some(self.next_generation);
+        self.reanalyzing = true;
+        self.phase = ImportPhase::Analyzing;
+        Some((self.next_generation, self.archive.clone()))
     }
 
     /// Tries to move into `Submitting`, returning everything `ImportPack`
@@ -2438,6 +2537,7 @@ impl ImportFlowState {
             selection: self.selection(),
             skip_blocked: self.skipped.clone(),
             issue_link: self.issue_link.clone(),
+            logged_mods: self.mod_list_answer == Some(true),
         })
     }
 
@@ -2731,6 +2831,7 @@ fn begin_import(
         state.issue_link = issue_link;
         generation
     };
+    ui.set_import_create_server(false);
     set_server_pack(ui, ServerPackTarget::Import, None);
     render_import_flow(ui, &flow.borrow());
     ui.set_modal_error(SharedString::default());
@@ -2740,6 +2841,7 @@ fn begin_import(
         Command::AnalyzeImport {
             generation,
             archive,
+            logged_mods: false,
         },
     );
 }
@@ -9618,6 +9720,7 @@ fn apply_event(
                     Command::AnalyzeImport {
                         generation,
                         archive,
+                        logged_mods: false,
                     },
                 );
             }
@@ -9631,9 +9734,20 @@ fn apply_event(
             archive,
             result,
         } => {
+            // A dedicated server's mod list is rebuilt with its linked server
+            // offered from the start.
+            let server_list = result
+                .as_ref()
+                .ok()
+                .and_then(|facts| facts.mod_list.as_ref())
+                .filter(|list| !list.offered)
+                .map(|list| list.server);
             let applied = import_flow
                 .borrow_mut()
                 .analyzed(generation, archive, result);
+            if applied && let Some(server) = server_list {
+                ui.set_import_create_server(server);
+            }
             apply_import_result(ui, import_flow, applied);
         }
         Event::ImportResolved { generation, result } => {
@@ -23686,6 +23800,9 @@ mod tests {
             needs_provider_resolution: needs_resolution,
             blocked: Vec::new(),
             duplicate_files: Vec::new(),
+            mod_list: None,
+            missing_logged: Vec::new(),
+            curseforge_not_asked: false,
         }
     }
 
@@ -23707,6 +23824,63 @@ mod tests {
             browser_url: "https://www.curseforge.com/minecraft/mc-mods/blocked-mod".to_owned(),
         }];
         presentation
+    }
+
+    fn carried_list_presentation(offered: bool) -> ImportPresentation {
+        let mut presentation = resolved_presentation("Example Pack", false);
+        presentation.mod_list = Some(presentation::ModListPresentation {
+            source: "logs/latest.log".to_owned(),
+            offered,
+            hashed: 3,
+            jars: 4,
+            server: false,
+        });
+        presentation
+    }
+
+    #[test]
+    fn a_carried_mod_list_keeps_the_flow_out_of_ready_until_answered() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.mrpack"),
+            Ok(carried_list_presentation(true)),
+        );
+        assert!(!flow.is_ready(), "neither answer is chosen for the user");
+
+        assert_eq!(flow.answer_mod_list(false), None);
+        assert!(flow.is_ready());
+        assert!(!flow.begin_submit().expect("ready").logged_mods);
+    }
+
+    #[test]
+    fn answering_yes_analyzes_again_with_the_list_applied() {
+        let mut flow = ImportFlowState::default();
+        let generation = flow.begin_attempt();
+        flow.analyzed(
+            generation,
+            PathBuf::from("pack.mrpack"),
+            Ok(carried_list_presentation(true)),
+        );
+
+        flow.mark_name_edited();
+        let (rerun, archive) = flow.answer_mod_list(true).expect("analyzed again");
+        assert_eq!(archive, PathBuf::from("pack.mrpack"));
+        assert_ne!(rerun, generation, "a fresh attempt");
+        assert!(!flow.is_ready(), "the applied list is still being read");
+        assert!(
+            !flow.resolved(generation, Ok(carried_list_presentation(true))),
+            "a result for the analysis without the list is discarded"
+        );
+        flow.analyzed(
+            rerun,
+            PathBuf::from("pack.mrpack"),
+            Ok(carried_list_presentation(false)),
+        );
+        assert!(flow.name_edited, "the name the user typed survives");
+        assert!(flow.is_ready());
+        assert!(flow.begin_submit().expect("ready").logged_mods);
     }
 
     #[test]
@@ -24075,6 +24249,7 @@ mod tests {
             selection: OptionalSelection::of(["mods/optional-b.jar"]),
             skip_blocked: Vec::new(),
             issue_link: None,
+            logged_mods: false,
         };
         assert_eq!(flow.begin_submit(), Some(expected.clone()));
         assert_eq!(flow.phase, ImportPhase::Submitting);
@@ -24146,6 +24321,7 @@ mod tests {
                 selection: OptionalSelection::of(["mods/optional-a.jar", "mods/optional-b.jar"]),
                 skip_blocked: Vec::new(),
                 issue_link: None,
+                logged_mods: false,
             }),
             "the archive submitted must be exactly the one the current analysis is for; \
              `begin_submit` takes no archive argument, so nothing else could have supplied one"

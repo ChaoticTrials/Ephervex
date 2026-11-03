@@ -3506,9 +3506,22 @@ gui-minecraft-release = Minecraft release
 gui-loader-version-placeholder = Exact loader version
 gui-store-persistently = Store persistently
 gui-create-instance = Create Instance
-gui-import-detail = Supported archives are inspected and imported through Ephervex application services. Imported commands and unsafe paths are never executed.
+gui-import-detail = Supported archives are inspected and imported through Ephervex application services. Imported commands and unsafe paths are never executed. A crash report or latest.log whose mod list records each mod's hashes is rebuilt from the mod catalogs.
 gui-modpack-archive = Modpack archive
-gui-modpack-placeholder = Choose a .mrpack or supported .zip
+gui-modpack-placeholder = Choose a .mrpack, a supported .zip, or a crash report or log
+gui-import-supported-files = Modpacks, crash reports and logs
+gui-crash-reports-and-logs = Crash reports and logs
+gui-import-mod-list = Mod list: { $source }, { $hashed } of { $count } mods hashed
+gui-import-mod-list-title = Import the logged mods?
+gui-import-mod-list-prompt = Hashes detected in { $source }. Should the mods it lists be imported as well? Pack mods the list does not name are then disabled.
+gui-answer-yes = Yes
+gui-answer-no = No
+gui-hint-import-mod-list = Answer whether to import the logged mods first.
+gui-import-missing-detail = { $count ->
+        [one] { $count } mod in the mod list cannot be downloaded automatically and will be left out:
+       *[other] { $count } mods in the mod list cannot be downloaded automatically and will be left out:
+    }
+gui-import-curseforge-not-asked = CurseForge was not searched for them, because no CurseForge API key is set.
 gui-drop-to-import = Drop to import
 gui-drop-to-import-detail = The archive is inspected by its contents, not by its name.
 gui-browse = Browse...

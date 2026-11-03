@@ -653,6 +653,14 @@ export component AppWindow inherits Window {
     in-out property <[ImportOptionRow]> import-optional-items;
     in-out property <[BlockedFileRow]> import-blocked-items;
     in-out property <[ImportDuplicateRow]> import-duplicate-items;
+    // The hashed mod list the import is rebuilt from, as one line.
+    in-out property <string> import-mod-list-line;
+    // The question asked before a list the pack carries is applied; empty
+    // when there is nothing to ask.
+    in-out property <string> import-mod-list-prompt;
+    // The listed jars neither catalog could provide.
+    in-out property <[string]> import-missing-items;
+    in-out property <bool> import-curseforge-not-asked;
     // Whether the current archive has a successful, fully resolved
     // analysis: the only condition the Import button's `enabled` needs.
     in-out property <bool> import-ready;
@@ -980,6 +988,7 @@ export component AppWindow inherits Window {
     callback close-import-modal();
     callback choose-import-file();
     callback toggle-import-optional(string);
+    callback answer-import-mod-list(bool);
     callback skip-blocked-file(string);
     callback open-blocked-file(string);
     // Abandons a version change that is waiting on a release the user has
@@ -3247,6 +3256,23 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        if root.import-mod-list-line != "" : BodyText { text: root.import-mod-list-line; color: Theme.text-secondary; wrap: word-wrap; }
+                        if root.import-missing-items.length > 0 : BodyText { text: GuiI18n.count("gui-import-missing-detail", root.import-missing-items.length); color: Theme.warning; wrap: word-wrap; }
+                        if root.import-missing-items.length > 0 : ScrollView {
+                            content-width: self.width;
+                            height: min(root.import-missing-items.length * Theme.list-row-height, 7 * Theme.list-row-height);
+                            VerticalLayout {
+                                for item in root.import-missing-items : BodyText { text: item; height: Theme.list-row-height; overflow: elide; vertical-alignment: center; }
+                            }
+                        }
+                        if root.import-missing-items.length > 0 && root.import-curseforge-not-asked : BodyText { text: GuiI18n.text("gui-import-curseforge-not-asked"); color: Theme.text-muted; wrap: word-wrap; }
+                        if root.import-missing-items.length > 0 && root.import-curseforge-not-asked : HorizontalLayout {
+                            alignment: start;
+                            AppButton {
+                                text: GuiI18n.text("gui-import-open-providers");
+                                clicked => { root.close-import-modal(); root.open-settings("Providers & APIs"); }
+                            }
+                        }
                         if root.import-issue-link != "" : Text { text: GuiI18n.text("gui-issue-link"); color: Theme.text-secondary; font-size: Theme.label-size; }
                         if root.import-issue-link != "" : BodyText { text: root.import-issue-link; wrap: char-wrap; }
                         Text { text: GuiI18n.text("gui-instance-name-optional"); color: Theme.text-secondary; font-size: Theme.label-size; }
@@ -3287,7 +3313,7 @@ export component AppWindow inherits Window {
                     AppButton {
                         text: GuiI18n.text("gui-import-modpack");
                         tone: "primary";
-                        enabled: root.import-ready; hint: root.import-status-kind == "idle" ? GuiI18n.text("gui-hint-import-choose") : root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" ? GuiI18n.text("gui-hint-import-reading") : root.import-status-kind == "submitting" ? GuiI18n.text("gui-hint-import-running") : root.import-status-kind == "failed" ? GuiI18n.text("gui-hint-import-failed") : GuiI18n.text("gui-hint-import-blocked");
+                        enabled: root.import-ready; hint: root.import-mod-list-prompt != "" ? GuiI18n.text("gui-hint-import-mod-list") : root.import-status-kind == "idle" ? GuiI18n.text("gui-hint-import-choose") : root.import-status-kind == "analyzing" || root.import-status-kind == "resolving" ? GuiI18n.text("gui-hint-import-reading") : root.import-status-kind == "submitting" ? GuiI18n.text("gui-hint-import-running") : root.import-status-kind == "failed" ? GuiI18n.text("gui-hint-import-failed") : GuiI18n.text("gui-hint-import-blocked");
                         clicked => { root.submit-import(root.import-name, root.create-persistent, root.import-create-server, root.import-server-pack); }
                     }
                 }
@@ -3981,6 +4007,35 @@ export component AppWindow inherits Window {
                         third-party-license := Text { text: root.third-party-packages[root.third-party-open].text; width: parent.width; color: Theme.text-secondary; font-family: Theme.mono-family; font-size: Theme.label-size; wrap: word-wrap; }
                     }
                     ActionRow { AppButton { text: GuiI18n.text("gui-third-party-back"); clicked => { root.third-party-open = -1; } } Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-close"); tone: "primary"; clicked => { root.modal = ""; } } }
+                }
+            }
+        }
+    }
+
+    // Asked on top of the import dialog, with neither answer chosen for the
+    // user.
+    if root.modal == "import" && root.import-mod-list-prompt != "" : Rectangle {
+        background: Theme.scrim;
+        TouchArea { clicked => { } }
+        Plate {
+            width: min(480px, parent.width - 80px);
+            height: prompt-body.preferred-height;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            radius: Theme.dialog-radius;
+            lift: Theme.shadow-offset-dialog;
+            fill: Theme.elevated;
+            accessible-role: groupbox;
+            accessible-label: GuiI18n.text("gui-import-mod-list-title");
+            prompt-body := VerticalLayout {
+                padding: 22px;
+                spacing: 14px;
+                DisplayHeading { text: GuiI18n.text("gui-import-mod-list-title"); font-size: Theme.modal-title-size; wrap: word-wrap; }
+                BodyText { text: root.import-mod-list-prompt; wrap: word-wrap; }
+                ActionRow {
+                    Rectangle { horizontal-stretch: 1; }
+                    AppButton { text: GuiI18n.text("gui-answer-no"); clicked => { root.answer-import-mod-list(false); } }
+                    AppButton { text: GuiI18n.text("gui-answer-yes"); clicked => { root.answer-import-mod-list(true); } }
                 }
             }
         }

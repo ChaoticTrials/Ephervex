@@ -168,6 +168,65 @@ pub(crate) fn import_modpack_duplicates(ui: &AppWindow) {
     }]));
 }
 
+/// A synthetic crash report whose mod list records each jar's hashes.
+const CRASH_REPORT: PackFacts = PackFacts {
+    format: "Mod list",
+    name: "1.20.1-Forge-47.4.10",
+    version: "",
+    author: "",
+    minecraft: "1.20.1",
+    loader: FORGE_1_20.display,
+    required: 46,
+    optional: 0,
+    archive: "/demo/downloads/crash-2026-11-02_17.08.01-client.txt",
+};
+
+/// The question asked before a pack's own `latest.log` is applied.
+pub(crate) fn import_modpack_logged_prompt(ui: &AppWindow) {
+    open_import(ui, &CAVESTONE, "ready");
+    ui.set_import_ready(false);
+    ui.set_import_mod_list_line(
+        lookup_args(
+            "gui-import-mod-list",
+            [
+                ("source", Arg::from("logs/latest.log")),
+                ("hashed", Arg::from(48)),
+                ("count", Arg::from(52)),
+            ],
+        )
+        .into(),
+    );
+    ui.set_import_mod_list_prompt(
+        lookup_args(
+            "gui-import-mod-list-prompt",
+            [("source", Arg::from("logs/latest.log"))],
+        )
+        .into(),
+    );
+}
+
+/// A crash report rebuilt from the catalogs, with the jars neither had.
+pub(crate) fn import_crash_report(ui: &AppWindow) {
+    open_import(ui, &CRASH_REPORT, "ready");
+    ui.set_import_ready(true);
+    ui.set_import_mod_list_line(
+        lookup_args(
+            "gui-import-mod-list",
+            [
+                ("source", Arg::from("crash-2026-11-02_17.08.01-client.txt")),
+                ("hashed", Arg::from(48)),
+                ("count", Arg::from(52)),
+            ],
+        )
+        .into(),
+    );
+    ui.set_import_missing_items(rows(strings(&[
+        "cavestone-tweaks-dev.jar (cavestone_tweaks)",
+        "obsidian-mirror-1.20.1-0.9.1.jar (obsidian_mirror)",
+    ])));
+    ui.set_import_curseforge_not_asked(true);
+}
+
 pub(crate) fn import_modpack_manual_download(ui: &AppWindow) {
     open_import(ui, &CONTAINMENT_LAB, "ready");
     ui.set_import_ready(false);

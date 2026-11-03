@@ -225,6 +225,9 @@ pub enum Command {
     AnalyzeImport {
         generation: u64,
         archive: PathBuf,
+        /// Whether a mod list the pack carries is applied, as the user
+        /// answered.
+        logged_mods: bool,
     },
     /// Abandons whatever provider resolution is still running for the import
     /// modal: a superseding archive pick already does this on its own before
@@ -295,6 +298,8 @@ pub enum Command {
         /// The id the instance takes, chosen up front so the window can open
         /// it and hold changes for it while the import runs.
         instance: InstanceId,
+        /// Whether to make the instance match the mod list the pack carries.
+        logged_mods: bool,
     },
     LaunchClient {
         instance: InstanceId,
@@ -3461,7 +3466,12 @@ fn run_worker(
                 spawn_dialog(&dialogs, move || {
                     let picked = rfd::FileDialog::new()
                         .set_title(lookup("gui-choose-modpack-archive"))
+                        .add_filter(
+                            lookup("gui-import-supported-files"),
+                            &["mrpack", "zip", "txt", "log"],
+                        )
                         .add_filter(lookup("gui-modpack-archives"), &["mrpack", "zip"])
+                        .add_filter(lookup("gui-crash-reports-and-logs"), &["txt", "log"])
                         .pick_file();
                     let _ = events.send(match picked {
                         Some(archive) => Event::ImportArchivePicked {
@@ -3475,11 +3485,13 @@ fn run_worker(
             Command::AnalyzeImport {
                 generation,
                 archive,
+                logged_mods,
             } => {
                 if let Some(previous) = import_resolve_cancel.take() {
                     previous.cancel();
                 }
-                import_resolve_cancel = analyze_import(&app, &events, generation, &archive);
+                import_resolve_cancel =
+                    analyze_import(&app, &events, generation, &archive, logged_mods);
             }
             Command::CancelImportAnalysis => {
                 if let Some(previous) = import_resolve_cancel.take() {
@@ -3642,6 +3654,7 @@ fn run_worker(
                 server_pack,
                 issue_link,
                 instance,
+                logged_mods,
             } => {
                 let paths = app.paths().clone();
                 spawn_import_submission(
@@ -3660,6 +3673,7 @@ fn run_worker(
                         server_pack,
                         issue_link,
                         instance,
+                        logged_mods,
                     },
                 );
             }
@@ -11280,8 +11294,14 @@ fn analyze_import(
     events: &Sender<Event>,
     generation: u64,
     archive: &Path,
+    logged_mods: bool,
 ) -> Option<CancellationToken> {
-    match app.analyze_pack(archive) {
+    let analysis = if logged_mods {
+        app.analyze_import(&ImportRequest::new(archive).applying_logged_mods(true))
+    } else {
+        app.analyze_pack(archive)
+    };
+    match analysis {
         Ok(analysis) => {
             let presentation = ImportPresentation::from_analysis(&analysis);
             let needs_resolution = presentation.needs_provider_resolution;
@@ -12803,6 +12823,27 @@ struct ImportSubmission {
     server_pack: Option<PathBuf>,
     issue_link: Option<String>,
     instance: InstanceId,
+    logged_mods: bool,
+}
+
+impl ImportSubmission {
+    /// The core request this submission asks for, taking the fields only the
+    /// request needs.
+    fn take_request(&mut self) -> ImportRequest {
+        let mut request = ImportRequest::new(&self.archive)
+            .with_storage(storage_class(self.persistent))
+            .selecting(std::mem::take(&mut self.selection))
+            .skipping_blocked(std::mem::take(&mut self.skip_blocked))
+            .with_instance_id(self.instance)
+            .applying_logged_mods(self.logged_mods);
+        if !self.name.trim().is_empty() {
+            request = request.named(std::mem::take(&mut self.name));
+        }
+        if let Some(issue_link) = self.issue_link.take() {
+            request = request.with_issue_link(issue_link);
+        }
+        request
+    }
 }
 
 /// The name a server takes when nobody types one: its client's or target's
@@ -12824,18 +12865,15 @@ fn spawn_import_submission(
     cancellations: CancellationRegistry,
     submission: ImportSubmission,
 ) {
+    let mut submission = submission;
+    let request = submission.take_request();
     let ImportSubmission {
         generation,
         archive,
-        name,
-        persistent,
-        selection,
-        skip_blocked,
         request_id,
         create_linked_server,
         server_pack,
-        issue_link,
-        instance,
+        ..
     } = submission;
     // Cloned for the setup-failure path, which runs instead of the body rather
     // than after it.
@@ -12862,17 +12900,6 @@ fn spawn_import_submission(
             reporter.begin(None);
             let cancel = CancellationToken::new();
             register_cancellation(&cancellations, &reporter, &cancel);
-            let mut request = ImportRequest::new(archive)
-                .with_storage(storage_class(persistent))
-                .selecting(selection)
-                .skipping_blocked(skip_blocked)
-                .with_instance_id(instance);
-            if !name.trim().is_empty() {
-                request = request.named(name);
-            }
-            if let Some(issue_link) = issue_link {
-                request = request.with_issue_link(issue_link);
-            }
             let result = runtime.block_on(app.import_pack(&request, &reporter, &cancel));
             // Closing the modal is not decided here: a receiver only closes
             // its own still-current attempt, which this thread cannot know.

@@ -251,6 +251,9 @@ export global Theme {
     // One row of a popup menu and the padding around its rows. Named because
     // a menu opened upward has to know how tall it will be.
     out property <length> menu-row-height: 30px * text-scale;
+    // One line of a plain text list, such as the mods an import leaves out,
+    // whose scroll height is counted from its rows.
+    out property <length> list-row-height: 24px * text-scale;
     out property <length> menu-frame-padding: 4px;
     // One host surface tab. Every tab is this wide so a tab bar can tell
     // how many fit before the rest move under More.

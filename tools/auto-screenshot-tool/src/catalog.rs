@@ -391,6 +391,20 @@ pub(crate) const STATES: &[State] = &[
         interaction: None,
     },
     State {
+        name: "import-modpack-logged-prompt",
+        show: fixtures::getting_started::import_modpack_logged_prompt,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
+        name: "import-crash-report",
+        show: fixtures::getting_started::import_crash_report,
+        regions: FULL_ONLY,
+        same_layout_at_both_sizes: false,
+        interaction: None,
+    },
+    State {
         name: "import-modpack-manual-download",
         show: fixtures::getting_started::import_modpack_manual_download,
         regions: MANUAL_DOWNLOAD_REGIONS,

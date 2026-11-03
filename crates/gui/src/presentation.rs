@@ -2595,6 +2595,27 @@ pub struct ImportPresentation {
     /// import is never blocked by this - shown so the choice is visible
     /// before the user commits, not just recorded afterward.
     pub duplicate_files: Vec<DuplicateFilePresentation>,
+    /// The hashed mod list the import is or could be rebuilt from.
+    pub mod_list: Option<ModListPresentation>,
+    /// The jars of that list neither catalog could provide, by file and mod id.
+    pub missing_logged: Vec<String>,
+    /// Whether CurseForge was left out of the lookup for want of an API key.
+    pub curseforge_not_asked: bool,
+}
+
+/// The hashed mod list of an import, as the dialog describes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModListPresentation {
+    /// The file it was read from, exactly as named: `logs/latest.log` or a
+    /// crash report's path for one a pack carries.
+    pub source: String,
+    /// Whether the pack carries it and the user has not yet said whether to
+    /// apply it.
+    pub offered: bool,
+    pub hashed: usize,
+    pub jars: usize,
+    /// Whether a dedicated server wrote it.
+    pub server: bool,
 }
 
 impl ImportPresentation {
@@ -2631,7 +2652,57 @@ impl ImportPresentation {
                 .iter()
                 .map(DuplicateFilePresentation::from_duplicate)
                 .collect(),
+            mod_list: analysis
+                .logged_mods
+                .as_ref()
+                .map(|logged| ModListPresentation {
+                    source: logged.source.clone(),
+                    offered: !logged.requested,
+                    hashed: logged.list.hashed().count(),
+                    jars: logged.list.rows.len(),
+                    server: logged.list.side == ephervex_core::LoggedSide::Server,
+                }),
+            missing_logged: analysis
+                .missing_logged_files
+                .iter()
+                .map(ephervex_core::LoggedModRow::label)
+                .collect(),
+            curseforge_not_asked: analysis.logged_mods.as_ref().is_some_and(|logged| {
+                logged
+                    .catalogs_not_asked
+                    .contains(&ephervex_model::ModProvider::CurseForge)
+            }),
         }
+    }
+
+    /// "Mod list: crash-....txt, 285 of 314 mods hashed", or empty without one.
+    #[must_use]
+    pub fn mod_list_line(&self) -> String {
+        self.mod_list.as_ref().map_or_else(String::new, |list| {
+            lookup_args(
+                "gui-import-mod-list",
+                [
+                    ("source", Arg::from(list.source.as_str())),
+                    ("hashed", Arg::from(list.hashed)),
+                    ("count", Arg::from(list.jars)),
+                ],
+            )
+        })
+    }
+
+    /// The question the dialog asks before applying a list a pack carries, or
+    /// empty when there is nothing to ask.
+    #[must_use]
+    pub fn mod_list_prompt(&self) -> String {
+        self.mod_list
+            .as_ref()
+            .filter(|list| list.offered)
+            .map_or_else(String::new, |list| {
+                lookup_args(
+                    "gui-import-mod-list-prompt",
+                    [("source", Arg::from(list.source.as_str()))],
+                )
+            })
     }
 
     /// "`CurseForge` - Example Pack 1.2.0"
@@ -2790,6 +2861,9 @@ mod import_tests {
             needs_provider_resolution: false,
             blocked: Vec::new(),
             duplicate_files: Vec::new(),
+            mod_list: None,
+            missing_logged: Vec::new(),
+            curseforge_not_asked: false,
         }
     }
 
