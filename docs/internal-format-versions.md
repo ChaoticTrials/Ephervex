@@ -33,6 +33,21 @@ reports it absent, and every read for showing or changing the client, and
 reconciliation, take it from the metadata. Both are additive fields of metadata
 version 1.
 
+## Changing a version after a release
+
+A version marks what a released build can read, so a change bumps it at most
+once per release:
+
+- Before bumping a constant, check whether its current value has been released:
+  find the commit that last changed it (`git log -S` on the constant) and whether
+  the latest release tag contains it (`git tag --contains <commit>`). If the
+  current value was released, bump it. If it was already bumped since the latest
+  release, keep it: no released build has written that value, so the earlier
+  unreleased bump already covers the new change.
+- The SQLite index follows the same rule with its migrations. If the newest
+  migration has not been released, edit it instead of adding another. Add a new
+  migration only when the newest one is in a released build.
+
 ## Persisted enum compatibility
 
 Unknown values are handled according to what the value authorizes:

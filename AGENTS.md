@@ -63,6 +63,7 @@ These instructions apply to the entire repository unless a more specific `AGENTS
 
 ## Rust and API quality
 
+- Before bumping an internal format version or adding a launcher index migration, follow "Changing a version after a release" in `docs/internal-format-versions.md`: bump or add only when the current value or newest migration has been released, and otherwise extend the unreleased one.
 - Prefer typed domain models over loosely related strings and booleans when invalid combinations can otherwise be represented.
 - Use `Result` and typed errors for recoverable failures. Do not add production `unwrap`, `expect`, `panic!`, `todo!`, or `dbg!` calls without a compelling invariant and an explicit justification.
 - Preserve error context without exposing secrets. Keep user-facing localization separate from low-level technical diagnostics.
