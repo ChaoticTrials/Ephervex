@@ -228,6 +228,10 @@ export global Theme {
     // ListView of several hundred rows only virtualizes when every row is
     // the same declared height, so the row and the list have to agree.
     out property <length> license-row-height: 30px;
+    // One mod's row in the Mods list, which is virtualized for the same
+    // reason: a pack's few hundred mods would otherwise all be laid out,
+    // drawn and described to assistive technology on every scroll step.
+    out property <length> mod-row-height: 62px * text-scale;
     // The smallest a pane of a split workspace is drawn. Below it the
     // panes keep this size and are cut off at the window's edge instead of
     // overlapping or squeezing their headers, and the pane geometry

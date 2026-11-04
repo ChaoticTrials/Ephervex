@@ -1,6 +1,6 @@
 // The Mods surface: mod cards, dependency impact and relation lists, and linked targets.
 
-import { ScrollView } from "std-widgets.slint";
+import { ListView, ScrollView } from "std-widgets.slint";
 import { ModArtwork } from "../components/artwork.slint";
 import { AppButton, EmptyState, IconButton, Pill, TextField, Toggle } from "../components/controls.slint";
 import { BodyText, Heading } from "../components/text.slint";
@@ -185,7 +185,7 @@ export component ModCard inherits Rectangle {
     // Decided by the pane, not by this row's own width, which the columns
     // themselves would then feed back into.
     in property <bool> compact;
-    height: 62px;
+    height: Theme.mod-row-height;
     background: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.12) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.12) : touch.has-hover && root.item.can-manage ? Theme.elevated : transparent;
     touch := TouchArea {
         enabled: root.item.can-manage;
@@ -327,7 +327,7 @@ export component ManagedModsPanel inherits Rectangle {
         }
         if root.host.mods.length > 0 : Rectangle {
             // As tall as its rows, and shorter than that when the page is.
-            preferred-height: list.preferred-height + 2 * Theme.strong-border-width;
+            preferred-height: root.host.mods.length * Theme.mod-row-height + 2 * Theme.strong-border-width;
             vertical-stretch: 0;
             min-height: 120px;
             border-radius: Theme.card-radius;
@@ -335,22 +335,30 @@ export component ManagedModsPanel inherits Rectangle {
             border-color: Theme.border-strong;
             background: Theme.surface;
             clip: true;
-            ScrollView {
-                content-width: self.width;
-                list := VerticalLayout {
-                    for mod[index] in root.host.mods : VerticalLayout {
-                        if index > 0 : Rectangle { height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
-                        ModCard {
-                            item: mod;
-                            compact: root.compact;
-                            togglable: !root.read-only;
-                            mods-are-the-users: root.mods-are-the-users;
-                            manage(path) => { root.manage(path); }
-                            toggle(path, on) => { root.toggle(path, on); }
-                            restore-file(path) => { root.restore-file(path); }
-                            delete-file(path, title) => { root.delete-file(mod, path, title); }
-                        }
+            mod-list := ListView {
+                x: Theme.strong-border-width;
+                y: Theme.strong-border-width;
+                width: parent.width - 2 * Theme.strong-border-width;
+                height: parent.height - 2 * Theme.strong-border-width;
+                // A row never scrolls sideways; the pane decides when it is
+                // compact instead.
+                content-width: self.visible-width;
+                // Every row the same declared height, which is what lets the
+                // list create only the rows in view.
+                for mod[index] in root.host.mods : Rectangle {
+                    height: Theme.mod-row-height;
+                    ModCard {
+                        width: parent.width;
+                        item: mod;
+                        compact: root.compact;
+                        togglable: !root.read-only;
+                        mods-are-the-users: root.mods-are-the-users;
+                        manage(path) => { root.manage(path); }
+                        toggle(path, on) => { root.toggle(path, on); }
+                        restore-file(path) => { root.restore-file(path); }
+                        delete-file(path, title) => { root.delete-file(mod, path, title); }
                     }
+                    if index > 0 : Rectangle { y: 0; height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
                 }
             }
         }

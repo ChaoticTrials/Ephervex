@@ -25848,4 +25848,21 @@ mod tests {
         );
         assert_eq!(super::cached_image("").size().width, 0);
     }
+
+    /// A pack's few hundred mods are not all built: the list creates only the
+    /// rows in view, which it can do only while every row declares the same
+    /// height. Built in full, every scroll step laid out, drew and described
+    /// to assistive technology each one.
+    #[test]
+    fn the_mods_list_builds_only_the_rows_in_view() {
+        let source = ui_markup();
+        assert!(source.contains("mod-list := ListView {"));
+        assert!(source.contains(
+            "for mod[index] in root.host.mods : Rectangle {\n                    height: Theme.mod-row-height;"
+        ));
+        assert!(source.contains(
+            "    height: Theme.mod-row-height;\n    background: root.item.suspect-confidence"
+        ));
+        assert!(source.contains("content-width: self.visible-width;"));
+    }
 }
