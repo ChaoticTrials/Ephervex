@@ -10971,6 +10971,7 @@ fn listed_instance(
         unstoppable_linked_servers: to_i32(item.unstoppable_linked_servers),
         mods: to_i32(item.managed_mods),
         needs_attention: item.needs_attention,
+        launch_blocked_hint: presentation::launch_blocked_hint(&item.problems).into(),
         state: item.state.into(),
         state_kind: item.state_kind.into(),
         can_launch: item.can_launch,
@@ -11025,7 +11026,9 @@ fn listed_instance(
         group_index,
         group_tone: group.map_or(0, |group| i32::from(group.tone)),
         icon_slot: host_icon_slot(item.icon.as_deref()),
-        problems: to_i32(item.attention.len()),
+        problems: to_i32(item.problems.len()),
+        problem_reasons: string_model(item.problems),
+        warning_reasons: string_model(item.warnings),
         state_line: presentation::client_state_line(
             item.state_kind,
             "",
@@ -11151,7 +11154,7 @@ fn server_row(
         pair_starting: false,
         favorite: item.favorite,
         icon_slot: host_icon_slot(item.icon.as_deref()),
-        problems: to_i32(item.attention.len()),
+        problems: to_i32(item.problems.len()),
         state_line: state_line.into(),
         last_run: backend::format_last_run(item.last_started_at, now).into(),
         open: false,
@@ -18357,8 +18360,35 @@ mod tests {
             clients: 2,
             servers: 1,
             complete: true,
+            unreadable_hosts: Vec::new(),
             inspected_at: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn an_inspection_names_the_hosts_whose_record_could_not_be_read() {
+        let (ui, _commands, state) = disk_usage_window();
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Inspected(ephervex_core::StorageInspection {
+                unreadable_hosts: vec!["Future Pack".to_owned()],
+                ..inspection()
+            }),
+        );
+
+        let hosts = ui.get_storage_hosts();
+        assert!(hosts.contains("Future Pack"), "{hosts}");
+
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Inspected(inspection()),
+        );
+        assert!(!ui.get_storage_hosts().contains('\n'));
     }
 
     #[test]

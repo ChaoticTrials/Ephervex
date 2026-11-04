@@ -218,6 +218,9 @@ pub struct StorageInspection {
     /// Whether every directory of the stores could be read. A `false` makes
     /// every figure a lower bound.
     pub complete: bool,
+    /// The installed hosts whose record could not be read, by name. While
+    /// any is listed, nothing is judged unused.
+    pub unreadable_hosts: Vec<String>,
     pub inspected_at: DateTime<Utc>,
 }
 
@@ -273,6 +276,7 @@ pub struct CleanupPlan {
     items: Vec<CleanupItem>,
     kept: Vec<KeptStorage>,
     complete: bool,
+    unreadable_hosts: Vec<String>,
     planned_at: DateTime<Utc>,
     entries: Vec<StoreEntry>,
     cache_root: PathBuf,
@@ -323,6 +327,13 @@ impl CleanupPlan {
     pub const fn planned_at(&self) -> DateTime<Utc> {
         self.planned_at
     }
+
+    /// The installed hosts whose record could not be read, by name. While
+    /// any is listed, nothing is judged unused.
+    #[must_use]
+    pub fn unreadable_hosts(&self) -> &[String] {
+        &self.unreadable_hosts
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -338,6 +349,7 @@ impl CleanupPlan {
             items,
             kept,
             complete,
+            unreadable_hosts: Vec::new(),
             planned_at: Utc::now(),
             entries: Vec::new(),
             cache_root: PathBuf::new(),
@@ -546,6 +558,8 @@ struct HostReferences {
     loader_hosts: usize,
     /// Hosts whose game version or asset index is present and unreadable.
     unreadable_hosts: usize,
+    /// The hosts among those whose own record could not be read, by name.
+    unreadable_records: Vec<String>,
 }
 
 struct References {
@@ -627,14 +641,14 @@ impl App {
     /// which can lag behind a committed change. A host whose record cannot be
     /// read leaves what it needs unknown.
     async fn host_references(&self) -> CoreResult<HostReferences> {
-        let mut unreadable_hosts = 0;
+        let mut unreadable_records = Vec::new();
         let mut clients = Vec::new();
         for row in self.list_clients()? {
             match self.current_client(row.id) {
                 Ok(client) => clients.push(client),
                 Err(error) => {
-                    warn!(%error, "a client's record could not be read");
-                    unreadable_hosts += 1;
+                    warn!(%error, name = %row.name, "a client's record could not be read");
+                    unreadable_records.push(row.name);
                 }
             }
         }
@@ -647,8 +661,8 @@ impl App {
                     loader_hosts += usize::from(server.loader.kind != LoaderKind::Vanilla);
                 }
                 Err(error) => {
-                    warn!(%error, "a server's record could not be read");
-                    unreadable_hosts += 1;
+                    warn!(%error, name = %row.name, "a server's record could not be read");
+                    unreadable_records.push(row.name);
                 }
             }
         }
@@ -658,7 +672,8 @@ impl App {
             clients: clients.len(),
             servers,
             loader_hosts,
-            unreadable_hosts,
+            unreadable_hosts: unreadable_records.len(),
+            unreadable_records,
         };
         let layout = CacheLayout::new(self.paths().cache_dir());
         let context = LaunchFeatures::default().rule_context(Platform::host());
@@ -791,6 +806,7 @@ impl App {
             clients: host.clients,
             servers: host.servers,
             complete: inventory.complete,
+            unreadable_hosts: host.unreadable_records.clone(),
             inspected_at: Utc::now(),
         };
         info!(
@@ -811,7 +827,7 @@ impl App {
         kinds: &[ManagedStorageKind],
         cancel: &CancellationToken,
     ) -> CoreResult<CleanupPlan> {
-        let (inventory, _host, judgements) = self.survey_managed_storage(cancel).await?;
+        let (inventory, host, judgements) = self.survey_managed_storage(cancel).await?;
         let cache_root = self.paths().cache_dir().to_path_buf();
         let mut entries = Vec::new();
         let mut items: BTreeMap<ManagedStorageKind, (Usage, Vec<&StoreEntry>)> = BTreeMap::new();
@@ -873,6 +889,7 @@ impl App {
             items,
             kept: kept.into_values().collect(),
             complete: inventory.complete,
+            unreadable_hosts: host.unreadable_records,
             planned_at: Utc::now(),
             entries,
             cache_root,
@@ -1920,6 +1937,33 @@ mod tests {
         );
         let plan = world.plan().await;
         assert!(plan.is_empty());
+        assert!(pack.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_client_whose_record_cannot_be_read_is_named_and_leaves_everything_undecided() {
+        let world = World::new().await;
+        let client = world.client("1.21.1", LoaderSelection::vanilla());
+        std::fs::write(
+            ephervex_storage::metadata::client_metadata_path(&client.root),
+            b"{not json",
+        )
+        .unwrap();
+        let pack = world.stray_download(b"a pack file");
+
+        let inspection = world.inspect().await;
+
+        assert_eq!(inspection.unreadable_hosts, ["client".to_owned()]);
+        assert_eq!(
+            group(&inspection, ManagedStorageKind::DownloadedFiles)
+                .withheld
+                .first()
+                .map(|(reason, _)| *reason),
+            Some(WithheldReason::HostReferencesUnknown)
+        );
+        let plan = world.plan().await;
+        assert!(plan.is_empty());
+        assert_eq!(plan.unreadable_hosts(), ["client".to_owned()]);
         assert!(pack.is_file());
     }
 

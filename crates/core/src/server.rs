@@ -2316,7 +2316,7 @@ fn persistence_health(app: &App, record: &ServerRecord) -> ServerPersistenceHeal
         {
             ServerPersistenceHealth::MetadataMissing
         }
-        Err(MetadataError::UnsupportedVersion { .. }) => {
+        Err(MetadataError::UnsupportedVersion { .. } | MetadataError::WrittenByNewer { .. }) => {
             ServerPersistenceHealth::MetadataUnsupported
         }
         Err(_) => ServerPersistenceHealth::MetadataCorrupt,

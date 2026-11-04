@@ -1,6 +1,6 @@
 //! Synthetic presentation rows. No launcher storage or service is opened.
 
-use ephervex_gui::presentation::{client_state_line, server_state_line};
+use ephervex_gui::presentation::{client_state_line, launch_blocked_hint, server_state_line};
 use ephervex_gui::ui::{
     AccountRow, AppWindow, HostView, InstanceRow, MenuRow, ModRow, ModSearchRow, ServerRow,
     WorkspacePaneRow, WorkspaceSurfaceRow,
@@ -360,11 +360,22 @@ pub(crate) fn instance_rows() -> Vec<InstanceRow> {
             match record.key.as_str() {
                 "photon" => running_instance(row),
                 "cobblemon" => starting_instance(row),
-                "fog" => with_client_line(InstanceRow {
-                    needs_attention: true,
-                    can_launch: false,
-                    ..row
-                }),
+                "fog" => {
+                    let problems = vec![lookup("gui-attention-missing-root")];
+                    with_client_line(InstanceRow {
+                        needs_attention: true,
+                        can_launch: false,
+                        problems: 1,
+                        launch_blocked_hint: launch_blocked_hint(&problems).into(),
+                        problem_reasons: ModelRc::new(VecModel::from(
+                            problems
+                                .into_iter()
+                                .map(SharedString::from)
+                                .collect::<Vec<_>>(),
+                        )),
+                        ..row
+                    })
+                }
                 "skyblock-tools" => InstanceRow {
                     creating_server_detail: lookup("operation-stage-downloading-files").into(),
                     creating_server_progress: 0.4,

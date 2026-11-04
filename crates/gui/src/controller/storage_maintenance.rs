@@ -129,6 +129,20 @@ const fn withheld_message(reason: WithheldReason) -> &'static str {
     }
 }
 
+/// Names the hosts whose record could not be read, which is why nothing is
+/// judged unused. Empty when every record was read.
+fn unreadable_hosts_line(names: &[String]) -> Option<String> {
+    (!names.is_empty()).then(|| {
+        lookup_args(
+            "gui-storage-unreadable-hosts",
+            [
+                ("count", Arg::from(names.len())),
+                ("names", Arg::from(names.join(", "))),
+            ],
+        )
+    })
+}
+
 fn labeled(id: &str, key: &'static str, value: String) -> String {
     lookup_args(id, [(key, Arg::from(value))])
 }
@@ -179,30 +193,34 @@ fn show_inspection(ui: &AppWindow, inspection: &StorageInspection) {
         }
         .into(),
     );
+    let hosts = lookup_args(
+        "gui-storage-hosts",
+        [
+            (
+                "clients",
+                Arg::from(i64::try_from(inspection.clients).unwrap_or(i64::MAX)),
+            ),
+            (
+                "servers",
+                Arg::from(i64::try_from(inspection.servers).unwrap_or(i64::MAX)),
+            ),
+            (
+                "value",
+                Arg::from(
+                    inspection
+                        .inspected_at
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M")
+                        .to_string(),
+                ),
+            ),
+        ],
+    );
     ui.set_storage_hosts(
-        lookup_args(
-            "gui-storage-hosts",
-            [
-                (
-                    "clients",
-                    Arg::from(i64::try_from(inspection.clients).unwrap_or(i64::MAX)),
-                ),
-                (
-                    "servers",
-                    Arg::from(i64::try_from(inspection.servers).unwrap_or(i64::MAX)),
-                ),
-                (
-                    "value",
-                    Arg::from(
-                        inspection
-                            .inspected_at
-                            .with_timezone(&chrono::Local)
-                            .format("%Y-%m-%d %H:%M")
-                            .to_string(),
-                    ),
-                ),
-            ],
-        )
+        match unreadable_hosts_line(&inspection.unreadable_hosts) {
+            Some(line) => format!("{hosts}\n{line}"),
+            None => hosts,
+        }
         .into(),
     );
     ui.set_storage_incomplete(!inspection.complete);
@@ -410,7 +428,12 @@ fn show_plan(ui: &AppWindow, plan_id: u64, plan: &CleanupPlan) {
         .into(),
     );
     ui.set_storage_plan_items(model(plan.items().iter().map(plan_item_row).collect()));
-    ui.set_storage_plan_kept(string_model(plan.kept().iter().map(kept_line).collect()));
+    ui.set_storage_plan_kept(string_model(
+        unreadable_hosts_line(plan.unreadable_hosts())
+            .into_iter()
+            .chain(plan.kept().iter().map(kept_line))
+            .collect(),
+    ));
     ui.set_storage_plan_incomplete(!plan.is_complete());
     ui.set_storage_plan_confirm(
         labeled("gui-storage-cleanup-confirm", "value", size(reclaimable)).into(),

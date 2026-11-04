@@ -161,8 +161,31 @@ pub fn attention_reason_text(reason: &AttentionReason) -> String {
     }
 }
 
-fn attention_texts(reasons: &[AttentionReason]) -> Vec<String> {
-    reasons.iter().map(attention_reason_text).collect()
+/// A host's recorded reasons, worded, split into those that keep it from
+/// launching and the warnings it starts without.
+fn split_attention(reasons: &[AttentionReason]) -> (Vec<String>, Vec<String>) {
+    let (blocking, advisory): (Vec<_>, Vec<_>) =
+        reasons.iter().partition(|reason| reason.blocks_launch());
+    (
+        blocking.into_iter().map(attention_reason_text).collect(),
+        advisory.into_iter().map(attention_reason_text).collect(),
+    )
+}
+
+/// Why Launch is unavailable for an instance that cannot start: the first
+/// worded problem, and how many more the Overview lists.
+#[must_use]
+pub fn launch_blocked_hint(problems: &[String]) -> String {
+    let Some(first) = problems.first() else {
+        return String::new();
+    };
+    lookup_args(
+        "gui-hint-launch-blocked",
+        [
+            ("reason", Arg::from(first.clone())),
+            ("more", Arg::from(problems.len() - 1)),
+        ],
+    )
 }
 
 /// The one line a client's list card shows for its state: a restart under way,
@@ -223,17 +246,23 @@ pub struct InstancePresentation {
     /// How many linked servers may be running where Ephervex cannot stop them.
     pub unstoppable_linked_servers: usize,
     pub managed_mods: usize,
+    /// Whether a recorded reason keeps the instance from launching.
     pub needs_attention: bool,
-    /// Each recorded reason the instance needs attention, in the user's language.
-    pub attention: Vec<String>,
+    /// Each recorded reason that keeps the instance from launching, in the
+    /// user's language.
+    pub problems: Vec<String>,
+    /// Each recorded reason the instance launches anyway, such as a file that
+    /// could not be downloaded, in the user's language.
+    pub warnings: Vec<String>,
     pub last_launched_at: Option<DateTime<Utc>>,
     pub state: String,
     pub state_kind: &'static str,
     pub can_launch: bool,
     /// Whether a launch is under way or a game is running for this instance.
     ///
-    /// Not `!can_launch`: an instance that needs attention cannot be launched
-    /// and is not running either, and offering to stop it would be a lie.
+    /// Not `!can_launch`: an instance with a problem that blocks a launch
+    /// cannot be launched and is not running either, and offering to stop it
+    /// would be a lie.
     pub can_kill: bool,
     pub launch_and_connect: Vec<ConnectPresentation>,
     /// Filled in from the pairs, which a record knows nothing about.
@@ -301,6 +330,7 @@ impl InstancePresentation {
             Item = (ServerRecord, Result<LaunchAndConnectAvailability, String>),
         >,
     ) -> Self {
+        let (problems, warnings) = split_attention(&record.attention);
         let (state, state_kind) = match launch_state {
             // Running, and holding the instance, with nothing supervising it:
             // the run that launched it is gone.
@@ -333,12 +363,13 @@ impl InstancePresentation {
             stoppable_linked_servers: 0,
             unstoppable_linked_servers: 0,
             managed_mods,
-            needs_attention: record.needs_attention(),
-            attention: attention_texts(&record.attention),
+            needs_attention: record.launch_blocked(),
+            problems,
+            warnings,
             last_launched_at: record.last_launched_at,
             state,
             state_kind,
-            can_launch: launch_state.is_none() && !record.needs_attention(),
+            can_launch: launch_state.is_none() && !record.launch_blocked(),
             can_kill: launch_state.is_some(),
             launch_and_connect: connections
                 .into_iter()
@@ -401,9 +432,15 @@ pub struct ServerPresentation {
     pub restart_required: bool,
     pub path: String,
     pub installed: bool,
+    /// Whether the server has any recorded reason. A server starts whatever
+    /// they are, so its linked-server texts name warnings too, and only the
+    /// stamp counts problems.
     pub needs_attention: bool,
-    /// Each recorded reason the server needs attention, in the user's language.
-    pub attention: Vec<String>,
+    /// Each recorded problem, in the user's language.
+    pub problems: Vec<String>,
+    /// Each recorded warning, such as a file left out of the conversion, in
+    /// the user's language.
+    pub warnings: Vec<String>,
     pub last_started_at: Option<DateTime<Utc>>,
     pub can_start: bool,
     pub can_stop: bool,
@@ -475,6 +512,7 @@ impl ServerPresentation {
             ),
         };
         let installed = record.installation.is_installed();
+        let (problems, warnings) = split_attention(&record.attention);
         Self {
             id: record.id.to_string(),
             name: record.name.clone(),
@@ -497,7 +535,8 @@ impl ServerPresentation {
             path: record.root.display().to_string(),
             installed,
             needs_attention: record.needs_attention(),
-            attention: attention_texts(&record.attention),
+            problems,
+            warnings,
             last_started_at: record.last_started_at,
             can_start: installed && !status.runtime.may_be_running() && !needs_recovery,
             can_stop: controlled,
@@ -1733,16 +1772,54 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_needing_attention_is_neither_launchable_nor_killable() {
+    fn an_instance_with_a_blocking_problem_is_neither_launchable_nor_killable() {
         // The two are not each other's negation, and an instance that cannot be
         // launched must not be offered a way to stop something that is not
         // running.
         let mut record = client(StorageClass::Temporary, LoaderSelection::vanilla());
-        record.add_attention(ephervex_model::AttentionReason::BestEffortServerConversion);
+        record.add_attention(ephervex_model::AttentionReason::MissingRoot);
         let item = InstancePresentation::from_record(&record, 0, 0, None, []);
         assert!(item.needs_attention);
         assert!(!item.can_launch);
         assert!(!item.can_kill);
+        assert_eq!(
+            item.problems,
+            [attention_reason_text(
+                &ephervex_model::AttentionReason::MissingRoot
+            )]
+        );
+        assert!(item.warnings.is_empty());
+    }
+
+    #[test]
+    fn an_instance_with_only_warnings_launches_and_lists_them() {
+        use ephervex_model::AttentionReason as Reason;
+        let mut record = client(StorageClass::Temporary, LoaderSelection::vanilla());
+        record.add_attention(Reason::MissingLoggedFile("private-1.0.jar".to_owned()));
+        record.add_attention(Reason::ManualDownloadRequired("blocked.jar".to_owned()));
+        let item = InstancePresentation::from_record(&record, 0, 0, None, []);
+        assert!(!item.needs_attention);
+        assert!(item.can_launch);
+        assert!(!item.can_kill);
+        assert!(item.problems.is_empty());
+        assert_eq!(item.warnings.len(), 2);
+        assert!(item.warnings[0].contains("private-1.0.jar"));
+        assert!(item.warnings[1].contains("blocked.jar"));
+    }
+
+    #[test]
+    fn a_blocked_launch_names_its_first_problem_and_counts_the_rest() {
+        assert!(launch_blocked_hint(&[]).is_empty());
+        let one = launch_blocked_hint(&["The instance folder is missing".to_owned()]);
+        assert!(one.contains("The instance folder is missing"), "{one}");
+        let two = launch_blocked_hint(&[
+            "The instance folder is missing".to_owned(),
+            "An interrupted change left files that need review".to_owned(),
+        ]);
+        assert!(two.contains("The instance folder is missing"), "{two}");
+        assert!(!two.contains("interrupted"), "{two}");
+        assert!(two.contains('1'), "{two}");
+        assert_ne!(one, two);
     }
 
     #[test]
@@ -1805,7 +1882,7 @@ mod tests {
         let item = InstancePresentation::from_record(&record, 0, 0, None, []);
         assert_eq!(item.last_launched_at, Some(launched));
         assert_eq!(
-            item.attention,
+            item.problems,
             [
                 attention_reason_text(&ephervex_model::AttentionReason::MissingRoot),
                 attention_reason_text(&ephervex_model::AttentionReason::InterruptedMutation),
@@ -1819,7 +1896,12 @@ mod tests {
             .add_attention(ephervex_model::AttentionReason::BestEffortServerConversion);
         let item = ServerPresentation::from_status(&status);
         assert_eq!(item.last_started_at, Some(launched));
-        assert_eq!(item.attention.len(), 1);
+        assert!(item.problems.is_empty());
+        assert_eq!(item.warnings.len(), 1);
+        assert!(
+            item.needs_attention,
+            "the linked-server texts still say a server has a warning"
+        );
     }
 
     #[test]

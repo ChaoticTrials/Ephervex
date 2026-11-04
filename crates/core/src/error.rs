@@ -1282,7 +1282,8 @@ fn metadata_failing_path(error: &ephervex_storage::MetadataError) -> Option<Path
         MetadataError::Unwritable { path, .. }
         | MetadataError::Unreadable { path, .. }
         | MetadataError::Invalid { path, .. }
-        | MetadataError::UnsupportedVersion { path, .. } => Some(path.clone()),
+        | MetadataError::UnsupportedVersion { path, .. }
+        | MetadataError::WrittenByNewer { path, .. } => Some(path.clone()),
         MetadataError::Path(inner) => path_failing_path(inner),
     }
 }

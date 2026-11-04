@@ -62,13 +62,18 @@ export struct InstanceRow {
     // How many may be running where Ephervex cannot stop them, which deleting the instance refuses.
     unstoppable-linked-servers: int,
     mods: int,
+    // Whether a recorded problem keeps the instance from launching. A
+    // warning, such as a file that could not be downloaded, does not.
     needs-attention: bool,
+    // Why Launch is unavailable while a problem keeps the instance from
+    // launching, empty otherwise.
+    launch-blocked-hint: string,
     state: string,
     state-kind: string,
     can-launch: bool,
     // Whether this launcher has a game running for the instance that it can
-    // stop. Not the negation of `can-launch`: an instance that needs
-    // attention cannot be launched and is not running either.
+    // stop. Not the negation of `can-launch`: an instance with a problem that
+    // blocks a launch cannot be launched and is not running either.
     can-kill: bool,
     connect-server-id: string,
     connect-server-name: string,
@@ -107,8 +112,12 @@ export struct InstanceRow {
     // drawn instead. A position rather than an image, so a row still compares
     // equal to itself.
     icon-slot: int,
-    // How many recorded reasons say the instance needs attention.
+    // How many recorded problems keep the instance from launching.
     problems: int,
+    // Each of those problems, and each warning the instance launches without,
+    // worded for the Overview.
+    problem-reasons: [string],
+    warning-reasons: [string],
     // The one line a list card shows for the host's state, without live uptime.
     state-line: string,
     // When the instance last ran, as relative text, empty when it never has.
@@ -188,7 +197,7 @@ export struct ServerRow {
     pair-starting: bool,
     favorite: bool,
     icon-slot: int,
-    // How many recorded reasons say the server needs attention.
+    // How many recorded problems the server has, leaving out warnings.
     problems: int,
     // The state and the address, as the one line a list card shows.
     state-line: string,

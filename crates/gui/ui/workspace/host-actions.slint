@@ -35,7 +35,7 @@ export global HostActions {
             return HostActions.unavailable-hint(host);
         }
         if (host.kind == "client") {
-            return host.client.needs-attention ? GuiI18n.text("gui-hint-needs-attention") : GuiI18n.text("gui-hint-state-changing");
+            return host.client.needs-attention ? host.client.launch-blocked-hint : GuiI18n.text("gui-hint-state-changing");
         }
         return ServerHints.start(host.server.state-kind, host.server.installed);
     }

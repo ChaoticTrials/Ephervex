@@ -60,6 +60,11 @@ impl fmt::Display for ImportSourceKind {
 /// not. Unsupported imported customizations, missing persistent roots, and
 /// best-effort server conversions all surface here rather than being silently
 /// approximated.
+///
+/// Only a missing root, an interrupted change, and a loader or launch setting
+/// that cannot be reproduced keep an instance from launching (see
+/// [`Self::blocks_launch`]). Every other reason is a warning: the game starts
+/// without the file or step it names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "detail")]
 pub enum AttentionReason {
@@ -89,6 +94,24 @@ pub enum AttentionReason {
     /// Attention is informational state. An unfamiliar reason must keep the
     /// record readable instead of making the whole instance disappear.
     Unknown,
+}
+
+impl AttentionReason {
+    /// Whether this reason leaves nothing faithful to launch.
+    ///
+    /// A file that could not be fetched, a hook that was not run, or a reason a
+    /// newer build recorded does not stop the game from starting, so those
+    /// only warn.
+    #[must_use]
+    pub const fn blocks_launch(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedLoader(_)
+                | Self::UnsupportedLaunchCustomization(_)
+                | Self::MissingRoot
+                | Self::InterruptedMutation
+        )
+    }
 }
 
 #[derive(Deserialize)]
@@ -179,6 +202,26 @@ mod tests {
         .expect("unknown advisory state stays readable");
 
         assert_eq!(reason, AttentionReason::Unknown);
+    }
+
+    #[test]
+    fn only_a_reason_that_leaves_nothing_to_launch_blocks_a_launch() {
+        let blocking = [
+            AttentionReason::UnsupportedLoader("quilt".to_owned()),
+            AttentionReason::UnsupportedLaunchCustomization("wrapper".to_owned()),
+            AttentionReason::MissingRoot,
+            AttentionReason::InterruptedMutation,
+        ];
+        let advisory = [
+            AttentionReason::IgnoredUnsafeCustomization("pre-launch command".to_owned()),
+            AttentionReason::BestEffortServerConversion,
+            AttentionReason::ManualDownloadRequired("sodium.jar".to_owned()),
+            AttentionReason::UnknownServerApplicability("iris.jar".to_owned()),
+            AttentionReason::MissingLoggedFile("private-1.0.jar".to_owned()),
+            AttentionReason::Unknown,
+        ];
+        assert!(blocking.iter().all(AttentionReason::blocks_launch));
+        assert!(!advisory.iter().any(AttentionReason::blocks_launch));
     }
 
     #[test]

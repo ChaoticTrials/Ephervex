@@ -43,7 +43,7 @@ export component HostCardFace inherits Rectangle {
     // A third chip, such as the linked servers or the address. Empty for none.
     in property <string> extra-chip;
     in property <color> strip: Theme.state-stopped;
-    // How many recorded reasons say the host needs attention.
+    // How many recorded problems the host has, leaving out warnings.
     in property <int> problems;
     in property <string> state-line;
     in property <color> state-line-color: Theme.text;

@@ -18,6 +18,9 @@ component FactRow inherits Rectangle {
     in property <bool> mono;
     // Colors the value as a link that does something when pressed.
     in property <bool> link;
+    // Colors the value as a problem that keeps the host from starting, or as
+    // a warning it starts with: "problem", "warning", or empty.
+    in property <string> tone;
     callback pressed();
     height: cells.preferred-height;
     if root.y > 0px : Rectangle { y: 0px; height: 1px; background: Theme.border; }
@@ -38,7 +41,7 @@ component FactRow inherits Rectangle {
             horizontal-stretch: 1;
             BodyText {
                 text: root.value;
-                color: root.link ? Theme.accent : Theme.text;
+                color: root.link ? Theme.accent : root.tone == "problem" ? Theme.danger : root.tone == "warning" ? Theme.warning : Theme.text;
                 font-family: root.mono ? Theme.mono-family : Theme.body-family;
                 wrap: word-wrap;
             }
@@ -87,6 +90,8 @@ export component ClientOverviewSummary inherits Rectangle {
         lift: 0px;
         height: facts.preferred-height + 2 * Theme.strong-border-width;
         facts := VerticalLayout {
+            for reason in root.host.client.problem-reasons : FactRow { label: GuiI18n.text("gui-overview-problem"); value: reason; tone: "problem"; }
+            for reason in root.host.client.warning-reasons : FactRow { label: GuiI18n.text("gui-overview-warning"); value: reason; tone: "warning"; }
             if root.host.client.issue-link != "" : FactRow { label: GuiI18n.text("gui-overview-issue"); value: root.host.client.issue-link; mono: true; link: true; pressed => { root.open-issue-link(); } }
             FactRow { label: GuiI18n.text("gui-source"); value: root.host.client.storage + " | " + root.host.client.source; }
             if root.host.java-runtime != "" : FactRow { label: GuiI18n.text("gui-overview-java"); value: root.host.java-runtime; mono: true; }

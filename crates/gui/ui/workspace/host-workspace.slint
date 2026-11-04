@@ -401,7 +401,8 @@ export component HostWorkspace inherits Rectangle {
     // Properties were saved that the running server reads once restarted.
     in property <bool> restart-required;
     // What the stamp says: whether this is a client, how many recorded
-    // reasons say it needs attention, and how often its bug showed up again.
+    // problems keep it from starting, and how often its bug showed up again.
+    // Warnings are not counted: the host starts with them.
     in property <bool> stamp-client;
     in property <int> stamp-problems;
     in property <int> stamp-reproduced;

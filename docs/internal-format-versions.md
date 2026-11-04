@@ -57,16 +57,25 @@ Unknown values are handled according to what the value authorizes:
 - `ImportSourceKind`, the importer an instance came from, is advisory too. An
   unknown value in metadata, a recipe, or the index becomes `Unknown`. Release
   1.0.0 parses it strictly, so it cannot read an instance a later build imported
-  from a crash report or log (`logged_mod_list`): its instance list fails until
-  that instance is deleted. Builds after 1.0.0 read such a value instead, and
-  a record they save again keeps `unknown` in place of the value they did not
-  know.
+  from a crash report or log (`logged_mod_list`). The value is in the index row,
+  in `instance.json`, and twice in the retained recipe (`source_kind` and
+  `provider_metadata.kind`). In release 1.0.0 the index row makes the whole
+  instance list and the storage inspection fail until that instance is deleted.
+  Editing only the index row leaves `instance.json` and the recipe unreadable,
+  so the instance is then listed as not valid metadata. This is a known limitation:
+  such an instance keeps `logged_mod_list` rather than posing as a known
+  importer, because whether an instance was made by hand decides what may change
+  in it. Builds after 1.0.0 read such a value, and a record they save again
+  keeps `unknown` in place of the value they did not know.
 - Configuration preferences that are designed to round-trip future values use
   their explicit unrecognized representation or retain the unknown TOML key.
 - Loader, storage, server installation, server launch, pack side, side
   requirement, relation target, ownership, and hash algorithm values affect
   launch, mutation, verification, or reconstruction. An unknown value is not
-  safe to approximate and makes that record or recipe unreadable.
+  safe to approximate and makes that record or recipe unreadable. Builds after
+  1.0.0 report host metadata that has a supported version but such a value as
+  written by a newer version, not as invalid. Storage cleanup names each host
+  whose record it could not read.
 - Cache-only enums may reject an unknown value because deleting and rebuilding
   the cache is the recovery path.
 

@@ -133,6 +133,18 @@ pub enum MetadataError {
         found: u32,
         supported: u32,
     },
+    /// The file names a value, such as a loader kind, that this build does
+    /// not know. It has a supported version, so a newer build wrote it.
+    #[error(
+        "instance metadata at {path} names a value this build does not know (written by {written_by:?})"
+    )]
+    WrittenByNewer {
+        path: PathBuf,
+        /// The `written_by` line of the file, as written. Shown, never parsed.
+        written_by: String,
+        #[source]
+        source: serde_json::Error,
+    },
     /// A directory could not be created.
     #[error(transparent)]
     Path(#[from] PathError),
@@ -147,6 +159,7 @@ impl MetadataError {
             Self::Unreadable { .. } => "error-registry-metadata-unreadable",
             Self::Invalid { .. } => "error-registry-metadata-invalid",
             Self::UnsupportedVersion { .. } => "error-registry-metadata-unsupported-version",
+            Self::WrittenByNewer { .. } => "error-registry-metadata-written-by-newer",
             Self::Path(error) => error.message_id(),
         }
     }
@@ -447,12 +460,34 @@ fn read_metadata<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, Metad
         });
     }
 
-    let file: MetadataFile<T> =
-        serde_json::from_value(envelope).map_err(|source| MetadataError::Invalid {
-            path: path.to_path_buf(),
-            source,
-        })?;
+    let written_by = envelope
+        .get("written_by")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let file: MetadataFile<T> = serde_json::from_value(envelope).map_err(|source| {
+        if names_an_unknown_value(&source) {
+            MetadataError::WrittenByNewer {
+                path: path.to_path_buf(),
+                written_by,
+                source,
+            }
+        } else {
+            MetadataError::Invalid {
+                path: path.to_path_buf(),
+                source,
+            }
+        }
+    })?;
     Ok(file.record)
+}
+
+/// Whether parsing failed only because an enum value is not one this build
+/// declares. Serde words exactly that failure as "unknown variant"
+/// (`serde::de::Error::unknown_variant`), and in a file of a supported version
+/// it is what a newer build adds.
+fn names_an_unknown_value(error: &serde_json::Error) -> bool {
+    error.is_data() && error.to_string().starts_with("unknown variant")
 }
 
 /// Creates `.launcher/` and `.launcher/source/`.
@@ -626,6 +661,34 @@ mod tests {
 
         let error = read_client_metadata(directory.path()).expect_err("nothing to read");
         assert!(matches!(error, MetadataError::Unreadable { .. }));
+    }
+
+    #[test]
+    fn a_value_only_a_newer_build_knows_is_reported_as_written_by_it() {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let root = directory.path();
+        write_client_metadata(root, &sample(root)).expect("write");
+        let path = client_metadata_path(root);
+        let mut json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        json["storage"] = serde_json::Value::from("future_storage_class");
+        json["written_by"] = serde_json::Value::from("Ephervex 9.0.0");
+        std::fs::write(&path, json.to_string()).expect("write");
+
+        let error = read_client_metadata(root).expect_err("an unknown storage class");
+        let MetadataError::WrittenByNewer { written_by, .. } = &error else {
+            panic!("expected a newer-build error, got {error:?}");
+        };
+        assert_eq!(written_by, "Ephervex 9.0.0");
+        assert_eq!(
+            error.message_id(),
+            "error-registry-metadata-written-by-newer"
+        );
+
+        json["storage"] = serde_json::Value::from(12);
+        std::fs::write(&path, json.to_string()).expect("write");
+        let error = read_client_metadata(root).expect_err("a wrong type");
+        assert!(matches!(error, MetadataError::Invalid { .. }), "{error:?}");
     }
 
     #[test]

@@ -38,7 +38,8 @@ pub(super) struct HomeHost {
     pub run: RunState,
     pub can_launch: bool,
     pub last_run: Option<DateTime<Utc>>,
-    /// Each recorded reason the host needs attention, already worded.
+    /// Each recorded reason the host needs attention, already worded: its
+    /// problems, then the warnings it starts with.
     pub attention: Vec<String>,
 }
 
@@ -79,7 +80,12 @@ impl HomeHost {
             run: RunState::of(item.state_kind),
             can_launch: item.can_launch,
             last_run: item.last_launched_at,
-            attention: item.attention.clone(),
+            attention: item
+                .problems
+                .iter()
+                .chain(&item.warnings)
+                .cloned()
+                .collect(),
         })
     }
 
@@ -97,7 +103,12 @@ impl HomeHost {
             run: RunState::of(item.state_kind),
             can_launch: item.can_start,
             last_run: item.last_started_at,
-            attention: item.attention.clone(),
+            attention: item
+                .problems
+                .iter()
+                .chain(&item.warnings)
+                .cloned()
+                .collect(),
         })
     }
 }

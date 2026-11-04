@@ -177,7 +177,8 @@ Each hash is looked up in your preferred mod catalog first and in the other one
 only for what the first did not have. Set the preferred catalog under
 **Settings > Providers & APIs > Preferred catalog**. A mod is matched by its exact file, never
 by its name or version. A mod neither catalog can provide is left out and listed
-on the new instance as needing attention. CurseForge is searched only when an
+as a warning on the new instance's Overview. The instance still launches, without
+that mod. CurseForge is searched only when an
 API key is available. The report itself is copied into the instance, so the
 logs view and crash review show it.
 
@@ -264,8 +265,9 @@ Manage watched folders under **Settings > Storage > Watched download
 folders**. The Downloads folder is watched by default until you configure the
 list.
 
-**Skip** leaves that file out and records that it needs attention. Use it only
-when you intend to import without the file.
+**Skip** leaves that file out and lists it as a warning on the instance's
+Overview. The instance still launches, without that file. Use it only when you
+intend to import without the file.
 
 </TabItem>
 <TabItem value="cli" label="CLI">
@@ -280,3 +282,22 @@ skip the file, then import there.
 
 Imported packs retain their recipe, including server-side files. You can
 create a [linked server](./servers.mdx#create-a-server) from the instance later.
+
+## Warnings and problems on an imported instance
+
+An instance's Overview lists what an import could not reproduce. Each entry is
+either a warning or a problem.
+
+A **warning** describes something the instance runs without, for example a mod
+no catalog could provide or a file you skipped. Launch stays available. A
+warning stays listed after you add the file yourself.
+
+A **problem** keeps the instance from launching. Launch is unavailable and its
+hint names the first problem. Problems are:
+
+- the instance folder is missing;
+- an interrupted change left files that need review;
+- the pack uses a loader Ephervex does not support;
+- the pack uses launch settings Ephervex cannot reproduce.
+
+The header stamp counts problems only.

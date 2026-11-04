@@ -163,6 +163,13 @@ impl ClientRecord {
         !self.attention.is_empty()
     }
 
+    /// Whether a recorded reason keeps this instance from launching. The
+    /// others are warnings the game starts without.
+    #[must_use]
+    pub fn launch_blocked(&self) -> bool {
+        self.attention.iter().any(AttentionReason::blocks_launch)
+    }
+
     /// Records an attention reason, ignoring an exact duplicate so repeated
     /// reconciliation runs do not grow the list.
     pub fn add_attention(&mut self, reason: AttentionReason) {
@@ -629,6 +636,17 @@ mod tests {
         record.add_attention(AttentionReason::MissingRoot);
         assert_eq!(record.attention, vec![AttentionReason::MissingRoot]);
         assert!(record.needs_attention());
+    }
+
+    #[test]
+    fn a_warning_alone_needs_attention_without_blocking_a_launch() {
+        let mut record = sample_client();
+        record.add_attention(AttentionReason::MissingLoggedFile("private.jar".to_owned()));
+        assert!(record.needs_attention());
+        assert!(!record.launch_blocked());
+
+        record.add_attention(AttentionReason::InterruptedMutation);
+        assert!(record.launch_blocked());
     }
 
     #[test]

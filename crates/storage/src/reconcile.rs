@@ -349,7 +349,8 @@ fn failing_server(
             MetadataError::Unwritable { path, .. }
             | MetadataError::Unreadable { path, .. }
             | MetadataError::Invalid { path, .. }
-            | MetadataError::UnsupportedVersion { path, .. },
+            | MetadataError::UnsupportedVersion { path, .. }
+            | MetadataError::WrittenByNewer { path, .. },
         ) => path,
         _ => return None,
     };

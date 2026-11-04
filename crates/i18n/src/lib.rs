@@ -569,6 +569,7 @@ mod tests {
             "error-registry-metadata-unreadable",
             "error-registry-metadata-invalid",
             "error-registry-metadata-unsupported-version",
+            "error-registry-metadata-written-by-newer",
             "error-registry-root-occupied",
             "error-registry-host-busy",
             "error-registry-host-not-claimed",

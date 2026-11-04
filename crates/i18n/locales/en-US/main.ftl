@@ -319,6 +319,9 @@ error-registry-metadata-invalid = The instance metadata file is not valid Epherv
 
 error-registry-metadata-unsupported-version = The instance metadata at { $path } was written by a newer version of { app-name }.
 
+error-registry-metadata-written-by-newer = The instance metadata at { $path } names a value only a newer version of { app-name } knows.
+.action = Open the instance with the version that created it.
+
 error-registry-root-occupied = That instance directory already contains files.
 .action = Choose a different name, or remove { $path } first.
 error-registry-instance-id-taken = An instance with that id already exists.
@@ -2962,6 +2965,10 @@ gui-folder = Folder
 gui-overview-issue = Issue
 gui-overview-java = Java
 gui-overview-memory = Memory
+# The label beside each recorded reason on a client's Overview: one that keeps
+# it from launching, and one it launches without.
+gui-overview-problem = Needs fix
+gui-overview-warning = Warning
 gui-no-file-open = No file open
 gui-no-file-open-detail = Choose a log or crash report. Ephervex reads a bounded, safe text window through diagnostics services.
 gui-copy-path = Copy Path
@@ -3399,7 +3406,12 @@ gui-hint-server-uncontrolled-start = A process for this server may still be runn
 gui-hint-server-needs-recovery = The recorded processes for this server have exited. Use Repair on its card first.
 gui-hint-server-not-installed = This server is not installed.
 gui-hint-restart-server-stopped = Restart is available while the server is running.
-gui-hint-needs-attention = This instance needs attention before it can launch.
+# Why Launch is unavailable: the first problem that keeps the instance from
+# starting, and how many more its Overview lists.
+gui-hint-launch-blocked = { $more ->
+    [0] Fix this before it can launch: { $reason }
+   *[other] Fix this before it can launch: { $reason } ({ $more } more on the Overview)
+}
 gui-hint-stop-host-first = This is available only while the host is stopped. Stop it first.
 gui-hint-force-kill-server = Force kill is available while the server is running.
 gui-hint-restart-client-stopped = Restart is available while the game is running.
@@ -3778,6 +3790,12 @@ gui-storage-line-unused = Not needed by any instance or server: { $value }
 gui-storage-line-withheld = Kept: { $value }, because { $reason }
 gui-storage-withheld-loader = a Forge or NeoForge instance or server needs libraries and installers that Ephervex does not list per host
 gui-storage-withheld-unknown = what an instance needs could not be read, so nothing is judged unused
+# Names the instances and servers whose own record could not be read, which is
+# why nothing is judged unused.
+gui-storage-unreadable-hosts = { $count ->
+    [one] The record of { $names } could not be read, so nothing is judged unused until it can be read or is deleted.
+   *[other] The records of { $names } could not be read, so nothing is judged unused until they can be read or are deleted.
+}
 gui-storage-withheld-linked = the file is also linked inside an instance or server, so removing it frees no space
 gui-storage-withheld-supplied = the file was downloaded by hand and its provider does not let Ephervex download it again
 gui-storage-integrity-sound = { $count ->

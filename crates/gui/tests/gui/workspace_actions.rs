@@ -15,7 +15,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use i_slint_backend_testing::{
     AccessibleRole, ElementHandle, TestingBackend, TestingBackendOptions,
 };
-use slint::{ComponentHandle, PhysicalSize, SharedString};
+use slint::{ComponentHandle, ModelRc, PhysicalSize, SharedString, VecModel};
 
 /// The client workspace opens the client's own folder.
 ///
@@ -263,6 +263,72 @@ fn the_server_header_shows_its_address_and_a_restart_it_needs() {
         header_pill(&ui, &restart_required).is_some(),
         "the header says a restart is needed"
     );
+}
+
+/// A problem that keeps an instance from launching is named on the disabled
+/// Launch button and listed on the Overview.
+#[test]
+fn a_blocked_launch_names_its_problem_and_the_overview_lists_it() {
+    let ui = window();
+    let problem = lookup("gui-attention-missing-root");
+    let problems = vec![problem.clone()];
+    client_workspace_with(
+        &ui,
+        InstanceRow {
+            needs_attention: true,
+            can_launch: false,
+            problems: 1,
+            launch_blocked_hint: ephervex_gui::presentation::launch_blocked_hint(&problems).into(),
+            problem_reasons: strings(&problems),
+            ..instance()
+        },
+    );
+
+    let launch = widest(&ui, &lookup("gui-launch")).expect("Launch");
+    assert_eq!(launch.accessible_enabled(), Some(false));
+    let hint = launch.accessible_description().unwrap_or_default();
+    assert!(hint.contains(problem.as_str()), "{hint}");
+    assert!(
+        widest(&ui, &problem).is_some(),
+        "the Overview lists the problem"
+    );
+    assert!(widest(&ui, &lookup("gui-overview-problem")).is_some());
+}
+
+/// A file the instance starts without is a warning: Launch stays available
+/// and the Overview names the file.
+#[test]
+fn an_instance_with_only_warnings_launches_and_lists_them() {
+    let ui = window();
+    let warning = lookup_args(
+        "gui-attention-missing-logged-file",
+        [("detail", Arg::from("private-1.0.jar"))],
+    );
+    client_workspace_with(
+        &ui,
+        InstanceRow {
+            warning_reasons: strings(std::slice::from_ref(&warning)),
+            ..instance()
+        },
+    );
+
+    let launch = widest(&ui, &lookup("gui-launch")).expect("Launch");
+    assert_eq!(launch.accessible_enabled(), Some(true));
+    assert!(
+        widest(&ui, &warning).is_some(),
+        "the Overview lists the warning"
+    );
+    assert!(widest(&ui, &lookup("gui-overview-warning")).is_some());
+    assert!(widest(&ui, &lookup("gui-overview-problem")).is_none());
+}
+
+fn strings(values: &[String]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        values
+            .iter()
+            .map(|value| SharedString::from(value.as_str()))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// A status pill in a header: text, not a button.
