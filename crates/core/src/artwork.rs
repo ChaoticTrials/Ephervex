@@ -47,6 +47,8 @@ use ephervex_download::{
 };
 use ephervex_mod_platform::ModProject;
 use ephervex_pack::PackError;
+use image::imageops::FilterType;
+use image::{DynamicImage, ImageFormat};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -55,6 +57,13 @@ use crate::error::{CoreError, CoreResult};
 
 /// The PNG signature, which is what a usable cache entry starts with.
 const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// The longest side a cache entry is stored at.
+///
+/// Artwork is drawn at about fifty logical pixels, so this is sharp up to a
+/// display scale of 250% and keeps a few hundred decoded icons to a few
+/// megabytes rather than a gigabyte.
+const ARTWORK_MAX_SIDE: u32 = 128;
 
 /// Puts one project's icon in the shared artwork cache and returns its path.
 ///
@@ -93,8 +102,27 @@ pub(crate) async fn cache_project_artwork(
         .map_err(|error| PackError::EntryPathUnsafe {
             entry: error.to_string(),
         })?;
-    if is_normalized(&destination) {
-        return Ok(destination);
+    match cached_entry(&destination) {
+        CachedEntry::Usable => return Ok(destination),
+        // Scaled where it lies rather than fetched again: the pixels are
+        // already here, only the size is wrong.
+        CachedEntry::Oversized => {
+            let (entry, id) = (destination.clone(), project.id.clone());
+            let scaled =
+                tokio::task::spawn_blocking(move || publish_normalized(&entry, &entry, &id)).await;
+            match scaled {
+                Ok(Ok(())) => return Ok(destination),
+                Ok(Err(error)) => {
+                    debug!(project = %project.id, %error, "cached artwork could not be scaled");
+                    // Unreadable, so fetched again rather than retried as it is.
+                    let _ = std::fs::remove_file(&destination);
+                }
+                Err(error) => {
+                    debug!(project = %project.id, %error, "scaling cached artwork stopped");
+                }
+            }
+        }
+        CachedEntry::Unusable => {}
     }
 
     let staging = staging_path(&destination);
@@ -122,16 +150,46 @@ pub(crate) async fn cache_project_artwork(
     outcome.map(|()| destination)
 }
 
-/// Whether a cache entry is a PNG this build can hand to a frontend.
+/// What a cache entry is good for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CachedEntry {
+    /// A PNG at most [`ARTWORK_MAX_SIDE`] on a side.
+    Usable,
+    /// A PNG stored before entries were scaled down.
+    Oversized,
+    /// Missing, not PNG, or a PNG whose header names no usable size.
+    Unusable,
+}
+
+/// Classifies a cache entry from its PNG signature and header.
 ///
 /// Reads the signature rather than the extension. An entry written by a build
 /// that named files after their source address may be a `.png` holding WebP,
 /// and believing the name is how that entry survives forever.
-fn is_normalized(path: &Path) -> bool {
-    let Ok(head) = read_prefix(path, PNG_MAGIC.len()) else {
-        return false;
+fn cached_entry(path: &Path) -> CachedEntry {
+    // The signature, then the IHDR chunk's length and type, then its width
+    // and height, which the PNG specification requires to come first.
+    let Ok(head) = read_prefix(path, 24) else {
+        return CachedEntry::Unusable;
     };
-    head == PNG_MAGIC
+    if head.get(..PNG_MAGIC.len()) != Some(PNG_MAGIC.as_slice())
+        || head.get(12..16) != Some(b"IHDR")
+    {
+        return CachedEntry::Unusable;
+    }
+    let side = |at: usize| {
+        head.get(at..at + 4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_be_bytes)
+    };
+    match (side(16), side(20)) {
+        (Some(0), _) | (_, Some(0)) => CachedEntry::Unusable,
+        (Some(width), Some(height)) if width <= ARTWORK_MAX_SIDE && height <= ARTWORK_MAX_SIDE => {
+            CachedEntry::Usable
+        }
+        (Some(_), Some(_)) => CachedEntry::Oversized,
+        _ => CachedEntry::Unusable,
+    }
 }
 
 fn read_prefix(path: &Path, bytes: usize) -> std::io::Result<Vec<u8>> {
@@ -150,6 +208,16 @@ fn read_prefix(path: &Path, bytes: usize) -> std::io::Result<Vec<u8>> {
 /// or the complete new one, never a partially written file.
 fn publish_normalized(source: &Path, destination: &Path, project: &str) -> CoreResult<()> {
     let png = normalize(source, project)?;
+    write_atomically(destination, &png)
+}
+
+/// Writes `bytes` beside `destination` and renames them into place.
+///
+/// The temporary name is unique to this write, so a concurrent download into
+/// the staging name, or a second write of the same entry, cannot remove or
+/// overwrite it halfway.
+fn write_atomically(destination: &Path, bytes: &[u8]) -> CoreResult<()> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|source| PackError::Unwritable {
@@ -157,8 +225,14 @@ fn publish_normalized(source: &Path, destination: &Path, project: &str) -> CoreR
             source,
         })?;
     }
-    let temporary = staging_path(destination);
-    std::fs::write(&temporary, &png).map_err(|source| PackError::Unwritable {
+    let mut name = destination.as_os_str().to_owned();
+    name.push(format!(
+        ".{}-{}.encoding",
+        std::process::id(),
+        WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temporary = PathBuf::from(name);
+    std::fs::write(&temporary, bytes).map_err(|source| PackError::Unwritable {
         path: temporary.clone(),
         source,
     })?;
@@ -173,7 +247,8 @@ fn publish_normalized(source: &Path, destination: &Path, project: &str) -> CoreR
     Ok(())
 }
 
-/// Decodes one downloaded image and re-encodes it as PNG.
+/// Decodes one downloaded image and re-encodes it as PNG, scaled down to at
+/// most [`ARTWORK_MAX_SIDE`] on a side.
 ///
 /// The format is taken from the bytes rather than from the file name, because
 /// the file name came from a URL and a URL is not evidence of anything. A
@@ -191,7 +266,63 @@ pub(crate) fn normalize(source: &Path, project: &str) -> CoreResult<Vec<u8>> {
         ARTWORK_BOUNDS,
     )
     .map_err(unusable)?;
-    encode_png(&decoded).map_err(unusable)
+    encode_png(&scaled(decoded)).map_err(unusable)
+}
+
+/// `image`, no longer than [`ARTWORK_MAX_SIDE`] on either side.
+fn scaled(image: DynamicImage) -> DynamicImage {
+    if image.width() > ARTWORK_MAX_SIDE || image.height() > ARTWORK_MAX_SIDE {
+        image.resize(ARTWORK_MAX_SIDE, ARTWORK_MAX_SIDE, FilterType::Lanczos3)
+    } else {
+        image
+    }
+}
+
+/// A cached artwork file, decoded for drawing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtworkPixels {
+    pub width: u32,
+    pub height: u32,
+    /// Row-major RGBA, four bytes per pixel.
+    pub rgba: Vec<u8>,
+}
+
+/// Decodes an artwork file this crate cached, at the size the cache stores.
+///
+/// An entry stored before the cache scaled its artwork is scaled here too, so
+/// a frontend never holds more than it draws, and is written back scaled so
+/// that happens once. `None` for a file that is gone or is not an image, which
+/// a list draws as its fallback.
+#[must_use]
+pub fn decode_mod_artwork(path: &Path) -> Option<ArtworkPixels> {
+    let decoded = decode_bounded(
+        || std::fs::File::open(path).map(std::io::BufReader::new),
+        Some(&[ImageFormat::Png]),
+        ARTWORK_BOUNDS,
+    )
+    .map_err(
+        |refusal| debug!(path = %path.display(), %refusal, "cached artwork could not be decoded"),
+    )
+    .ok()?;
+    let image = if decoded.width() > ARTWORK_MAX_SIDE || decoded.height() > ARTWORK_MAX_SIDE {
+        // A fast filter, since this may run while a list is being drawn.
+        let image = decoded.thumbnail(ARTWORK_MAX_SIDE, ARTWORK_MAX_SIDE);
+        let stored = encode_png(&image)
+            .map_err(|refusal| refusal.to_string())
+            .and_then(|png| write_atomically(path, &png).map_err(|error| error.to_string()));
+        if let Err(error) = stored {
+            debug!(path = %path.display(), %error, "scaled artwork could not be stored");
+        }
+        image
+    } else {
+        decoded
+    };
+    let rgba = image.into_rgba8();
+    Some(ArtworkPixels {
+        width: rgba.width(),
+        height: rgba.height(),
+        rgba: rgba.into_raw(),
+    })
 }
 
 /// Where a file waits while it is being fetched or written.
@@ -229,6 +360,10 @@ mod tests {
     use image::{ImageFormat, RgbaImage};
 
     use super::*;
+
+    fn is_normalized(path: &Path) -> bool {
+        cached_entry(path) == CachedEntry::Usable
+    }
 
     /// An image of the given size, encoded in the given format.
     fn encoded(width: u32, height: u32, format: ImageFormat) -> Vec<u8> {
@@ -373,7 +508,19 @@ mod tests {
             "big.png",
             &encoded(1024, 1024, ImageFormat::Png),
         );
-        assert!(normalize(&source, "LOpKHB2A").is_ok());
+        let png = normalize(&source, "LOpKHB2A").expect("a normalized image");
+        let decoded = image::load_from_memory(&png).expect("decodes");
+        assert_eq!((decoded.width(), decoded.height()), (128, 128));
+    }
+
+    #[test]
+    fn a_large_icon_is_stored_at_the_size_it_is_drawn_keeping_its_shape() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let source = written(dir.path(), "wide.png", &encoded(512, 256, ImageFormat::Png));
+
+        let png = normalize(&source, "LOpKHB2A").expect("a normalized image");
+        let decoded = image::load_from_memory(&png).expect("decodes");
+        assert_eq!((decoded.width(), decoded.height()), (128, 64));
     }
 
     #[test]
@@ -389,6 +536,18 @@ mod tests {
 
         assert!(!is_normalized(&dir.path().join("absent.png")));
         assert!(!is_normalized(dir.path()));
+
+        // A PNG stored before entries were scaled down is kept, but not as it is.
+        let large = written(dir.path(), "large.png", &encoded(512, 64, ImageFormat::Png));
+        assert_eq!(cached_entry(&large), CachedEntry::Oversized);
+
+        // A header naming no size is no image to draw.
+        let mut empty = PNG_MAGIC.to_vec();
+        empty.extend_from_slice(&[0, 0, 0, 13]);
+        empty.extend_from_slice(b"IHDR");
+        empty.extend_from_slice(&[0; 8]);
+        let empty = written(dir.path(), "empty.png", &empty);
+        assert_eq!(cached_entry(&empty), CachedEntry::Unusable);
     }
 
     #[test]
@@ -565,6 +724,67 @@ mod tests {
             image::open(&cached).expect("opens").width(),
             32,
             "and it is the freshly fetched image rather than the stale one"
+        );
+    }
+
+    #[test]
+    fn cached_artwork_is_decoded_for_drawing_at_the_stored_size() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let small = written(dir.path(), "small.png", &encoded(48, 32, ImageFormat::Png));
+        let pixels = decode_mod_artwork(&small).expect("pixels");
+        assert_eq!(
+            (pixels.width, pixels.height, pixels.rgba.len()),
+            (48, 32, 48 * 32 * 4)
+        );
+
+        // An entry from before the cache scaled its artwork.
+        let large = written(
+            dir.path(),
+            "large.png",
+            &encoded(1024, 1024, ImageFormat::Png),
+        );
+        let pixels = decode_mod_artwork(&large).expect("pixels");
+        assert_eq!((pixels.width, pixels.height), (128, 128));
+        assert!(
+            is_normalized(&large),
+            "and it is stored scaled, so it is scaled once"
+        );
+
+        assert!(decode_mod_artwork(&dir.path().join("absent.png")).is_none());
+        let webp = written(dir.path(), "icon.png", &encoded(16, 16, ImageFormat::WebP));
+        assert!(
+            decode_mod_artwork(&webp).is_none(),
+            "the cache holds PNG only"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_oversized_cached_icon_is_scaled_in_place_without_a_request() {
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache = CacheLayout::new(dir.path());
+        let project = project("LOpKHB2A");
+        let canonical = cache
+            .project_artwork(project.provider.as_str(), &project.id)
+            .expect("a cache path");
+        std::fs::create_dir_all(canonical.parent().expect("parent")).expect("store");
+        std::fs::write(&canonical, encoded(1024, 512, ImageFormat::Png)).expect("old entry");
+
+        let cached = fetch(&server, &cache, &project, "/icon.webp")
+            .await
+            .expect("artwork");
+
+        assert_eq!(cached, canonical);
+        let decoded = image::open(&cached).expect("opens");
+        assert_eq!((decoded.width(), decoded.height()), (128, 64));
+        assert!(!staging_path(&canonical).exists());
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "the cached pixels are scaled, not fetched again"
         );
     }
 

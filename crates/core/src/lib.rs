@@ -105,6 +105,7 @@ pub use app::{
     PersistentStorageSettings, ServerApplicationSettings, global_java_settings,
 };
 pub use artifact_cache::ArtifactCacheStatus;
+pub use artwork::{ArtworkPixels, decode_mod_artwork};
 pub use bundle::{BundleContents, BundlePart, BundlePartKind, BundleReport, BundleSelection};
 pub use connection::{
     ConnectError, DEFAULT_SERVER_READINESS_TIMEOUT, LaunchAndConnectAvailability,

@@ -29,7 +29,7 @@ impl ImageBounds {
     }
 }
 
-/// Bounds for mod artwork, which is kept as decoded.
+/// Bounds for mod artwork, which is scaled down after it is decoded.
 ///
 /// Generous for something drawn at a few dozen logical pixels, and small enough
 /// that the worst case is a rounding error rather than a memory event.

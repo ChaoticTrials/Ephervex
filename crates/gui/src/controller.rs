@@ -18,8 +18,8 @@ use ephervex_model::AbsentModPolicy;
 use ephervex_model::InstanceId;
 use ephervex_model::ModProvider;
 use slint::{
-    ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedString, Timer, TimerMode,
-    VecModel,
+    ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedPixelBuffer, SharedString,
+    Timer, TimerMode, VecModel,
 };
 
 use crate::backend::{
@@ -12182,14 +12182,77 @@ fn managed_mod_rows(rows: Vec<ManagedModData>) -> Vec<ModRow> {
 /// what may be fetched and where it lands; an empty path means there is no
 /// artwork, and an unreadable file is the same thing to a list that has a
 /// fallback. Neither is worth interrupting the user over.
+///
+/// Each file is decoded once and the same image handed out after that, so
+/// rebuilding a list of a few hundred mods neither decodes them again nor
+/// replaces rows whose artwork did not change.
 fn cached_image(path: &str) -> Image {
     if path.is_empty() {
         return Image::default();
     }
-    Image::load_from_path(Path::new(path)).unwrap_or_else(|error| {
-        tracing::debug!(%path, ?error, "cached mod artwork could not be decoded");
-        Image::default()
+    let path = Path::new(path);
+    DECODED_ARTWORK.with(|decoded| {
+        let mut decoded = decoded.borrow_mut();
+        if let Some((known, image)) = decoded.images.get(path)
+            && *known == artwork_stamp(path)
+        {
+            return image.clone();
+        }
+        // Decoded here rather than by `Image::load_from_path`, whose own cache
+        // would hand back a replaced file's old pixels.
+        let image = ephervex_core::decode_mod_artwork(path).map_or_else(Image::default, |art| {
+            Image::from_rgba8(SharedPixelBuffer::clone_from_slice(
+                &art.rgba, art.width, art.height,
+            ))
+        });
+        // Read after decoding, which may have stored the file scaled down.
+        let stamp = artwork_stamp(path);
+        if decoded
+            .images
+            .insert(path.to_path_buf(), (stamp, image.clone()))
+            .is_none()
+        {
+            decoded.order.push_back(path.to_path_buf());
+        }
+        // Every project ever searched for would otherwise stay decoded. The
+        // oldest go first, so a list being rebuilt keeps what it shows.
+        while decoded.images.len() > DECODED_ARTWORK_LIMIT {
+            let Some(oldest) = decoded.order.pop_front() else {
+                break;
+            };
+            decoded.images.remove(&oldest);
+        }
+        image
     })
+}
+
+/// How many artwork files stay decoded, about 64 MiB at the size the cache
+/// stores them.
+const DECODED_ARTWORK_LIMIT: usize = 1024;
+
+/// A file's size, modification time and inode. Replacing a cache entry
+/// renames a new file over it, which always changes the inode even when the
+/// other two match.
+type ArtworkStamp = Option<(u64, Option<std::time::SystemTime>, u64)>;
+
+fn artwork_stamp(path: &Path) -> ArtworkStamp {
+    let metadata = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((metadata.len(), metadata.modified().ok(), inode))
+}
+
+/// Decoded artwork by file, and the order files were first decoded in.
+#[derive(Default)]
+struct DecodedArtwork {
+    images: HashMap<PathBuf, (ArtworkStamp, Image)>,
+    order: std::collections::VecDeque<PathBuf>,
+}
+
+thread_local! {
+    static DECODED_ARTWORK: RefCell<DecodedArtwork> = RefCell::new(DecodedArtwork::default());
 }
 
 fn mod_search_rows(rows: Vec<ModSearchData>) -> Vec<ModSearchRow> {
@@ -25759,5 +25822,30 @@ mod tests {
         lifecycle.apply(host, request, None);
         lifecycle.stamp_server(&mut row);
         assert_eq!(row.state_line, "Running | localhost:25565");
+    }
+
+    #[test]
+    fn mod_artwork_is_decoded_once_and_again_only_when_its_file_changes() {
+        let icons = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/icons/hicolor");
+        let folder = tempfile::tempdir().expect("temp dir");
+        let art = folder.path().join("art.png");
+        std::fs::copy(format!("{icons}/32x32/apps/ephervex.png"), &art).expect("copy");
+        let path = art.to_string_lossy().into_owned();
+
+        let first = super::cached_image(&path);
+        let again = super::cached_image(&path);
+        assert_eq!(first.size().width, 32);
+        assert!(
+            first == again,
+            "an unchanged file keeps its image, so its row is left alone"
+        );
+
+        std::fs::copy(format!("{icons}/64x64/apps/ephervex.png"), &art).expect("replace");
+        assert_eq!(
+            super::cached_image(&path).size().width,
+            64,
+            "a replaced cache entry is decoded again"
+        );
+        assert_eq!(super::cached_image("").size().width, 0);
     }
 }
