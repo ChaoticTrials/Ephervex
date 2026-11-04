@@ -334,31 +334,36 @@ export component ManagedModsPanel inherits Rectangle {
             border-width: Theme.strong-border-width;
             border-color: Theme.border-strong;
             background: Theme.surface;
-            clip: true;
-            mod-list := ListView {
+            // Clipped square, inside the border, rather than to the rounded
+            // corners: a rounded clip draws every visible row through an
+            // offscreen layer on each scroll step.
+            Rectangle {
                 x: Theme.strong-border-width;
                 y: Theme.strong-border-width;
                 width: parent.width - 2 * Theme.strong-border-width;
                 height: parent.height - 2 * Theme.strong-border-width;
-                // A row never scrolls sideways; the pane decides when it is
-                // compact instead.
-                content-width: self.visible-width;
-                // Every row the same declared height, which is what lets the
-                // list create only the rows in view.
-                for mod[index] in root.host.mods : Rectangle {
-                    height: Theme.mod-row-height;
-                    ModCard {
-                        width: parent.width;
-                        item: mod;
-                        compact: root.compact;
-                        togglable: !root.read-only;
-                        mods-are-the-users: root.mods-are-the-users;
-                        manage(path) => { root.manage(path); }
-                        toggle(path, on) => { root.toggle(path, on); }
-                        restore-file(path) => { root.restore-file(path); }
-                        delete-file(path, title) => { root.delete-file(mod, path, title); }
+                clip: true;
+                mod-list := ListView {
+                    // A row never scrolls sideways; the pane decides when it is
+                    // compact instead.
+                    content-width: self.visible-width;
+                    // Every row the same declared height, which is what lets the
+                    // list create only the rows in view.
+                    for mod[index] in root.host.mods : Rectangle {
+                        height: Theme.mod-row-height;
+                        ModCard {
+                            width: parent.width;
+                            item: mod;
+                            compact: root.compact;
+                            togglable: !root.read-only;
+                            mods-are-the-users: root.mods-are-the-users;
+                            manage(path) => { root.manage(path); }
+                            toggle(path, on) => { root.toggle(path, on); }
+                            restore-file(path) => { root.restore-file(path); }
+                            delete-file(path, title) => { root.delete-file(mod, path, title); }
+                        }
+                        if index > 0 : Rectangle { y: 0; height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
                     }
-                    if index > 0 : Rectangle { y: 0; height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
                 }
             }
         }

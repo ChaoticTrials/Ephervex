@@ -60,7 +60,9 @@ export component ModArtwork inherits Rectangle {
     border-width: 1px;
     border-color: root.tone.with-alpha(0.45);
     background: root.tone.with-alpha(0.1);
-    clip: true;
+    // Not clipped: the icon sits inside the rounded corners already, and a
+    // rounded clip makes the renderer draw the tile through an offscreen
+    // layer, again on every frame a list scrolls.
     if root.icon.width > 0 : Image { x: 3px; y: 3px; width: root.size - 6px; height: root.size - 6px; source: root.icon; image-fit: contain; }
     if root.icon.width == 0 : Image { x: root.size / 4; y: root.size / 4; width: root.size / 2; height: root.size / 2; source: @image-url("../../../../assets/icons/semantic-mod.svg"); image-fit: contain; colorize: root.tone; }
 }

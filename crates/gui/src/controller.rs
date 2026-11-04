@@ -25858,7 +25858,7 @@ mod tests {
         let source = ui_markup();
         assert!(source.contains("mod-list := ListView {"));
         assert!(source.contains(
-            "for mod[index] in root.host.mods : Rectangle {\n                    height: Theme.mod-row-height;"
+            "for mod[index] in root.host.mods : Rectangle {\n                        height: Theme.mod-row-height;"
         ));
         assert!(source.contains(
             "    height: Theme.mod-row-height;\n    background: root.item.suspect-confidence"
