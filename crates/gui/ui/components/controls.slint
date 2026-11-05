@@ -281,7 +281,11 @@ export component AppButton inherits Rectangle {
             opacity: root.enabled ? 1 : Theme.disabled-opacity;
         }
     }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.button-radius; activated => { root.clicked(); } }
+    keys := KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.button-radius; activated => { root.clicked(); } }
+    // For a virtualized list that has to track and move focus itself.
+    out property <bool> has-keyboard-focus: keys.has-focus;
+    public function focus-control() { keys.focus(); }
+    public function clear-keyboard-focus() { keys.clear-focus(); }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
@@ -415,7 +419,11 @@ export component IconButton inherits Rectangle {
             vertical-alignment: center;
         }
     }
-    KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    keys := KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    // For a virtualized list that has to track and move focus itself.
+    out property <bool> has-keyboard-focus: keys.has-focus;
+    public function focus-control() { keys.focus(); }
+    public function clear-keyboard-focus() { keys.clear-focus(); }
     // Always enabled, so a disabled button still reports hover and can
     // explain itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
@@ -648,7 +656,11 @@ export component Toggle inherits Rectangle {
             animate x { duration: 100ms; }
         }
     }
-    KeyboardFocus { width: root.width; height: root.height; ring-radius: root.height / 2; enabled: root.enabled; activated => { root.request(); } }
+    keys := KeyboardFocus { width: root.width; height: root.height; ring-radius: root.height / 2; enabled: root.enabled; activated => { root.request(); } }
+    // For a virtualized list that has to track and move focus itself.
+    out property <bool> has-keyboard-focus: keys.has-focus;
+    public function focus-control() { keys.focus(); }
+    public function clear-keyboard-focus() { keys.clear-focus(); }
     TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;

@@ -58,6 +58,7 @@ mod mod_relations_panel;
 mod mod_toggle_state;
 mod mod_version_badges;
 mod mods_list_card_height;
+mod mods_list_keyboard_focus;
 mod outlined_edges;
 mod pack_content_surface;
 mod pack_link_dialog;

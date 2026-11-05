@@ -156,6 +156,44 @@ export component LinkedTargetsPanel inherits Rectangle {
     }
 }
 
+// Hands Tab at the end of a row's controls to the list, which builds the next row.
+component RowStop inherits FocusScope {
+    // Whether Tab or Shift+Tab leaves the row from this control.
+    in property <bool> leaves-forward;
+    in property <bool> leaves-backward;
+    // The list wants this control focused.
+    in property <bool> asked;
+    // The mod the row shows, and whether the control inside has focus.
+    in property <string> identity;
+    in property <bool> holds-focus;
+    callback leave(forward: bool);
+    callback focus-requested();
+    callback entered();
+    // The row shows another mod while its control has focus.
+    callback reused();
+    focus-on-tab-navigation: false;
+    focus-on-click: false;
+    init => { if (root.asked) { root.focus-requested(); } }
+    changed asked => { if (root.asked) { root.focus-requested(); } }
+    changed holds-focus => { if (root.holds-focus) { root.entered(); } }
+    changed identity => { if (root.holds-focus) { root.reused(); } }
+    key-pressed(event) => {
+        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+            return reject;
+        }
+        if (event.text == Key.Tab && !event.modifiers.shift && root.leaves-forward) {
+            root.leave(true);
+            return accept;
+        }
+        if ((event.text == Key.Backtab || (event.text == Key.Tab && event.modifiers.shift)) && root.leaves-backward) {
+            root.leave(false);
+            return accept;
+        }
+        return reject;
+    }
+    HorizontalLayout { @children }
+}
+
 // One row of the Managed Mods list: the mod, what is worth saying about it,
 // its version, whose it is, and the two things done to it often.
 //
@@ -185,6 +223,28 @@ export component ModCard inherits Rectangle {
     // Decided by the pane, not by this row's own width, which the columns
     // themselves would then feed back into.
     in property <bool> compact;
+    // Where this row stands in the list.
+    in property <int> row-index;
+    in property <int> row-count;
+    // The row being focused (-1 for none), and whether from its end (Shift+Tab).
+    in property <int> focus-request: -1;
+    in property <bool> focus-request-from-end;
+    // Tab or Shift+Tab left this row for its neighbor.
+    callback step-focus(forward: bool);
+    callback focus-taken();
+    callback focus-entered();
+    // Restore replaces the switch and the bin once the jar is gone.
+    property <bool> has-stops: root.togglable || root.item.can-delete-file || root.item.can-remove;
+    property <bool> shows-restore: root.has-stops && root.item.deleted;
+    property <bool> shows-toggle: !root.item.deleted && root.togglable;
+    property <bool> shows-bin: !root.item.deleted && (root.item.can-delete-file || root.item.can-remove);
+    property <bool> has-next: root.row-index < root.row-count - 1;
+    property <bool> has-previous: root.row-index > 0;
+    property <bool> asked: root.focus-request == root.row-index;
+    // A row without controls passes the request on.
+    function relay() { if (root.asked && !root.has-stops) { root.step-focus(!root.focus-request-from-end); } }
+    init => { root.relay(); }
+    changed asked => { root.relay(); }
     height: Theme.mod-row-height;
     background: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.12) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.12) : touch.has-hover && root.item.can-manage ? Theme.elevated : transparent;
     touch := TouchArea {
@@ -259,14 +319,53 @@ export component ModCard inherits Rectangle {
             spacing: 8px;
             // Nothing to turn on or throw away while the jar is gone.
             // The one thing left is putting it back.
-            if root.item.deleted : VerticalLayout { alignment: center; padding-right: Theme.shadow-room; AppButton { text: GuiI18n.text("gui-restore-mod"); compact: true; clicked => { root.restore-file(root.item.logical-path); } } }
-            if !root.item.deleted && root.togglable : VerticalLayout { alignment: center; Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } } }
-            if !root.item.deleted && (root.item.can-delete-file || root.item.can-remove) : VerticalLayout {
+            if root.shows-restore : VerticalLayout {
+                alignment: center; padding-right: Theme.shadow-room;
+                RowStop {
+                    leaves-forward: root.has-next;
+                    leaves-backward: root.has-previous;
+                    asked: root.asked;
+                    identity: root.item.logical-path;
+                    holds-focus: restore.has-keyboard-focus;
+                    leave(forward) => { root.step-focus(forward); }
+                    focus-requested => { restore.focus-control(); root.focus-taken(); }
+                    entered => { root.focus-entered(); }
+                    reused => { restore.clear-keyboard-focus(); }
+                    restore := AppButton { text: GuiI18n.text("gui-restore-mod"); compact: true; clicked => { root.restore-file(root.item.logical-path); } }
+                }
+            }
+            if root.shows-toggle : VerticalLayout {
                 alignment: center;
-                IconButton {
-                    icon: @image-url("../../../../assets/icons/trash.svg");
-                    accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
-                    clicked => { root.delete-file(root.item.logical-path, root.item.title); }
+                RowStop {
+                    leaves-forward: !root.shows-bin && root.has-next;
+                    leaves-backward: root.has-previous;
+                    asked: root.asked && (root.focus-request-from-end ? !root.shows-bin : true);
+                    identity: root.item.logical-path;
+                    holds-focus: loads.has-keyboard-focus;
+                    leave(forward) => { root.step-focus(forward); }
+                    focus-requested => { loads.focus-control(); root.focus-taken(); }
+                    entered => { root.focus-entered(); }
+                    reused => { loads.clear-keyboard-focus(); }
+                    loads := Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } }
+                }
+            }
+            if root.shows-bin : VerticalLayout {
+                alignment: center;
+                RowStop {
+                    leaves-forward: root.has-next;
+                    leaves-backward: !root.shows-toggle && root.has-previous;
+                    asked: root.asked && (root.focus-request-from-end ? true : !root.shows-toggle);
+                    identity: root.item.logical-path;
+                    holds-focus: bin.has-keyboard-focus;
+                    leave(forward) => { root.step-focus(forward); }
+                    focus-requested => { bin.focus-control(); root.focus-taken(); }
+                    entered => { root.focus-entered(); }
+                    reused => { bin.clear-keyboard-focus(); }
+                    bin := IconButton {
+                        icon: @image-url("../../../../assets/icons/trash.svg");
+                        accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
+                        clicked => { root.delete-file(root.item.logical-path, root.item.title); }
+                    }
                 }
             }
         }
@@ -327,6 +426,26 @@ export component ManagedModsPanel inherits Rectangle {
         }
         if root.host.mods.length > 0 : mod-card := Rectangle {
             property <length> rows-height: root.host.mods.length * Theme.mod-row-height + 2 * Theme.strong-border-width;
+            // The row being focused (-1 for none); it takes focus itself once built.
+            property <int> focus-request: -1;
+            property <bool> focus-request-from-end: false;
+            // Scrolls the least that shows the whole row.
+            function bring-into-view(row: int) {
+                if (row * Theme.mod-row-height < -mod-list.content-y) {
+                    mod-list.content-y = -(row * Theme.mod-row-height);
+                } else if ((row + 1) * Theme.mod-row-height > -mod-list.content-y + mod-list.visible-height) {
+                    mod-list.content-y = -((row + 1) * Theme.mod-row-height - mod-list.visible-height);
+                }
+            }
+            function focus-row(row: int, from-end: bool) {
+                if (row < 0 || row >= root.host.mods.length) {
+                    focus-request = -1;
+                    return;
+                }
+                bring-into-view(row);
+                focus-request-from-end = from-end;
+                focus-request = row;
+            }
             // As tall as its rows, and shorter than that when the page is.
             preferred-height: self.rows-height;
             vertical-stretch: 0;
@@ -359,6 +478,13 @@ export component ManagedModsPanel inherits Rectangle {
                             compact: root.compact;
                             togglable: !root.read-only;
                             mods-are-the-users: root.mods-are-the-users;
+                            row-index: index;
+                            row-count: root.host.mods.length;
+                            focus-request: mod-card.focus-request;
+                            focus-request-from-end: mod-card.focus-request-from-end;
+                            step-focus(forward) => { mod-card.focus-row(index + (forward ? 1 : -1), !forward); }
+                            focus-taken => { mod-card.focus-request = -1; }
+                            focus-entered => { mod-card.bring-into-view(index); }
                             manage(path) => { root.manage(path); }
                             toggle(path, on) => { root.toggle(path, on); }
                             restore-file(path) => { root.restore-file(path); }
