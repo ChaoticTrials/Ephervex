@@ -325,11 +325,13 @@ export component ManagedModsPanel inherits Rectangle {
             title: root.host.mods-query != "" ? GuiI18n.text("gui-no-mods-match-title") : GuiI18n.text("gui-no-managed-mods");
             message: root.host.mods-query != "" ? GuiI18n.value("gui-no-mods-match", root.host.mods-query) : root.empty-detail;
         }
-        if root.host.mods.length > 0 : Rectangle {
+        if root.host.mods.length > 0 : mod-card := Rectangle {
+            property <length> rows-height: root.host.mods.length * Theme.mod-row-height + 2 * Theme.strong-border-width;
             // As tall as its rows, and shorter than that when the page is.
-            preferred-height: root.host.mods.length * Theme.mod-row-height + 2 * Theme.strong-border-width;
+            preferred-height: self.rows-height;
             vertical-stretch: 0;
-            min-height: 120px;
+            // The floor never pads a short list: one row is a card of one row.
+            min-height: min(self.rows-height, 120px);
             border-radius: Theme.card-radius;
             border-width: Theme.strong-border-width;
             border-color: Theme.border-strong;
