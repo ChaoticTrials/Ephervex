@@ -422,5 +422,5 @@ pub use ephervex_storage::{
     ServerCommitWarning, ServerDefaults, ServerFolder, ServerNetworkSettings,
     ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup, ServerPortSelection,
     ServerRecord, ServerRootConflict, SetAsideNotice, StorageError, TechnicalTextSize, TextAnchor,
-    TextView, running_state,
+    TextView, UnreadableHost, UnreadableHostKind, UnreadableHostProblem, running_state,
 };

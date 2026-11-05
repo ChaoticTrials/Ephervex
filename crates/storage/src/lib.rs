@@ -95,7 +95,10 @@ pub use records::{
     ServerNetworkSettings, ServerOperatorIdentity, ServerOperatorProfile, ServerOperatorSetup,
     ServerPortSelection, ServerRecord,
 };
-pub use registry::{HostClaim, RecipeClaim, Registry, RegistryError};
+pub use registry::{
+    HostClaim, RecipeClaim, Registry, RegistryError, UnreadableHost, UnreadableHostKind,
+    UnreadableHostProblem,
+};
 pub use removal::remove_tree_if_present;
 pub use restore::{
     RestorePart, RestorePartState, RestoreTransaction, prepare_restore,

@@ -854,6 +854,8 @@ fn reindex_orphaned_clients(
     report: &mut ReconciliationReport,
 ) -> Result<(), RegistryError> {
     let indexed = registry.list_clients()?;
+    // An unreadable row is still indexed: its host is left as it is.
+    let unreadable = registry.unreadable_client_ids()?;
     let mut discovered =
         std::collections::BTreeMap::<InstanceId, Vec<(PathBuf, ClientRecord)>>::new();
 
@@ -861,7 +863,11 @@ fn reindex_orphaned_clients(
         // A move's copy that was never renamed into place is part of a host at
         // best, never adopted, and may not hold its metadata yet.
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<InstanceId>() {
+            if let Some(id) = staged
+                .parse::<InstanceId>()
+                .ok()
+                .filter(|id| !unreadable.contains(id))
+            {
                 let staged = staged.to_owned();
                 settle_staged_move(
                     registry,
@@ -894,6 +900,9 @@ fn reindex_orphaned_clients(
             }
         };
 
+        if unreadable.contains(&record.id) {
+            continue;
+        }
         let entry = indexed.iter().find(|entry| entry.id == record.id);
         let Some(record) =
             settle_unfinished_client_root(registry, &directory, record, entry, report)
@@ -1031,17 +1040,22 @@ fn settle_unfinished_client_root(
     Some(record)
 }
 
-fn reindex_orphaned_servers(
+/// The roots under the persistent server directory that carry readable server
+/// metadata, by server id. A server whose index row cannot be read is skipped:
+/// it is indexed, and its files are left as they are.
+fn discover_server_roots(
     registry: &Registry,
+    unreadable: &HashSet<ServerId>,
     report: &mut ReconciliationReport,
-) -> Result<(), RegistryError> {
-    let indexed = registry.list_servers()?;
-    let known: HashSet<ServerId> = indexed.iter().map(|record| record.id).collect();
-
+) -> std::collections::BTreeMap<ServerId, Vec<PathBuf>> {
     let mut discovered = std::collections::BTreeMap::<ServerId, Vec<PathBuf>>::new();
     for directory in candidate_directories(&registry.paths().persistent_servers_dir()) {
         if let Some(staged) = crate::relocate::staged_name(&directory) {
-            if let Ok(id) = staged.parse::<ServerId>() {
+            if let Some(id) = staged
+                .parse::<ServerId>()
+                .ok()
+                .filter(|id| !unreadable.contains(id))
+            {
                 let staged = staged.to_owned();
                 settle_staged_move(
                     registry,
@@ -1059,10 +1073,25 @@ fn reindex_orphaned_servers(
         if !metadata::is_server_root(&directory) {
             continue;
         }
-        if let Ok(record) = metadata::read_server_metadata(&directory) {
+        if let Ok(record) = metadata::read_server_metadata(&directory)
+            && !unreadable.contains(&record.id)
+        {
             discovered.entry(record.id).or_default().push(directory);
         }
     }
+    discovered
+}
+
+fn reindex_orphaned_servers(
+    registry: &Registry,
+    report: &mut ReconciliationReport,
+) -> Result<(), RegistryError> {
+    let indexed = registry.list_servers()?;
+    // An unreadable row is still indexed: its host is left as it is.
+    let unreadable = registry.unreadable_server_ids()?;
+    let known: HashSet<ServerId> = indexed.iter().map(|record| record.id).collect();
+
+    let discovered = discover_server_roots(registry, &unreadable, report);
 
     for (id, mut roots) in discovered {
         roots.sort();
@@ -1138,7 +1167,10 @@ fn reindex_orphaned_servers(
         // A re-indexed server may reference a client that is no longer indexed.
         // Clear it through canonical metadata before the SQLite mirror.
         if let Some(client) = record.linked_client_id
-            && registry.client(client).is_err()
+            && matches!(
+                registry.client(client),
+                Err(RegistryError::InstanceUnknown { .. })
+            )
         {
             record.linked_client_id = None;
             metadata::write_server_metadata(&directory, &record)?;
@@ -2423,6 +2455,85 @@ mod tests {
         let report = reconcile(&registry).expect("reconcile");
         assert_eq!(report.reindexed.len(), 1);
         assert_eq!(registry.client(record.id).expect("recovered"), record);
+    }
+
+    #[test]
+    fn a_host_whose_index_row_cannot_be_read_is_left_alone_and_the_others_still_reconcile() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let hidden_client = registry
+            .create_published_client(
+                NewClient::new("hidden", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create client");
+        let hidden_server = registry
+            .create_server(
+                NewServer::new("hidden server", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create server");
+        let connection = registry.index().connection();
+        connection
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{}';
+                 UPDATE servers SET loader_kind = 'fabric' WHERE id = '{}';",
+                hidden_client.id, hidden_server.id
+            ))
+            .expect("tamper");
+        let metadata_before =
+            std::fs::read(metadata::client_metadata_path(&hidden_client.root)).expect("metadata");
+
+        let report = reconcile(&registry).expect("reconcile succeeds");
+
+        assert!(report.reindexed.is_empty());
+        assert!(report.client_conflicts.is_empty());
+        assert!(report.server_conflicts.is_empty());
+        assert_eq!(
+            std::fs::read(metadata::client_metadata_path(&hidden_client.root)).expect("metadata"),
+            metadata_before
+        );
+        assert!(hidden_client.root.is_dir());
+        assert!(hidden_server.root.is_dir());
+        assert_eq!(registry.unreadable_hosts().expect("report").len(), 2);
+    }
+
+    #[test]
+    fn a_re_indexed_server_keeps_its_link_to_a_client_whose_row_cannot_be_read() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let client = registry
+            .create_published_client(
+                NewClient::new("client", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("create client");
+        let server = registry
+            .create_server(
+                NewServer::new("server", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent)
+                    .linked_to(client.id),
+            )
+            .expect("create server");
+        registry
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{}';
+                 DELETE FROM servers WHERE id = '{}';",
+                client.id, server.id
+            ))
+            .expect("tamper");
+
+        let report = reconcile(&registry).expect("reconcile");
+
+        assert_eq!(report.reindexed.len(), 1);
+        assert_eq!(
+            metadata::read_server_metadata(&server.root)
+                .expect("metadata")
+                .linked_client_id,
+            Some(client.id)
+        );
     }
 
     #[test]

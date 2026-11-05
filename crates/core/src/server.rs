@@ -260,11 +260,7 @@ impl App {
                 };
                 let properties = network_properties(&request.network)?;
                 let address = bind_address(&properties.bind);
-                let assigned = self
-                    .list_servers()?
-                    .into_iter()
-                    .map(|server| server.network.port)
-                    .collect::<std::collections::HashSet<_>>();
+                let assigned = self.registry().server_ports_in_use()?;
                 request.network.port = select_available_port_with(
                     address,
                     DEFAULT_SERVER_PORT,

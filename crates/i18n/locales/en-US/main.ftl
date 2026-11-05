@@ -322,6 +322,11 @@ error-registry-metadata-unsupported-version = The instance metadata at { $path }
 error-registry-metadata-written-by-newer = The instance metadata at { $path } names a value only a newer version of { app-name } knows.
 .action = Open the instance with the version that created it.
 
+error-registry-index-row-written-by-newer = "{ $name }" names a value only a newer version of { app-name } knows, so it is not listed.
+.action = Open it with the version that created it.
+
+error-registry-index-row-invalid = The saved entry for "{ $name }" could not be read, so it is not listed.
+
 error-registry-root-occupied = That instance directory already contains files.
 .action = Choose a different name, or remove { $path } first.
 error-registry-instance-id-taken = An instance with that id already exists.

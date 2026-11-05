@@ -666,6 +666,12 @@ impl App {
                 }
             }
         }
+        // A host whose index row cannot be read is not in either listing, yet
+        // it still needs whatever it was installed with.
+        for host in self.unreadable_hosts()? {
+            warn!(name = %host.name, problem = ?host.problem, "a host's index row could not be read");
+            unreadable_records.push(host.name);
+        }
         let mut references = HostReferences {
             versions: Vec::new(),
             uncached: Vec::new(),
@@ -1937,6 +1943,36 @@ mod tests {
         );
         let plan = world.plan().await;
         assert!(plan.is_empty());
+        assert!(pack.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_host_whose_index_row_cannot_be_read_is_named_and_leaves_everything_undecided() {
+        let world = World::new().await;
+        let client = world.client("1.21.1", LoaderSelection::vanilla());
+        world
+            .app
+            .registry()
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{}'",
+                client.id
+            ))
+            .expect("tamper");
+        let pack = world.stray_download(b"a pack file");
+
+        let inspection = world.inspect().await;
+
+        assert_eq!(inspection.unreadable_hosts, ["client".to_owned()]);
+        assert_eq!(
+            group(&inspection, ManagedStorageKind::DownloadedFiles)
+                .withheld
+                .first()
+                .map(|(reason, _)| *reason),
+            Some(WithheldReason::HostReferencesUnknown)
+        );
+        assert!(world.plan().await.is_empty());
         assert!(pack.is_file());
     }
 

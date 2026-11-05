@@ -69,6 +69,66 @@ const SERVER_COLUMNS: &str = "id, name, root, storage_class, linked_client_id, m
      java_override, jvm_override, attention, created_at, updated_at, last_started_at, installation, \
      operator_setup";
 
+/// Whether an index row describes an instance or a server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreadableHostKind {
+    Instance,
+    Server,
+}
+
+/// Why this build cannot read an index row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnreadableHostProblem {
+    /// The row names a loader or storage class this build does not know, so a
+    /// newer build wrote it. The value is not safe to approximate.
+    WrittenByNewer { column: &'static str, value: String },
+    /// The row holds a value that is not valid for its column.
+    Invalid { column: &'static str },
+}
+
+/// An index row this build cannot turn into a record, kept apart so it is
+/// reported by itself and does not fail the listing of the other hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableHost {
+    pub kind: UnreadableHostKind,
+    /// The row's id exactly as the index holds it, which may not parse.
+    pub id: String,
+    pub name: String,
+    pub problem: UnreadableHostProblem,
+}
+
+impl UnreadableHost {
+    fn from_row(kind: UnreadableHostKind, row: &Row<'_>, error: IndexError) -> Self {
+        let problem = match error {
+            IndexError::MalformedRow { column, value }
+                if matches!(column, "loader_kind" | "storage_class") =>
+            {
+                UnreadableHostProblem::WrittenByNewer { column, value }
+            }
+            IndexError::MalformedRow { column, .. } => UnreadableHostProblem::Invalid { column },
+            _ => UnreadableHostProblem::Invalid { column: "row" },
+        };
+        Self {
+            kind,
+            id: row.get(0).unwrap_or_default(),
+            name: row.get(1).unwrap_or_default(),
+            problem,
+        }
+    }
+
+    /// The `ephervex-i18n` message id describing this host to a user. The
+    /// message takes the host's `name`.
+    #[must_use]
+    pub const fn message_id(&self) -> &'static str {
+        match self.problem {
+            UnreadableHostProblem::WrittenByNewer { .. } => {
+                "error-registry-index-row-written-by-newer"
+            }
+            UnreadableHostProblem::Invalid { .. } => "error-registry-index-row-invalid",
+        }
+    }
+}
+
 /// Failures from registry operations.
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
@@ -640,24 +700,141 @@ impl Registry {
             .map_err(RegistryError::from)
     }
 
-    /// Lists every indexed client instance, newest first.
+    /// Lists every indexed client instance this build can read, newest first.
     ///
     /// Each record is its index row with the issue link read from the
-    /// instance's metadata, the only place it is kept.
+    /// instance's metadata, the only place it is kept. A row this build cannot
+    /// interpret, such as one naming a loader only a newer build knows, is left
+    /// out and does not hide the others; [`Self::unreadable_hosts`] names it.
     pub fn list_clients(&self) -> Result<Vec<ClientRecord>, RegistryError> {
         let connection = self.index.connection();
         let mut statement = connection.prepare(&format!(
             "SELECT {CLIENT_COLUMNS} FROM instances ORDER BY created_at DESC, id"
         ))?;
-        let rows = statement.query_map([], client_from_row)?;
+        let rows = statement.query_map([], |row| {
+            Ok(client_from_row(row)?.map_err(|error| {
+                UnreadableHost::from_row(UnreadableHostKind::Instance, row, error)
+            }))
+        })?;
 
         let mut records = Vec::new();
         for row in rows {
-            let mut record = row??;
-            record.issue_link = metadata_issue_link(&record);
-            records.push(record);
+            if let Ok(mut record) = row? {
+                record.issue_link = metadata_issue_link(&record);
+                records.push(record);
+            }
         }
         Ok(records)
+    }
+
+    /// The instances and servers whose index rows this build cannot read,
+    /// instances first and each kind newest first.
+    ///
+    /// The listings leave these out so one row cannot hide every other host.
+    /// Whatever acts on the set of hosts, such as cleaning shared storage,
+    /// reads this too, so a host it cannot see is not mistaken for no host.
+    pub fn unreadable_hosts(&self) -> Result<Vec<UnreadableHost>, RegistryError> {
+        let connection = self.index.connection();
+        let mut hosts = Vec::new();
+
+        let mut statement = connection.prepare(&format!(
+            "SELECT {CLIENT_COLUMNS} FROM instances ORDER BY created_at DESC, id"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok(client_from_row(row)?
+                .err()
+                .map(|error| UnreadableHost::from_row(UnreadableHostKind::Instance, row, error)))
+        })?;
+        for row in rows {
+            hosts.extend(row?);
+        }
+
+        let mut statement = connection.prepare(&format!(
+            "SELECT {SERVER_COLUMNS} FROM servers ORDER BY created_at DESC, id"
+        ))?;
+        let rows = statement.query_map([], |row| {
+            Ok(server_from_row(row)?
+                .err()
+                .map(|error| UnreadableHost::from_row(UnreadableHostKind::Server, row, error)))
+        })?;
+        for row in rows {
+            hosts.extend(row?);
+        }
+        Ok(hosts)
+    }
+
+    /// The ids of the indexed instances, readable or not.
+    ///
+    /// For code that must know which hosts exist, such as pruning what names a
+    /// host that is gone. An id that does not parse names no host a record can
+    /// refer to and is left out.
+    pub fn indexed_client_ids(
+        &self,
+    ) -> Result<std::collections::BTreeSet<InstanceId>, RegistryError> {
+        self.indexed_ids("instances")
+    }
+
+    /// The ids of the indexed servers, readable or not.
+    pub fn indexed_server_ids(
+        &self,
+    ) -> Result<std::collections::BTreeSet<ServerId>, RegistryError> {
+        self.indexed_ids("servers")
+    }
+
+    fn indexed_ids<T: std::str::FromStr + Ord>(
+        &self,
+        table: &'static str,
+    ) -> Result<std::collections::BTreeSet<T>, RegistryError> {
+        let connection = self.index.connection();
+        let mut statement = connection.prepare(&format!("SELECT id FROM {table}"))?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ids = std::collections::BTreeSet::new();
+        for row in rows {
+            ids.extend(row?.parse());
+        }
+        Ok(ids)
+    }
+
+    /// The ids of the instances whose index rows this build cannot read.
+    pub fn unreadable_client_ids(
+        &self,
+    ) -> Result<std::collections::HashSet<InstanceId>, RegistryError> {
+        self.unreadable_ids(UnreadableHostKind::Instance)
+    }
+
+    /// The ids of the servers whose index rows this build cannot read.
+    pub fn unreadable_server_ids(
+        &self,
+    ) -> Result<std::collections::HashSet<ServerId>, RegistryError> {
+        self.unreadable_ids(UnreadableHostKind::Server)
+    }
+
+    fn unreadable_ids<T: std::str::FromStr + Eq + std::hash::Hash>(
+        &self,
+        kind: UnreadableHostKind,
+    ) -> Result<std::collections::HashSet<T>, RegistryError> {
+        Ok(self
+            .unreadable_hosts()?
+            .into_iter()
+            .filter(|host| host.kind == kind)
+            .filter_map(|host| host.id.parse().ok())
+            .collect())
+    }
+
+    /// The ports every indexed server is set to listen on, including servers
+    /// whose rows this build cannot fully read, so a new server is never given
+    /// a port a hidden one holds.
+    pub fn server_ports_in_use(&self) -> Result<std::collections::HashSet<u16>, RegistryError> {
+        let connection = self.index.connection();
+        let mut statement = connection.prepare("SELECT network FROM servers")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let mut ports = std::collections::HashSet::new();
+        for row in rows {
+            if let Ok(network) = serde_json::from_str::<ServerNetworkSettings>(&row?) {
+                ports.insert(network.port);
+            }
+        }
+        Ok(ports)
     }
 
     /// Persists changes to a client instance.
@@ -1389,7 +1566,11 @@ impl Registry {
         }
     }
 
-    /// Lists every indexed server, newest first.
+    /// Lists every indexed server this build can read, newest first.
+    ///
+    /// A row this build cannot interpret is left out the way
+    /// [`Self::list_clients`] leaves one out, and named by
+    /// [`Self::unreadable_hosts`].
     pub fn list_servers(&self) -> Result<Vec<ServerRecord>, RegistryError> {
         let connection = self.index.connection();
         let mut statement = connection.prepare(&format!(
@@ -1399,7 +1580,9 @@ impl Registry {
 
         let mut records = Vec::new();
         for row in rows {
-            records.push(row??);
+            if let Ok(record) = row? {
+                records.push(record);
+            }
         }
         Ok(records)
     }
@@ -3254,6 +3437,197 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn an_instance_row_a_newer_build_wrote_does_not_hide_the_other_instances() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let healthy = registry
+            .create_published_client(NewClient::new(
+                "healthy",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let tampered_loader = registry
+            .create_published_client(NewClient::new(
+                "future loader",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let tampered_storage = registry
+            .create_published_client(NewClient::new(
+                "future storage",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        let connection = registry.index().connection();
+        connection
+            .execute(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = ?1",
+                params![tampered_loader.id.to_string()],
+            )
+            .expect("tamper");
+        connection
+            .execute(
+                "UPDATE instances SET storage_class = 'archived' WHERE id = ?1",
+                params![tampered_storage.id.to_string()],
+            )
+            .expect("tamper");
+
+        let listed = registry.list_clients().expect("the listing survives");
+        assert_eq!(
+            listed.iter().map(|record| record.id).collect::<Vec<_>>(),
+            [healthy.id]
+        );
+
+        let mut unreadable = registry.unreadable_hosts().expect("report");
+        unreadable.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(unreadable.len(), 2);
+        assert_eq!(unreadable[0].name, "future loader");
+        assert_eq!(unreadable[0].id, tampered_loader.id.to_string());
+        assert_eq!(unreadable[0].kind, UnreadableHostKind::Instance);
+        assert_eq!(
+            unreadable[0].problem,
+            UnreadableHostProblem::WrittenByNewer {
+                column: "loader_kind",
+                value: "fabric".to_owned(),
+            }
+        );
+        assert_eq!(unreadable[1].name, "future storage");
+        assert_eq!(
+            unreadable[1].message_id(),
+            "error-registry-index-row-written-by-newer"
+        );
+    }
+
+    #[test]
+    fn a_server_row_a_newer_build_wrote_does_not_hide_the_other_servers() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let healthy = registry
+            .create_server(NewServer::new(
+                "healthy",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let tampered = registry
+            .create_server(NewServer::new(
+                "future",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        registry
+            .index()
+            .connection()
+            .execute(
+                "UPDATE servers SET loader_kind = 'fabric' WHERE id = ?1",
+                params![tampered.id.to_string()],
+            )
+            .expect("tamper");
+
+        let listed = registry.list_servers().expect("the listing survives");
+        assert_eq!(
+            listed.iter().map(|record| record.id).collect::<Vec<_>>(),
+            [healthy.id]
+        );
+        let unreadable = registry.unreadable_hosts().expect("report");
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(unreadable[0].kind, UnreadableHostKind::Server);
+        assert_eq!(unreadable[0].name, "future");
+    }
+
+    #[test]
+    fn an_instance_row_with_an_invalid_value_is_reported_as_invalid_not_as_newer() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let healthy = registry
+            .create_published_client(NewClient::new(
+                "healthy",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+        let damaged = registry
+            .create_published_client(NewClient::new(
+                "damaged",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("create");
+
+        registry
+            .index()
+            .connection()
+            .execute(
+                "UPDATE instances SET created_at = 'yesterday' WHERE id = ?1",
+                params![damaged.id.to_string()],
+            )
+            .expect("tamper");
+
+        assert_eq!(registry.list_clients().expect("listing").len(), 1);
+        assert_eq!(registry.list_clients().expect("listing")[0].id, healthy.id);
+        let unreadable = registry.unreadable_hosts().expect("report");
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(
+            unreadable[0].problem,
+            UnreadableHostProblem::Invalid {
+                column: "instances.created_at"
+            }
+        );
+        assert_eq!(
+            unreadable[0].message_id(),
+            "error-registry-index-row-invalid"
+        );
+    }
+
+    #[test]
+    fn a_server_with_an_unreadable_row_still_holds_its_port() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let mut request = NewServer::new("future", "1.20.1", LoaderSelection::vanilla());
+        request.network.port = 25_599;
+        let hidden = registry.create_server(request).expect("create");
+        registry
+            .index()
+            .connection()
+            .execute(
+                "UPDATE servers SET loader_kind = 'fabric' WHERE id = ?1",
+                params![hidden.id.to_string()],
+            )
+            .expect("tamper");
+
+        assert!(registry.list_servers().expect("list").is_empty());
+        assert!(
+            registry
+                .server_ports_in_use()
+                .expect("ports")
+                .contains(&25_599)
+        );
+        assert_eq!(
+            registry.indexed_server_ids().expect("ids"),
+            std::collections::BTreeSet::from([hidden.id])
+        );
+    }
+
+    #[test]
+    fn hosts_that_read_cleanly_are_not_reported_as_unreadable() {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        registry
+            .create_published_client(NewClient::new("x", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        registry
+            .create_server(NewServer::new("s", "1.20.1", LoaderSelection::vanilla()))
+            .expect("create");
+        assert!(registry.unreadable_hosts().expect("report").is_empty());
     }
 
     #[test]

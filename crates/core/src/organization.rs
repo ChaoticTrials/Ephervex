@@ -5,7 +5,6 @@
 //! alter an instance's identity, paths, links, snapshots or timestamps, and it
 //! does not take a host claim: it works while a host is running or moving.
 
-use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
@@ -308,13 +307,15 @@ impl App {
     }
 
     /// Never prunes from a listing that failed: an unreadable index says
-    /// nothing about which hosts exist.
+    /// nothing about which hosts exist. A host whose row this build cannot
+    /// read still exists, so what names it is kept.
     fn forget_stale_organization(&self, organization: &mut Organization) {
-        let (Ok(clients), Ok(servers)) = (self.list_clients(), self.list_servers()) else {
+        let registry = self.registry();
+        let (Ok(clients), Ok(servers)) =
+            (registry.indexed_client_ids(), registry.indexed_server_ids())
+        else {
             return;
         };
-        let clients: BTreeSet<InstanceId> = clients.into_iter().map(|record| record.id).collect();
-        let servers: BTreeSet<ServerId> = servers.into_iter().map(|record| record.id).collect();
         organization.retain_hosts(&clients, &servers);
     }
 
@@ -957,6 +958,40 @@ mod tests {
         world.app.forget_stale_organization(&mut organization);
         assert!(!organization.favorite_clients.contains(&stale));
         assert!(organization.favorite_clients.contains(&id));
+    }
+
+    #[test]
+    fn what_names_a_host_with_an_unreadable_index_row_survives_changes_to_other_hosts() {
+        let world = world();
+        let hidden = world.client("hidden");
+        let other = world.client("other");
+        world
+            .app
+            .set_client_favorite(hidden, true)
+            .expect("favorite");
+        world
+            .app
+            .add_case_step(hidden, "open the world")
+            .expect("case");
+        world
+            .app
+            .registry()
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{hidden}'"
+            ))
+            .expect("tamper");
+
+        world
+            .app
+            .set_client_favorite(other, true)
+            .expect("favorite");
+
+        let view = world.app.organization().unwrap();
+        assert!(view.is_favorite_client(hidden));
+        assert_eq!(view.case_of(hidden).steps.len(), 1);
+        assert!(view.is_favorite_client(other));
     }
 
     #[test]

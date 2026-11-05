@@ -200,8 +200,11 @@ impl App {
             None => return Err(ConnectError::ServerNotLinked { server }.into()),
         }
         let links = self.server_links()?;
+        let prune = self.unreadable_hosts()?.is_empty();
         self.mutate_config(|config| {
-            forget_stale(&mut config.linked_pairs, &links);
+            if prune {
+                forget_stale(&mut config.linked_pairs, &links);
+            }
             config.linked_pairs.insert(
                 client.to_string(),
                 LinkedPairConfig {
@@ -227,8 +230,11 @@ impl App {
             .get(&client)
             .and_then(|servers| servers.first())
             .map(ToString::to_string);
+        let prune = self.unreadable_hosts()?.is_empty();
         self.mutate_config(|config| {
-            forget_stale(&mut config.linked_pairs, &links);
+            if prune {
+                forget_stale(&mut config.linked_pairs, &links);
+            }
             match first {
                 Some(first) => {
                     config.linked_pairs.insert(
@@ -299,6 +305,9 @@ fn resolve(
 }
 
 /// Drops the entries of clients that are gone or have no linked server left.
+///
+/// Callers skip it while a host's index row is unreadable: the links are then
+/// incomplete, and an entry that looks stale may belong to that host.
 fn forget_stale(
     pairs: &mut std::collections::BTreeMap<String, LinkedPairConfig>,
     links: &HashMap<InstanceId, Vec<ServerId>>,
@@ -394,6 +403,42 @@ mod tests {
             world.app.linked_server_ids(client).expect("linked"),
             [server],
             "unpairing leaves the server linked"
+        );
+    }
+
+    #[test]
+    fn pair_settings_of_a_host_with_an_unreadable_index_row_survive_pairing_another_client() {
+        let mut world = world();
+        let hidden = world.client("Hidden");
+        let hidden_server = world.linked_server("Hidden server", hidden);
+        let other = world.client("Other");
+        let other_server = world.linked_server("Other server", other);
+        world
+            .app
+            .set_linked_pair(hidden, hidden_server, true)
+            .expect("pair");
+        world
+            .app
+            .registry()
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{hidden}'"
+            ))
+            .expect("tamper");
+
+        world
+            .app
+            .set_linked_pair(other, other_server, false)
+            .expect("pair");
+        world.app.clear_linked_pair(other).expect("unpair");
+
+        assert!(
+            world
+                .app
+                .config()
+                .linked_pairs
+                .contains_key(&hidden.to_string())
         );
     }
 

@@ -76,6 +76,9 @@ Unknown values are handled according to what the value authorizes:
   1.0.0 report host metadata that has a supported version but such a value as
   written by a newer version, not as invalid. Storage cleanup names each host
   whose record it could not read.
+  An index row with such a loader or storage value is left out of the instance
+  and server listings and reported on its own, so it does not hide the other
+  hosts. Storage cleanup names it and leaves what it may need undecided.
 - Cache-only enums may reject an unknown value because deleting and rebuilding
   the cache is the recovery path.
 

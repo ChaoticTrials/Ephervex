@@ -1064,6 +1064,15 @@ impl App {
         Ok(self.registry().list_servers()?)
     }
 
+    /// The instances and servers whose index rows this build cannot read.
+    ///
+    /// [`Self::list_clients`] and [`Self::list_servers`] leave these out, so a
+    /// frontend that wants to say why a host is missing, and anything that
+    /// must not treat an unreadable host as absent, asks here.
+    pub fn unreadable_hosts(&self) -> CoreResult<Vec<crate::UnreadableHost>> {
+        Ok(self.registry().unreadable_hosts()?)
+    }
+
     // -- minecraft versions ------------------------------------------------
 
     /// The Minecraft releases Ephervex offers: `type == "release"` at or above

@@ -4959,6 +4959,7 @@ fn print_instance_list(app: &App, args: &InstanceListArgs, json: bool) -> anyhow
     } else {
         VersionOrder::default()
     };
+    report_unreadable_hosts(app, ephervex_core::UnreadableHostKind::Instance)?;
     let listed = ephervex_core::list_instances(app.instance_facts()?, &filter, sort, &order);
     let mut records = app
         .list_clients()?
@@ -5134,7 +5135,34 @@ fn print_group(app: &App, group: &InstanceGroup, json: bool) {
     }
 }
 
+/// Says on stderr which hosts of `kind` the listing leaves out because this
+/// build cannot read them, so a missing host is explained and the output on
+/// stdout stays what a script expects.
+fn report_unreadable_hosts(
+    app: &App,
+    kind: ephervex_core::UnreadableHostKind,
+) -> anyhow::Result<()> {
+    for host in app
+        .unreadable_hosts()?
+        .iter()
+        .filter(|host| host.kind == kind)
+    {
+        let args = [("name", MessageArg::from(host.name.as_str()))];
+        eprintln!(
+            "{}",
+            ephervex_i18n::lookup_args(host.message_id(), args.clone())
+        );
+        if let Some(action) =
+            ephervex_i18n::lookup_attribute_args(host.message_id(), "action", args)
+        {
+            eprintln!("{action}");
+        }
+    }
+    Ok(())
+}
+
 fn list_servers(app: &App, json: bool) -> anyhow::Result<()> {
+    report_unreadable_hosts(app, ephervex_core::UnreadableHostKind::Server)?;
     let records = app.list_servers()?;
 
     if json {
