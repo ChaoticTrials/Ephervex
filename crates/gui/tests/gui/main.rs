@@ -17,6 +17,7 @@ mod case_surface;
 mod combo_selection;
 mod create_instance_dialog;
 mod create_server_dialog;
+mod dialog_bottom_spacing;
 mod disabled_control_reasons;
 mod disk_usage_view;
 mod dropdown_entries_show_their_full_text;
