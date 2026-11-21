@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use ephervex_model::{AttentionReason, InstanceId, ServerId, StorageClass};
 
+use crate::index::IndexError;
 use crate::metadata::{self, MetadataError};
 use crate::records::{ClientRecord, FileDisposition, ServerRecord};
 use crate::registry::{
@@ -329,6 +330,15 @@ fn forget_stale_client(
                 "a linked server's canonical metadata is unhealthy; keeping the stale temporary instance"
             );
             report.persistence_unhealthy.push(entry.clone());
+            Ok(false)
+        }
+        // A linked server whose row this build cannot read is left as it is.
+        Err(error @ RegistryError::Index(IndexError::MalformedRow { .. })) => {
+            tracing::warn!(
+                instance_id = %id,
+                %error,
+                "this build cannot read a linked server's index row; keeping the stale temporary instance"
+            );
             Ok(false)
         }
         Err(error) => Err(error),
@@ -2120,6 +2130,89 @@ mod tests {
             std::fs::read(metadata::server_metadata_path(&other.root)).expect("metadata"),
             other_before,
             "the other server's metadata is untouched"
+        );
+    }
+
+    #[test]
+    fn a_stale_temporary_client_linked_to_a_server_whose_row_cannot_be_read_is_kept_and_the_others_still_reconcile()
+     {
+        let environment = TestEnvironment::new();
+        let registry = environment.registry();
+        let earlier = registry
+            .create_published_client(NewClient::new(
+                "earlier",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("earlier client");
+        let stale = registry
+            .create_published_client(NewClient::new(
+                "stale",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("stale client");
+        let later = registry
+            .create_published_client(NewClient::new(
+                "later",
+                "1.20.1",
+                LoaderSelection::vanilla(),
+            ))
+            .expect("later client");
+        let linked = registry
+            .create_server(NewServer::linked("linked", stale.id))
+            .expect("linked server");
+        let orphan = registry
+            .create_server(
+                NewServer::new("orphan", "1.20.1", LoaderSelection::vanilla())
+                    .with_storage(StorageClass::Persistent),
+            )
+            .expect("orphan server");
+        registry
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE servers SET loader_kind = 'fabric' WHERE id = '{}';
+                 DELETE FROM servers WHERE id = '{}';",
+                linked.id, orphan.id
+            ))
+            .expect("tamper");
+        let linked_before =
+            std::fs::read(metadata::server_metadata_path(&linked.root)).expect("metadata");
+        for root in [&earlier.root, &stale.root, &later.root] {
+            std::fs::remove_dir_all(root).expect("clear temporary root");
+        }
+
+        let report = reconcile(&registry).expect("the pass completes");
+
+        assert!(registry.client(stale.id).is_ok(), "the client is kept");
+        let mut removed: Vec<_> = report
+            .removed_stale_temporary
+            .iter()
+            .map(|entry| entry.reference)
+            .collect();
+        removed.sort_by_key(ToString::to_string);
+        let mut expected = vec![RecordRef::Client(earlier.id), RecordRef::Client(later.id)];
+        expected.sort_by_key(ToString::to_string);
+        assert_eq!(removed, expected, "the other stale clients are forgotten");
+        assert_eq!(
+            report
+                .reindexed
+                .iter()
+                .map(|entry| entry.reference)
+                .collect::<Vec<_>>(),
+            vec![RecordRef::Server(orphan.id)],
+            "the re-indexing passes still run"
+        );
+        assert_eq!(
+            std::fs::read(metadata::server_metadata_path(&linked.root)).expect("metadata"),
+            linked_before,
+            "the unreadable server's metadata is untouched"
+        );
+        assert_eq!(
+            registry.unreadable_server_ids().expect("unreadable"),
+            HashSet::from([linked.id]),
+            "the unreadable server's row is left as it is"
         );
     }
 
