@@ -10,7 +10,7 @@ use crate::support;
 use ephervex_gui::ui::{AppWindow, Theme};
 use ephervex_i18n::lookup;
 use i_slint_backend_testing::ElementHandle;
-use slint::ComponentHandle;
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 /// The padding around a dialog's body.
 const BODY_PADDING: f32 = 22.0;
@@ -73,14 +73,86 @@ fn the_rename_dialog_keeps_the_body_padding_under_cancel() {
     }
 }
 
-/// Pixels between the bottom of the Cancel button and the dialog's bottom edge.
+#[test]
+fn the_new_snapshot_dialog_keeps_the_body_padding_under_cancel() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for (label, suggestion) in [("", "Before the update"), ("Reproduction", "")] {
+            ui.set_snapshot_action_label(label.into());
+            ui.set_snapshot_label_suggestion(suggestion.into());
+            ui.set_modal("snapshot-create".into());
+            settle(&ui);
+
+            let gap = space_under_cancel(&ui);
+            assert!(
+                gap >= BODY_PADDING,
+                "snapshot-create at text scale {scale}: {gap}px under Cancel"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_absent_mods_dialog_keeps_the_body_padding_under_cancel_whatever_it_lists() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for count in [0, 1, 3, 40] {
+            let names: Vec<SharedString> = (0..count)
+                .map(|index| format!("Absent Mod Number {index}").into())
+                .collect();
+            ui.set_absent_mods(ModelRc::new(VecModel::from(names)));
+            ui.set_modal("absent-mods".into());
+            settle(&ui);
+
+            let gap = space_under_cancel(&ui);
+            assert!(
+                gap >= BODY_PADDING,
+                "absent-mods at text scale {scale} with {count} names: {gap}px under Cancel"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_theme_problems_dialog_keeps_the_body_padding_under_close_whatever_it_lists() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for count in [0, 1, 3, 40] {
+            let problems: Vec<SharedString> = (0..count)
+                .map(|index| {
+                    format!("theme-{index}.json: a long explanation of what is wrong with this theme file, long enough to wrap onto a second line in the dialog")
+                        .into()
+                })
+                .collect();
+            ui.set_theme_problems(ModelRc::new(VecModel::from(problems)));
+            ui.set_themes_folder("/home/user/.config/ephervex/themes".into());
+            ui.set_modal("theme-problems".into());
+            settle(&ui);
+
+            let gap = space_under_button(&ui, "gui-close");
+            assert!(
+                gap >= BODY_PADDING,
+                "theme-problems at text scale {scale} with {count} problems: {gap}px under Close"
+            );
+        }
+    }
+}
+
 fn space_under_cancel(ui: &AppWindow) -> f32 {
-    let cancel = ElementHandle::find_by_accessible_label(ui, &lookup("gui-cancel"))
+    space_under_button(ui, "gui-cancel")
+}
+
+/// Pixels between the bottom of the widest button labeled `label` and the dialog's bottom edge.
+fn space_under_button(ui: &AppWindow, label: &str) -> f32 {
+    let button = ElementHandle::find_by_accessible_label(ui, &lookup(label))
         .filter(|element| element.size().width > 0.0)
         .max_by(|left, right| left.size().width.total_cmp(&right.size().width))
-        .expect("Cancel");
-    let position = cancel.absolute_position();
-    let size = cancel.size();
+        .expect("the button");
+    let position = button.absolute_position();
+    let size = button.size();
     let bottom = position.y + size.height;
     // The button is a plate too, so only a plate well wider than it can be the dialog.
     let dialog = ElementHandle::find_by_element_type_name(ui, "Plate")
