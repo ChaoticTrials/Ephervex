@@ -30,18 +30,17 @@
 //! | Origin | Change version | Update | Remove |
 //! |---|---|---|---|
 //! | `UserSelected` | yes | yes | yes |
-//! | `SelectedOptionalDependency` | no | no | yes |
-//! | `RequiredDependency` | no | no | no |
+//! | `SelectedOptionalDependency` | yes | yes | yes |
+//! | `RequiredDependency` | yes | yes | no |
 //! | `PackDeclared` | no | no | no |
 //!
-//! An optional dependency sits where it does because both halves of its name
-//! are true. It is a *dependency*: the resolver picks its version from what its
-//! dependents require, and letting a user move it independently would let them
-//! break the mod that asked for it. And it was *selected*: a human ticked it, so
-//! un-ticking it is theirs to do, and nothing else may collect it.
+//! A dependency's release may be chosen, because a bug report often names the
+//! library release it happened on. Moving it keeps its origin, and any move is
+//! refused while another recorded mod requires one exact release of it.
 //!
-//! A required dependency has no independent life at all. Its version follows its
-//! dependents, and it disappears when the last of them does.
+//! An optional dependency was *selected*: a human ticked it, so un-ticking it is
+//! theirs to do, and nothing else may collect it. A required dependency is not
+//! theirs to take away: it disappears when the last of its dependents does.
 //!
 //! Pack-owned mods are refused, and [`MutationRestriction::PackOwned`] says so
 //! rather than the frontend guessing. See that variant for why.
@@ -85,8 +84,8 @@ pub enum MutationRestriction {
     /// rather than a mutation feature. Until that exists this is refused, and
     /// the mod's available versions are still shown.
     PackOwned,
-    /// Something else asked for this mod, so its version is not the user's to
-    /// choose and its lifetime is not theirs to end.
+    /// Something else asked for this mod, so its lifetime is not the user's to
+    /// end. Its release may still be chosen.
     Dependency,
     /// Nothing about this file can be resolved against a catalog. There is no
     /// project to list versions of and no identity to replace.
@@ -224,39 +223,41 @@ impl ModMutability {
             ModOrigin::PackDeclared | ModOrigin::PackOverride => {
                 Self::restricted(MutationRestriction::PackOwned, has_project)
             }
-            // Its release belongs to whatever required it, so no provider
-            // operation may move it and it is not the user's to take out of
-            // the desired state: removing the root is what collects it.
-            // Deleting the jar is none of those. It resolves nothing, retires
-            // nothing and asks no catalog, the record stays so the file can
-            // come back, and a library is very often exactly the jar somebody
-            // needs to put aside to find out which mod crashes.
-            ModOrigin::RequiredDependency => {
-                Self::restricted(MutationRestriction::Dependency, has_project)
-            }
-            ModOrigin::SelectedOptionalDependency if has_project => Self {
-                can_change_version: false,
-                can_update: false,
-                // The one thing an explicit optional choice keeps: the person
-                // who ticked it may untick it.
-                can_remove: true,
+            // A bug report often names the library release it happened on, so
+            // the release may be chosen. The move keeps the dependency origin
+            // and is refused while another mod requires one exact release.
+            // Taking it out of the desired state is not the user's: removing
+            // what needs it is what collects it.
+            ModOrigin::RequiredDependency if has_version => Self {
+                can_change_version: true,
+                can_update: true,
+                can_remove: false,
                 can_delete_file: true,
                 can_list_versions: true,
                 restriction: Some(MutationRestriction::Dependency),
             },
-            ModOrigin::UserSelected if has_version => Self {
-                can_change_version: true,
-                can_update: true,
-                can_remove: true,
-                can_delete_file: true,
-                can_list_versions: true,
-                restriction: None,
-            },
-            ModOrigin::UserSelected if has_project => {
+            // An optional dependency's person who ticked it may also untick it.
+            ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency if has_version => {
+                Self {
+                    can_change_version: true,
+                    can_update: true,
+                    can_remove: true,
+                    can_delete_file: true,
+                    can_list_versions: true,
+                    restriction: None,
+                }
+            }
+            ModOrigin::UserSelected
+            | ModOrigin::SelectedOptionalDependency
+            | ModOrigin::RequiredDependency
+                if has_project =>
+            {
                 Self::restricted(MutationRestriction::VersionUnknown, true)
             }
             // Nothing left that names a project, whatever chose it.
-            ModOrigin::UserSelected | ModOrigin::SelectedOptionalDependency => {
+            ModOrigin::UserSelected
+            | ModOrigin::SelectedOptionalDependency
+            | ModOrigin::RequiredDependency => {
                 Self::restricted(MutationRestriction::IdentityUnresolved, false)
             }
         }
@@ -1528,12 +1529,64 @@ fn needed_at_its_release(
         })
 }
 
-/// Refuses a version change that would also move a mod it must not.
+/// Another recorded mod that requires `project_id` at an exact release other
+/// than `release`, and the release it requires.
+pub(crate) fn required_at_another_release<'r>(
+    recipe: &'r PackRecipe,
+    provider: ModProvider,
+    project_id: &str,
+    release: &str,
+) -> Option<(&'r PackFileRecipe, &'r str)> {
+    recipe
+        .files
+        .iter()
+        .filter(|file| {
+            file.identity
+                .as_ref()
+                .and_then(ProviderFileIdentity::project)
+                .is_some_and(|(kind, id)| kind == provider && id != project_id)
+        })
+        .find_map(|file| {
+            file.relations
+                .as_deref()?
+                .iter()
+                .find_map(|relation| match &relation.target {
+                    RelationTarget::Project {
+                        project_id: named,
+                        version_id: Some(pinned),
+                    } if relation.kind == ModRelationKind::Required
+                        && named == project_id
+                        && pinned != release =>
+                    {
+                        Some((file, pinned.as_str()))
+                    }
+                    _ => None,
+                })
+        })
+}
+
+/// Refuses a version change that would also move a mod it must not, or that
+/// would leave another mod without the exact release it requires.
 fn refuse_to_move_other_mods(
     context: &MutationContext,
     resolved: &ModInstallPlan,
 ) -> CoreResult<()> {
     let acted_on = context.entry.identity.project_id().unwrap_or_default();
+    let moves = context.entry.identity.version_id() != Some(resolved.root.version.id.as_str());
+    if let Some((file, version)) = required_at_another_release(
+        &context.recipe,
+        resolved.provider,
+        acted_on,
+        &resolved.root.version.id,
+    )
+    .filter(|_| moves)
+    {
+        return Err(CoreError::ModReleaseRequiredByAnother {
+            path: context.entry.logical_path.clone(),
+            required_by: file.logical_path.clone(),
+            version: version.to_owned(),
+        });
+    }
     match unmovable_replacement(&context.recipe, resolved, acted_on) {
         Some(unmovable) => Err(CoreError::ModDependencyNotMovable {
             target: context.entry.logical_path.clone(),
@@ -1679,12 +1732,11 @@ mod tests {
     }
 
     #[test]
-    fn an_automatic_dependency_has_no_independent_life() {
-        // Its version follows its dependents, and removing it by hand would
-        // leave whatever asked for it broken.
+    fn an_automatic_dependency_may_be_moved_but_not_removed() {
+        // Removing it by hand would leave whatever asked for it broken.
         let mutability = ModMutability::of(&entry(ModOrigin::RequiredDependency, resolved()));
-        assert!(!mutability.can_change_version);
-        assert!(!mutability.can_update);
+        assert!(mutability.can_change_version);
+        assert!(mutability.can_update);
         assert!(!mutability.can_remove);
         assert!(
             mutability.can_list_versions,
@@ -1697,18 +1749,30 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_dependency_may_be_untaken_but_not_moved() {
-        // Both halves of its name are true: a human ticked it, so unticking it
-        // is theirs; the resolver picks its version, so moving it is not.
+    fn an_optional_dependency_may_be_moved_and_untaken() {
         let mutability =
             ModMutability::of(&entry(ModOrigin::SelectedOptionalDependency, resolved()));
-        assert!(!mutability.can_change_version);
-        assert!(!mutability.can_update);
+        assert!(mutability.can_change_version);
+        assert!(mutability.can_update);
         assert!(mutability.can_remove);
-        assert_eq!(
-            mutability.restriction,
-            Some(MutationRestriction::Dependency)
-        );
+        assert_eq!(mutability.restriction, None);
+    }
+
+    #[test]
+    fn a_dependency_whose_installed_release_is_unproven_is_not_moved() {
+        for origin in [
+            ModOrigin::RequiredDependency,
+            ModOrigin::SelectedOptionalDependency,
+        ] {
+            let mutability = ModMutability::of(&entry(origin, project_only()));
+            assert!(!mutability.can_change_version, "{origin:?}");
+            assert!(!mutability.can_update, "{origin:?}");
+            assert_eq!(
+                mutability.restriction,
+                Some(MutationRestriction::VersionUnknown),
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]
@@ -1781,14 +1845,13 @@ mod tests {
         assert_eq!(mutability.restriction, None);
     }
 
-    /// The instance saying so is not a reason to move a mod whose release was
-    /// never the user's to choose. A library something else needs follows its
-    /// dependents, and the bin that acts on it is still the reversible one.
+    /// The instance saying so is not a reason to take away a library
+    /// something else needs, and the bin that acts on it is still the
+    /// reversible one.
     #[test]
-    fn a_dependency_is_nobodys_to_move_however_the_instance_is_set() {
+    fn a_dependency_is_nobodys_to_remove_however_the_instance_is_set() {
         let mutability =
             effective_mutability(&entry(ModOrigin::RequiredDependency, resolved()), true);
-        assert!(!mutability.can_change_version);
         assert!(!mutability.can_remove);
         assert!(mutability.can_delete_file);
         assert_eq!(
@@ -1812,8 +1875,11 @@ mod tests {
         // The setting is specifically about the pack's own declarations.
         let mutability =
             effective_mutability(&entry(ModOrigin::RequiredDependency, resolved()), true);
-        assert!(!mutability.can_change_version);
-        assert!(!mutability.can_update);
+        assert_eq!(
+            mutability,
+            ModMutability::of(&entry(ModOrigin::RequiredDependency, resolved()))
+        );
+        assert!(!mutability.can_remove);
     }
 
     #[test]
@@ -1881,26 +1947,14 @@ mod tests {
             "deleting the file is not permission to mutate the pack's declaration"
         );
 
-        // A dependency's jar may be put aside too. Its release is still not
-        // the user's to move and it is still not theirs to take out of the
-        // desired state - the record stays, so the file comes back - but a
-        // library is very often the one jar a bisect needs gone.
-        for origin in [
-            ModOrigin::RequiredDependency,
-            ModOrigin::SelectedOptionalDependency,
-        ] {
-            let allowed = ModMutability::of(&entry(origin, resolved()));
-            assert!(allowed.can_delete_file, "{origin:?}");
-            assert!(
-                !allowed.can_change_version && !allowed.can_update,
-                "deleting the file is not permission to move the release: {origin:?}"
-            );
-            assert_eq!(
-                allowed.restriction,
-                Some(MutationRestriction::Dependency),
-                "{origin:?}"
-            );
-        }
+        // A dependency's jar may be put aside too. A required one is still
+        // not the user's to take out of the desired state - the record stays,
+        // so the file comes back - but a library is very often the one jar a
+        // bisect needs gone.
+        let required = ModMutability::of(&entry(ModOrigin::RequiredDependency, resolved()));
+        assert!(required.can_delete_file);
+        assert!(!required.can_remove);
+        assert_eq!(required.restriction, Some(MutationRestriction::Dependency));
 
         // A mod somebody chose by name keeps both, and they say different
         // things: removing it means the instance should stop containing it,

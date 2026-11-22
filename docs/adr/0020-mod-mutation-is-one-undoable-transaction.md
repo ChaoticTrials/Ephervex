@@ -137,3 +137,33 @@ to isolate one.
 - Linked server synchronization is untouched. A loader-build change updates both
   the instance record and the recipe's target so the two cannot disagree; the
   pack's name, version, and every file it declared are left exactly as imported.
+
+## Amendment: a dependency's release may be chosen
+
+A bug report often names the library release it happened on, not only the mod.
+Refusing to move a dependency left only a workaround: remove the library,
+install it by name at the older release, then install the mod that needs it.
+That also made the library a root it never was.
+
+A required or optional dependency whose installed release is proven may now
+change version and update like a mod chosen by name:
+
+| Origin | Change version | Update | Remove |
+|---|---|---|---|
+| `UserSelected` | yes | yes | yes |
+| `SelectedOptionalDependency` | yes | yes | yes |
+| `RequiredDependency` | yes | yes | no |
+| `PackDeclared` | no | no | no |
+
+The move keeps the entry's origin, as every replacement does, so removing the
+mods that need the library still collects it. Changing or updating another mod
+later keeps the moved release while nothing pins a different one, because
+replacing never moves an installed dependency that nothing pins.
+
+A move is refused when another recorded mod's relations require one exact
+release of the mod being moved, other than the one chosen. This holds for every
+origin, not only dependencies: moving a mod away from a release another mod
+pins breaks that mod. A linked server applies the same rule to its own recipe;
+it follows the client's move unless one of its mods pins the release, and it
+still never removes a dependency it holds. A mod whose relations were never
+recorded (ADR 0034) cannot be checked, so it does not block a move.

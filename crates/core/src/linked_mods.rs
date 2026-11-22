@@ -195,8 +195,8 @@ pub enum LinkedTargetBlock {
     /// The server's pack declares this mod. Pack-owned content is reconstructed,
     /// never independently mutated.
     PackOwned,
-    /// Another of this server's mods requires this one, so its release follows
-    /// what needs it and its lifetime is not this operation's to end.
+    /// Another of this server's mods requires this one: at one exact release
+    /// other than the one being synced, or at all when the sync removes it.
     ServerDependency,
     /// Syncing this release would also move another of this server's mods,
     /// which its pack declared, a person chose, or something else needs at its
@@ -1009,8 +1009,29 @@ impl App {
             }
             // Only a dependency the server has can be something another of its
             // mods needs. A record the server does not take has no jar there.
-            if entry.origin.is_dependency()
+            // Taking one away is never this operation's.
+            if release.is_none()
+                && entry.origin.is_dependency()
                 && entry.is_installed_on(PackSide::Server, &OptionalSelection::none())
+            {
+                return Some(blocked(&record, root, LinkedTargetBlock::ServerDependency));
+            }
+        }
+        // The client's rule for every origin: a release another server mod
+        // does not accept is not synced onto it.
+        if let Some(release) = release {
+            let installed = existing
+                .as_ref()
+                .and_then(|entry| entry.identity.as_ref())
+                .and_then(|identity| identity.version_id.as_deref());
+            if installed != Some(release.id.as_str())
+                && crate::mutation::required_at_another_release(
+                    &recipe,
+                    root.provider,
+                    &root.project_id,
+                    &release.id,
+                )
+                .is_some()
             {
                 return Some(blocked(&record, root, LinkedTargetBlock::ServerDependency));
             }
@@ -3836,6 +3857,152 @@ Details:\n\
             target(&plan, server).state.block(),
             Some(&LinkedTargetBlock::MovesAnotherMod),
             "the server's pack mod stays where its pack put it, and the reason names the move"
+        );
+    }
+
+    const NEWLIB_V1: &str = "mods/newlib-NEWV1.jar";
+
+    #[tokio::test]
+    async fn a_dependency_a_mod_pulled_in_moves_to_the_chosen_release_and_stays_a_dependency() {
+        let world = world().await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("MOVEPROJ")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("MOVEV2"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the mod installs with its library");
+        assert_eq!(
+            client_recorded(&world, "NEWLIB"),
+            ("NEWV2".to_owned(), ModOrigin::RequiredDependency)
+        );
+
+        world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new("mods/newlib-NEWV2.jar"),
+                &crate::mutation::ModVersionChoice::Exact("NEWV1".to_owned()),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the library moves to the release a report names");
+
+        assert_eq!(
+            client_recorded(&world, "NEWLIB"),
+            ("NEWV1".to_owned(), ModOrigin::RequiredDependency),
+            "the library is still collected with the mod that needs it"
+        );
+        assert_eq!(client_recorded(&world, "MOVEPROJ").0, "MOVEV2");
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "moveproj-MOVEV2.jar".to_owned(),
+                "newlib-NEWV1.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_another_mod_requires_at_its_release_is_not_moved() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("PINNER")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("PINNERV1"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a mod that needs the older library release installs");
+
+        let error = world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new(NEWLIB_V1),
+                &crate::mutation::ModVersionChoice::Exact("NEWV2".to_owned()),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect_err("moving the library would break the mod that requires its release");
+
+        assert!(
+            matches!(
+                &error,
+                CoreError::ModReleaseRequiredByAnother { required_by, version, .. }
+                    if required_by == Path::new("mods/pinner-PINNERV1.jar") && version == "NEWV1"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
+    }
+
+    #[tokio::test]
+    async fn a_linked_server_moves_a_dependency_with_its_client() {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        set_server_origin(&world, server, "NEWLIB", ModOrigin::RequiredDependency);
+
+        let plan = plan(&world, &change(NEWLIB_V1, "NEWV2")).await;
+
+        let target = target(&plan, server);
+        assert_eq!(target.state.block(), None);
+        assert_eq!(written_projects(&target.installs), vec!["NEWLIB"]);
+    }
+
+    #[tokio::test]
+    async fn a_linked_server_keeps_a_mod_one_of_its_mods_requires_at_its_release() {
+        for origin in [ModOrigin::RequiredDependency, ModOrigin::UserSelected] {
+            a_linked_server_keeps_a_pinned_release(origin).await;
+        }
+    }
+
+    async fn a_linked_server_keeps_a_pinned_release(origin: ModOrigin) {
+        let world = world().await;
+        client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        set_server_origin(&world, server, "NEWLIB", origin);
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(
+            &world.server_root(server),
+        ));
+        let mut recipe = store.read_recipe().expect("recipe");
+        recipe
+            .files
+            .iter_mut()
+            .find(|file| {
+                file.identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.project_id.as_deref() == Some("MOVEPROJ"))
+            })
+            .expect("the server records the mod")
+            .relations = Some(vec![ephervex_pack::RecipeRelation {
+            kind: ephervex_model::ModRelationKind::Required,
+            target: ephervex_pack::RelationTarget::Project {
+                project_id: "NEWLIB".to_owned(),
+                version_id: Some("NEWV1".to_owned()),
+            },
+        }]);
+        store.write_recipe(&recipe).expect("write recipe");
+
+        let plan = plan(&world, &change(NEWLIB_V1, "NEWV2")).await;
+
+        assert_eq!(
+            target(&plan, server).state.block(),
+            Some(&LinkedTargetBlock::ServerDependency),
+            "{origin:?}"
         );
     }
 

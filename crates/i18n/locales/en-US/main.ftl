@@ -1080,7 +1080,7 @@ pack-requirement-unknown = Not stated
 # Why a mod cannot be changed or removed. Each names a different situation, and
 # the difference is what tells a user whether to expect this to change.
 mod-restriction-pack-owned = The imported pack declares this mod. Turn on Independent mod changes in Settings to change it on its own.
-mod-restriction-dependency = Another mod requires this one, so its release follows what needs it.
+mod-restriction-dependency = Another mod requires this one, so it stays until the mods that need it are removed.
 mod-restriction-hand-placed = This jar was added by hand, so Ephervex leaves it alone. Remove it from the mods folder yourself.
 mod-restriction-identity-unresolved = Ephervex cannot tell which project this file is, so it has nothing to look up.
 mod-restriction-version-unknown = Ephervex cannot tell which release is installed, so it will not guess what to replace.
@@ -1124,6 +1124,8 @@ error-mod-not-managed = That mod is no longer part of this instance.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 .action = Mods with no identity have to be managed by hand.
 error-mod-dependency-not-movable = That change would also move a mod that the pack declared, that you chose, or that another mod needs at its current release. Change that mod's version first.
+error-mod-release-required-by-another = { $mod } requires release { $version } of this mod, so it has to stay on that release.
+.action = Change or remove { $mod } first.
 error-single-instance-unavailable = Ephervex could not reach the launcher that is already running.
 .action = The link was not handed over. Close the other Ephervex window and try again.
 error-url-handler-unavailable = Ephervex could not change which application opens its links.

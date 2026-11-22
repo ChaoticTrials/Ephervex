@@ -45,8 +45,8 @@ fn an_instance_whose_mods_are_the_users_takes_the_mod_out_for_good() {
     assert!(bin(&ui, "gui-delete-mod").is_none());
 }
 
-/// Its release follows whatever required it, so removing it is not on offer
-/// however the instance is set. Putting its jar aside still is.
+/// A mod something else requires is not removed on its own, however the
+/// instance is set. Putting its jar aside still is.
 #[test]
 fn a_mod_that_may_not_be_removed_keeps_the_reversible_bin() {
     let ui = window();

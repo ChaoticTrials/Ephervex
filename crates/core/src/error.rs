@@ -497,6 +497,15 @@ pub enum CoreError {
         target: std::path::PathBuf,
         path: std::path::PathBuf,
     },
+
+    /// Moving a dependency to another release would break an installed mod
+    /// that requires one exact release of it.
+    #[error("`{required_by}` requires release `{version}` of `{path}`")]
+    ModReleaseRequiredByAnother {
+        path: std::path::PathBuf,
+        required_by: std::path::PathBuf,
+        version: String,
+    },
 }
 
 /// The next step a failure points to, for a frontend to offer as an action.
@@ -690,6 +699,7 @@ impl CoreError {
             Self::ModMutationRestricted { restriction, .. } => restriction.message_id(),
             Self::ModIdentityIncomplete { .. } => "error-mod-identity-incomplete",
             Self::ModDependencyNotMovable { .. } => "error-mod-dependency-not-movable",
+            Self::ModReleaseRequiredByAnother { .. } => "error-mod-release-required-by-another",
             Self::ModCatalogPreferenceUnrecognized { .. } => {
                 "error-mod-catalog-preference-unrecognized"
             }
@@ -779,6 +789,14 @@ impl CoreError {
                 vec![("catalog", Arg::from(configured.clone()))]
             }
             Self::ModClientOnly { project } => vec![("project", Arg::from(project.clone()))],
+            Self::ModReleaseRequiredByAnother {
+                required_by,
+                version,
+                ..
+            } => vec![
+                ("mod", Arg::from(required_by.display().to_string())),
+                ("version", Arg::from(version.clone())),
+            ],
             Self::ModDependencyAlreadyProvided {
                 dependency,
                 project_id,
@@ -824,25 +842,35 @@ impl CoreError {
                 Arg::from(crate::issue_link::MAX_ISSUE_LINK_BYTES.to_string()),
             )],
             Self::CaseRefused { reason } => case_refusal_args(*reason),
-            Self::JavaSettingsInvalid {
-                minimum_mib,
-                maximum_mib,
-                minimum_layer,
-                maximum_layer,
-            } => vec![
-                ("minimum", Arg::from(minimum_mib.to_string())),
-                ("maximum", Arg::from(maximum_mib.to_string())),
-                (
-                    "minimum_layer",
-                    Arg::from(minimum_layer.as_str().to_owned()),
-                ),
-                (
-                    "maximum_layer",
-                    Arg::from(maximum_layer.as_str().to_owned()),
-                ),
-            ],
+            Self::JavaSettingsInvalid { .. } => self.java_settings_args(),
             _ => Vec::new(),
         }
+    }
+
+    /// The arguments of [`Self::JavaSettingsInvalid`], or none for any other
+    /// error.
+    fn java_settings_args(&self) -> Vec<(&'static str, Arg<'static>)> {
+        let Self::JavaSettingsInvalid {
+            minimum_mib,
+            maximum_mib,
+            minimum_layer,
+            maximum_layer,
+        } = self
+        else {
+            return Vec::new();
+        };
+        vec![
+            ("minimum", Arg::from(minimum_mib.to_string())),
+            ("maximum", Arg::from(maximum_mib.to_string())),
+            (
+                "minimum_layer",
+                Arg::from(minimum_layer.as_str().to_owned()),
+            ),
+            (
+                "maximum_layer",
+                Arg::from(maximum_layer.as_str().to_owned()),
+            ),
+        ]
     }
 
     /// Whether the user has to sign in again before this can succeed.
@@ -1043,6 +1071,7 @@ impl CoreError {
             | Self::ModMutationRestricted { .. }
             | Self::ModIdentityIncomplete { .. }
             | Self::ModDependencyNotMovable { .. }
+            | Self::ModReleaseRequiredByAnother { .. }
             | Self::ModFileMissing { .. }
             | Self::ModFileNotToggled { .. }
             | Self::ModSpellingOccupied { .. }
@@ -1135,6 +1164,7 @@ impl CoreError {
             | Self::ModFileNotAdded { path, .. }
             | Self::ModIdentityIncomplete { path }
             | Self::ModDependencyNotMovable { path, .. }
+            | Self::ModReleaseRequiredByAnother { path, .. }
             | Self::ModDependencyAlreadyProvided { path, .. }
             | Self::DiagnosticBundleNotWritten { path, .. }
             | Self::DiagnosticBundleOverwritesSource { path }
