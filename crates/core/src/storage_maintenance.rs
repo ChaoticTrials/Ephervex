@@ -334,6 +334,31 @@ impl CleanupPlan {
     pub fn unreadable_hosts(&self) -> &[String] {
         &self.unreadable_hosts
     }
+
+    /// This plan narrowed to the entries of `kinds`.
+    ///
+    /// What the narrowed plan leaves out stays on disk, and what it keeps is
+    /// exactly what this plan listed, so a frontend can let the user choose
+    /// among the kinds a review showed without planning again. The kept list
+    /// is unchanged. Applying it still decides every entry again.
+    #[must_use]
+    pub fn restricted_to(&self, kinds: &[ManagedStorageKind]) -> Self {
+        Self {
+            items: self
+                .items
+                .iter()
+                .filter(|item| kinds.contains(&item.kind))
+                .cloned()
+                .collect(),
+            entries: self
+                .entries
+                .iter()
+                .filter(|entry| kinds.contains(&ManagedStorageKind::of(entry)))
+                .cloned()
+                .collect(),
+            ..self.clone()
+        }
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -2188,6 +2213,77 @@ mod tests {
 
         assert!(!library.exists());
         assert!(pack.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_plan_restricted_to_one_kind_removes_only_that_kind_and_counts_only_it() {
+        let world = World::new().await;
+        let pack = world.stray_download(b"a pack file");
+        let library = world.stray_library("old", 40);
+        let asset = world.stray_asset(b"an old sound");
+        let plan = world.plan().await;
+        assert_eq!(plan.items().len(), 3);
+
+        let narrowed = plan.restricted_to(&[ManagedStorageKind::Libraries]);
+
+        let [item] = narrowed.items() else {
+            panic!("one kind: {:?}", narrowed.items());
+        };
+        assert_eq!(item.kind, ManagedStorageKind::Libraries);
+        assert_eq!(narrowed.entries(), 1);
+        assert_eq!(narrowed.reclaimable_bytes(), 40);
+        assert_eq!(narrowed.kept(), plan.kept(), "the kept list is unchanged");
+        let outcome = world.apply(&narrowed).await.expect("apply");
+        assert!(!library.exists());
+        assert!(pack.is_file(), "a kind that was not selected stays");
+        assert!(asset.is_file(), "a kind that was not selected stays");
+        assert_eq!(outcome.planned.entries, 1);
+        assert_eq!(outcome.removed.entries, 1);
+        assert_eq!(outcome.removed.bytes, 40);
+        assert!(outcome.is_complete());
+    }
+
+    #[tokio::test]
+    async fn a_plan_restricted_to_no_kind_removes_nothing() {
+        let world = World::new().await;
+        let library = world.stray_library("old", 40);
+        let plan = world.plan().await;
+
+        let narrowed = plan.restricted_to(&[]);
+
+        assert!(narrowed.is_empty());
+        assert_eq!(narrowed.entries(), 0);
+        let outcome = world.apply(&narrowed).await.expect("apply");
+        assert_eq!(outcome.planned, Usage::default());
+        assert!(library.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_restricted_plan_still_skips_an_entry_a_host_came_to_need() {
+        let world = World::new().await;
+        let library = world.stray_library("old", 40);
+        let narrowed = world
+            .plan()
+            .await
+            .restricted_to(&[ManagedStorageKind::Libraries]);
+        world
+            .app
+            .registry()
+            .create_server(ephervex_storage::NewServer::new(
+                "server",
+                "1.21.1",
+                LoaderSelection::exact(LoaderKind::Forge, "52.0.0"),
+            ))
+            .expect("server");
+
+        let outcome = world.apply(&narrowed).await.expect("apply");
+
+        assert!(
+            library.is_file(),
+            "apply decides again from current references"
+        );
+        assert_eq!(outcome.no_longer_unused, 1);
+        assert_eq!(outcome.removed.entries, 0);
     }
 
     #[tokio::test]

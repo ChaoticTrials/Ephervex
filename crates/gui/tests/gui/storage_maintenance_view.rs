@@ -43,6 +43,7 @@ fn row(label: &str, size: &str, lines: &[&str], examples: &[&str]) -> StorageGro
         size: size.into(),
         lines: strings(lines),
         examples: strings(examples),
+        selected: true,
     }
 }
 
@@ -256,6 +257,44 @@ fn the_review_lists_what_goes_what_stays_and_nothing_is_removed_until_confirmed(
         "that plan, and no other"
     );
     assert_eq!(ui.get_modal(), "");
+}
+
+#[test]
+fn each_group_of_the_review_has_a_switch_named_for_it_that_asks_to_change() {
+    let ui = window();
+    let asked = Rc::new(RefCell::new(Vec::new()));
+    let sink = Rc::clone(&asked);
+    ui.on_toggle_storage_plan_group(move |id, selected| {
+        sink.borrow_mut().push((id.to_string(), selected));
+    });
+    review(&ui, false);
+
+    let switch = ElementHandle::find_by_accessible_label(&ui, "Libraries")
+        .find(|element| element.accessible_role() == Some(AccessibleRole::Checkbox))
+        .expect("a switch named for the group");
+    assert_eq!(switch.accessible_checked(), Some(true));
+    switch.invoke_accessible_default_action();
+
+    assert_eq!(
+        asked.borrow().as_slice(),
+        [("Libraries".to_owned(), false)],
+        "the switch asks; the row says what is selected"
+    );
+}
+
+#[test]
+fn a_review_with_nothing_selected_cannot_be_confirmed_and_says_why() {
+    let ui = window();
+    review(&ui, false);
+    ui.set_storage_plan_nothing_selected(true);
+    settle(&ui);
+
+    let confirm = button(&ui, "Remove 4.0 KiB");
+    assert_eq!(confirm.accessible_enabled(), Some(false));
+    assert_eq!(
+        confirm.accessible_description().as_deref(),
+        Some(lookup("gui-storage-cleanup-nothing-selected").as_str())
+    );
 }
 
 #[test]

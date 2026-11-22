@@ -384,6 +384,9 @@ export struct StorageGroupRow {
     lines: [string],
     // The largest entries a cleanup would remove.
     examples: [string],
+    // Whether the cleanup review would remove this group. The maintenance
+    // listing never selects.
+    selected: bool,
 }
 
 // One surface a host workspace offers. The workspace chrome only knows

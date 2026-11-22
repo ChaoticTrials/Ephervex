@@ -847,7 +847,9 @@ installed version's metadata lists, with those digests, and says what it could
 not cover. Fetch Damaged Files Again re-downloads only the damaged or missing
 files an installed version needs, through the ordinary download path, and
 checks again afterwards. Review Cleanup shows the plan: kinds, counts, sizes,
-why each is disposable, and what stays. Only its confirmation applies it, under
+why each is disposable, and what stays. Each kind can be deselected, and the
+confirmation applies the plan narrowed to the selected kinds
+(`CleanupPlan::restricted_to`). Only that confirmation applies it, under
 the exclusive cache lock, deciding again from the references at that moment.
 Instances, servers, mods, worlds, configuration, snapshots, and recovery state
 are never part of it. After a cleanup or recovery the measurement above is

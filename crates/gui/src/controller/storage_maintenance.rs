@@ -9,6 +9,7 @@
 //! review applies it.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 
@@ -19,7 +20,7 @@ use ephervex_core::{
 };
 use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::format_binary_bytes;
-use slint::{ComponentHandle as _, SharedString};
+use slint::{ComponentHandle as _, Model as _, SharedString};
 
 use super::{DiskUsageState, model, send, string_model};
 use crate::backend::{ActivityData, Command, StorageMaintenanceEvent};
@@ -72,6 +73,41 @@ pub(super) struct MaintenanceState {
     operation: Option<String>,
     /// Whether the last check found damage an installed version needs.
     can_recover: bool,
+    /// The cleanup review that is open, and what it would remove.
+    review: Option<PlanReview>,
+}
+
+/// The plan a cleanup review shows and which of its groups are selected.
+#[derive(Debug)]
+struct PlanReview {
+    id: u64,
+    preview: CleanupPlan,
+    selected: BTreeSet<ManagedStorageKind>,
+}
+
+impl PlanReview {
+    /// A review with every group of the plan selected.
+    fn new(id: u64, preview: CleanupPlan) -> Self {
+        let selected = preview.items().iter().map(|item| item.kind).collect();
+        Self {
+            id,
+            preview,
+            selected,
+        }
+    }
+
+    /// The selected groups, in the order a report lists them.
+    fn kinds(&self) -> Vec<ManagedStorageKind> {
+        ManagedStorageKind::ALL
+            .into_iter()
+            .filter(|kind| self.selected.contains(kind))
+            .collect()
+    }
+
+    /// The plan narrowed to the selected groups.
+    fn chosen(&self) -> CleanupPlan {
+        self.preview.restricted_to(&self.kinds())
+    }
 }
 
 fn size(bytes: u64) -> String {
@@ -180,6 +216,7 @@ fn inspection_row(group: &ManagedStorageGroup) -> StorageGroupRow {
         size: size(group.unused.bytes).into(),
         lines: string_model(lines),
         examples: string_model(Vec::new()),
+        selected: false,
     }
 }
 
@@ -352,7 +389,7 @@ fn recovery_lines(report: &RecoveryReport, failures: &[(String, String)]) -> Vec
     lines
 }
 
-fn plan_item_row(item: &ephervex_core::CleanupItem) -> StorageGroupRow {
+fn plan_item_row(item: &ephervex_core::CleanupItem, selected: bool) -> StorageGroupRow {
     let (label, _, why) = kind_messages(item.kind);
     let lines = vec![lookup_args(
         "gui-storage-cleanup-item",
@@ -382,6 +419,7 @@ fn plan_item_row(item: &ephervex_core::CleanupItem) -> StorageGroupRow {
                 })
                 .collect(),
         ),
+        selected,
     }
 }
 
@@ -406,12 +444,13 @@ fn kept_line(kept: &ephervex_core::KeptStorage) -> String {
     }
 }
 
-fn show_plan(ui: &AppWindow, plan_id: u64, plan: &CleanupPlan) {
-    let reclaimable = plan.reclaimable_bytes();
-    ui.set_storage_plan_id(i32::try_from(plan_id).unwrap_or(i32::MAX));
-    ui.set_storage_plan_empty(plan.is_empty());
+/// Shows what the selected groups would remove: the summary, the confirm label,
+/// and whether anything is left to confirm.
+fn show_plan_selection(ui: &AppWindow, review: &PlanReview) {
+    let chosen = review.chosen();
+    let reclaimable = chosen.reclaimable_bytes();
     ui.set_storage_plan_summary(
-        if plan.is_empty() {
+        if review.preview.is_empty() {
             lookup("gui-storage-nothing-reclaimable")
         } else {
             lookup_args(
@@ -419,7 +458,7 @@ fn show_plan(ui: &AppWindow, plan_id: u64, plan: &CleanupPlan) {
                 [
                     (
                         "count",
-                        Arg::from(i64::try_from(plan.entries()).unwrap_or(i64::MAX)),
+                        Arg::from(i64::try_from(chosen.entries()).unwrap_or(i64::MAX)),
                     ),
                     ("value", Arg::from(size(reclaimable))),
                 ],
@@ -427,7 +466,22 @@ fn show_plan(ui: &AppWindow, plan_id: u64, plan: &CleanupPlan) {
         }
         .into(),
     );
-    ui.set_storage_plan_items(model(plan.items().iter().map(plan_item_row).collect()));
+    ui.set_storage_plan_nothing_selected(!review.preview.is_empty() && chosen.is_empty());
+    ui.set_storage_plan_confirm(
+        labeled("gui-storage-cleanup-confirm", "value", size(reclaimable)).into(),
+    );
+}
+
+fn show_plan(ui: &AppWindow, review: &PlanReview) {
+    let plan = &review.preview;
+    ui.set_storage_plan_id(i32::try_from(review.id).unwrap_or(i32::MAX));
+    ui.set_storage_plan_empty(plan.is_empty());
+    ui.set_storage_plan_items(model(
+        plan.items()
+            .iter()
+            .map(|item| plan_item_row(item, review.selected.contains(&item.kind)))
+            .collect(),
+    ));
     ui.set_storage_plan_kept(string_model(
         unreadable_hosts_line(plan.unreadable_hosts())
             .into_iter()
@@ -435,9 +489,38 @@ fn show_plan(ui: &AppWindow, plan_id: u64, plan: &CleanupPlan) {
             .collect(),
     ));
     ui.set_storage_plan_incomplete(!plan.is_complete());
-    ui.set_storage_plan_confirm(
-        labeled("gui-storage-cleanup-confirm", "value", size(reclaimable)).into(),
-    );
+    show_plan_selection(ui, review);
+}
+
+/// Selects or deselects one group of the open review.
+fn select_plan_group(ui: &AppWindow, state: &mut MaintenanceState, id: &str, selected: bool) {
+    let Some(review) = state.review.as_mut() else {
+        return;
+    };
+    let Some(kind) = ManagedStorageKind::ALL
+        .into_iter()
+        .find(|kind| kind.as_str() == id)
+    else {
+        return;
+    };
+    if !review.preview.items().iter().any(|item| item.kind == kind) {
+        return;
+    }
+    if selected {
+        review.selected.insert(kind);
+    } else {
+        review.selected.remove(&kind);
+    }
+    let rows = ui.get_storage_plan_items();
+    for index in 0..rows.row_count() {
+        if let Some(mut row) = rows.row_data(index)
+            && row.id == id
+        {
+            row.selected = selected;
+            rows.set_row_data(index, row);
+        }
+    }
+    show_plan_selection(ui, review);
 }
 
 fn outcome_lines(outcome: &CleanupOutcome) -> Vec<String> {
@@ -547,8 +630,30 @@ pub(super) fn register(
         let Ok(plan) = u64::try_from(plan) else {
             return;
         };
-        if begin(&ui, &mut confirming.borrow_mut().maintenance, Step::Clean) {
-            send(&sender, Command::ApplyStorageCleanup { plan });
+        let mut state = confirming.borrow_mut();
+        let Some(kinds) = state
+            .maintenance
+            .review
+            .as_ref()
+            .filter(|review| review.id == plan)
+            .map(PlanReview::kinds)
+        else {
+            return;
+        };
+        if kinds.is_empty() {
+            return;
+        }
+        if begin(&ui, &mut state.maintenance, Step::Clean) {
+            state.maintenance.review = None;
+            send(&sender, Command::ApplyStorageCleanup { plan, kinds });
+        }
+    });
+
+    let selecting = Rc::clone(state);
+    let weak = ui.as_weak();
+    ui.on_toggle_storage_plan_group(move |id, selected| {
+        if let Some(ui) = weak.upgrade() {
+            select_plan_group(&ui, &mut selecting.borrow_mut().maintenance, &id, selected);
         }
     });
 
@@ -612,7 +717,9 @@ pub(super) fn apply(
             changed_the_disk(ui, disk_usage, commands);
         }
         StorageMaintenanceEvent::Planned { plan, preview } => {
-            show_plan(ui, plan, &preview);
+            let review = PlanReview::new(plan, preview);
+            show_plan(ui, &review);
+            disk_usage.maintenance.review = Some(review);
             ui.set_modal("storage-cleanup".into());
         }
         StorageMaintenanceEvent::Cleaned(outcome) => {

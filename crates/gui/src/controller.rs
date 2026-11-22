@@ -18809,9 +18809,175 @@ mod tests {
         ui.invoke_confirm_storage_cleanup(ui.get_storage_plan_id());
         assert!(matches!(
             commands.try_recv(),
-            Ok(Command::ApplyStorageCleanup { plan: 7 })
+            Ok(Command::ApplyStorageCleanup { plan: 7, kinds }) if kinds == [ManagedStorageKind::Libraries]
         ));
         assert_eq!(ui.get_storage_maintenance_busy(), "clean");
+    }
+
+    fn two_group_review() -> (
+        AppWindow,
+        std::sync::mpsc::Receiver<Command>,
+        Rc<RefCell<DiskUsageState>>,
+    ) {
+        use ephervex_core::{CleanupItem, ManagedStorageKind};
+        let (ui, commands, state) = disk_usage_window();
+        let plan = ephervex_core::test_support::cleanup_plan_for_review(
+            vec![
+                CleanupItem {
+                    kind: ManagedStorageKind::DownloadedFiles,
+                    usage: storage_usage(3, 1024),
+                    largest: Vec::new(),
+                },
+                CleanupItem {
+                    kind: ManagedStorageKind::Libraries,
+                    usage: storage_usage(2, 4096),
+                    largest: Vec::new(),
+                },
+            ],
+            Vec::new(),
+            true,
+        );
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Planned {
+                plan: 9,
+                preview: plan,
+            },
+        );
+        (ui, commands, state)
+    }
+
+    #[test]
+    fn every_group_of_a_review_starts_selected_and_the_confirmation_covers_all_of_them() {
+        let (ui, commands, _state) = two_group_review();
+
+        let selected: Vec<bool> = ui
+            .get_storage_plan_items()
+            .iter()
+            .map(|row| row.selected)
+            .collect();
+        assert_eq!(selected, [true, true]);
+        assert!(!ui.get_storage_plan_nothing_selected());
+        assert_eq!(
+            ui.get_storage_plan_confirm(),
+            lookup_args(
+                "gui-storage-cleanup-confirm",
+                [(
+                    "value",
+                    Arg::from(ephervex_model::format_binary_bytes(5120))
+                )]
+            )
+            .as_str()
+        );
+
+        ui.invoke_confirm_storage_cleanup(9);
+        let Ok(Command::ApplyStorageCleanup { plan: 9, kinds }) = commands.try_recv() else {
+            panic!("a cleanup of that plan");
+        };
+        assert_eq!(
+            kinds,
+            [
+                ephervex_core::ManagedStorageKind::DownloadedFiles,
+                ephervex_core::ManagedStorageKind::Libraries
+            ]
+        );
+    }
+
+    #[test]
+    fn deselecting_a_group_narrows_the_totals_and_the_confirmation_to_the_rest() {
+        let (ui, commands, _state) = two_group_review();
+
+        ui.invoke_toggle_storage_plan_group("libraries".into(), false);
+
+        let rows: Vec<_> = ui.get_storage_plan_items().iter().collect();
+        assert_eq!(
+            rows.iter().map(|row| row.selected).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(
+            ui.get_storage_plan_summary(),
+            lookup_args(
+                "gui-storage-cleanup-summary",
+                [
+                    ("count", Arg::from(3_i64)),
+                    (
+                        "value",
+                        Arg::from(ephervex_model::format_binary_bytes(1024))
+                    )
+                ]
+            )
+            .as_str()
+        );
+        assert_eq!(
+            ui.get_storage_plan_confirm(),
+            lookup_args(
+                "gui-storage-cleanup-confirm",
+                [(
+                    "value",
+                    Arg::from(ephervex_model::format_binary_bytes(1024))
+                )]
+            )
+            .as_str()
+        );
+        assert!(!ui.get_storage_plan_nothing_selected());
+
+        ui.invoke_confirm_storage_cleanup(9);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { plan: 9, kinds })
+                if kinds == [ephervex_core::ManagedStorageKind::DownloadedFiles]
+        ));
+    }
+
+    #[test]
+    fn a_review_with_nothing_selected_cannot_start_a_cleanup_and_selecting_again_restores_it() {
+        let (ui, commands, _state) = two_group_review();
+
+        ui.invoke_toggle_storage_plan_group("downloaded_files".into(), false);
+        ui.invoke_toggle_storage_plan_group("libraries".into(), false);
+
+        assert!(ui.get_storage_plan_nothing_selected());
+        ui.invoke_confirm_storage_cleanup(9);
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing selected, nothing sent"
+        );
+        assert_eq!(ui.get_storage_maintenance_busy(), "");
+
+        ui.invoke_toggle_storage_plan_group("libraries".into(), true);
+        assert!(!ui.get_storage_plan_nothing_selected());
+        ui.invoke_confirm_storage_cleanup(9);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { kinds, .. })
+                if kinds == [ephervex_core::ManagedStorageKind::Libraries]
+        ));
+    }
+
+    #[test]
+    fn a_group_the_plan_does_not_list_cannot_be_selected() {
+        let (ui, commands, _state) = two_group_review();
+
+        ui.invoke_toggle_storage_plan_group("asset_objects".into(), true);
+        ui.invoke_toggle_storage_plan_group("not-a-kind".into(), true);
+        ui.invoke_confirm_storage_cleanup(9);
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { kinds, .. }) if kinds.len() == 2
+        ));
+    }
+
+    #[test]
+    fn a_confirmation_that_names_another_plan_than_the_open_review_starts_nothing() {
+        let (ui, commands, _state) = two_group_review();
+
+        ui.invoke_confirm_storage_cleanup(10);
+
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

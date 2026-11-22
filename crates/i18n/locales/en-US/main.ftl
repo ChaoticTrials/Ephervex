@@ -3903,6 +3903,7 @@ gui-storage-cleanup-summary = { $count ->
    *[other] { $count } items would be removed, freeing up to { $value }.
 }
 gui-storage-cleanup-empty = Nothing can be removed. Everything in the shared folders is either needed by an instance or server, or kept for a reason listed below.
+gui-storage-cleanup-nothing-selected = Select at least one group to remove.
 gui-storage-cleanup-item = { $count ->
     [one] 1 item
    *[other] { $count } items

@@ -405,6 +405,8 @@ export component AppWindow inherits Window {
     in-out property <[string]> storage-plan-kept;
     in-out property <bool> storage-plan-incomplete;
     in-out property <bool> storage-plan-empty;
+    // The plan has groups, and the review has none of them selected.
+    in-out property <bool> storage-plan-nothing-selected;
     in-out property <string> storage-plan-confirm;
     in-out property <[ActivityRow]> activities;
     in-out property <[AccountRow]> accounts;
@@ -1031,6 +1033,7 @@ export component AppWindow inherits Window {
     callback review-storage-cleanup();
     callback stop-storage-maintenance();
     callback confirm-storage-cleanup(int);
+    callback toggle-storage-plan-group(string, bool);
     callback open-storage-location(string, int);
     callback server-kill(string);
     callback server-console(string, string) -> bool;
@@ -3823,6 +3826,7 @@ export component AppWindow inherits Window {
                                     spacing: 4px;
                                     HorizontalLayout {
                                         spacing: 10px;
+                                        Toggle { accessible-name: item.label; checked: item.selected; sets-its-own-position: false; toggled(value) => { root.toggle-storage-plan-group(item.id, value); } }
                                         Heading { text: item.label; font-size: Theme.row-heading-size; horizontal-stretch: 1; }
                                         BodyText { text: item.size; vertical-alignment: center; }
                                     }
@@ -3840,7 +3844,7 @@ export component AppWindow inherits Window {
                     ActionRow {
                         Rectangle { horizontal-stretch: 1; }
                         AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; } }
-                        AppButton { text: root.storage-plan-confirm; tone: "danger"; enabled: !root.storage-plan-empty; hint: GuiI18n.text("gui-storage-cleanup-empty"); clicked => { root.confirm-storage-cleanup(root.storage-plan-id); root.modal = ""; } }
+                        AppButton { text: root.storage-plan-confirm; tone: "danger"; enabled: !root.storage-plan-empty && !root.storage-plan-nothing-selected; hint: GuiI18n.text(root.storage-plan-empty ? "gui-storage-cleanup-empty" : "gui-storage-cleanup-nothing-selected"); clicked => { root.confirm-storage-cleanup(root.storage-plan-id); root.modal = ""; } }
                     }
                 }
                 if root.modal == "remove-java-runtime" : VerticalLayout { spacing: 14px; BodyText { text: GuiI18n.value("gui-java-remove-runtime-detail", root.pending-action-name); color: Theme.warning; wrap: word-wrap; } BodyText { text: root.pending-action-id; color: Theme.text-muted; wrap: word-wrap; } if root.pending-java-pinning != "" : BodyText { text: GuiI18n.value("gui-java-remove-runtime-pinned", root.pending-java-pinning); color: Theme.warning; wrap: word-wrap; } if !root.pending-java-pins-known : BodyText { text: GuiI18n.text("gui-java-remove-runtime-pins-unknown"); color: Theme.warning; wrap: word-wrap; } BodyText { text: GuiI18n.text("gui-java-remove-runtime-note"); wrap: word-wrap; } if root.modal-error != "" : BodyText { text: root.modal-error; color: Theme.danger; wrap: word-wrap; } ActionRow { Rectangle { horizontal-stretch: 1; } AppButton { text: GuiI18n.text("gui-cancel"); clicked => { root.modal = ""; root.modal-error = ""; } } AppButton { text: GuiI18n.text("gui-remove"); tone: "danger"; clicked => { root.remove-java-runtime(root.pending-action-id); root.modal = ""; root.modal-error = ""; } } } }

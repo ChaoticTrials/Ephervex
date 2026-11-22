@@ -34,6 +34,11 @@ unchanged since the plan. A partial result names what was removed, what was
 not and why, and counts freed bytes only for entries that are gone. Repeating
 a cleanup is always safe.
 
+**The user chooses among the kinds a plan lists.** A frontend may narrow the
+plan it showed to some of its kinds. Narrowing only drops entries, so the
+narrowed plan is still one core made, names nothing the review did not show,
+and is applied and re-decided exactly as the whole plan would be.
+
 **Integrity and recovery use evidence only.** Entries named by their digest are
 read and compared with it. Files an installed version's metadata lists are
 compared with the digest it states. Natives and loader libraries are reported

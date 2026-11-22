@@ -286,6 +286,23 @@ disk-usage view.
 
 <ThemeScreenshot state="settings-disk-usage" alt="Disk usage view with measured categories and retention groups" />
 
+### Clean up shared files
+
+**Review Cleanup...** on the Storage page lists the shared files that no
+instance or server needs: downloaded files, loader installers, game assets,
+asset indexes, libraries, and unpacked natives. Each group shows its size, why
+it is safe to remove, and its largest files. A switch on each group is on by
+default. Turn off a group to keep it: the summary line and the **Remove**
+button then count only the groups that are still on, and the button is disabled
+while none is. Only the groups that are on are removed.
+
+Nothing is removed until you confirm. The cleanup then checks every file again
+and skips any that a launch, an installation, or a change to an instance has
+claimed since the review. Files kept for a stated reason, and instances,
+servers, mods, worlds, configuration, snapshots, and recovery files, are never
+part of the cleanup. Removed shared files are downloaded or unpacked again the
+next time something needs them.
+
 ## Launcher log
 
 **Settings > Diagnostics** offers Ephervex's own log, which records its

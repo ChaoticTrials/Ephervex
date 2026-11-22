@@ -472,6 +472,8 @@ pub enum Command {
     /// see.
     ApplyStorageCleanup {
         plan: u64,
+        /// The groups of that plan the user selected. Nothing else is removed.
+        kinds: Vec<ephervex_core::ManagedStorageKind>,
     },
     /// Shows one of a storage category's own directories.
     OpenStorageLocation {
@@ -5125,11 +5127,13 @@ fn run_worker(
                     },
                 );
             }
-            Command::ApplyStorageCleanup { plan } => {
+            Command::ApplyStorageCleanup { plan, kinds } => {
                 let confirmed = {
                     let mut slot = lock_pending(&pending_cleanup);
                     match slot.plan.take() {
-                        Some((issued, shown)) if issued == plan => Some(shown),
+                        Some((issued, shown)) if issued == plan => {
+                            Some(shown.restricted_to(&kinds))
+                        }
                         other => {
                             slot.plan = other;
                             None
