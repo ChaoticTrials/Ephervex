@@ -77,17 +77,28 @@ fn is_valid_launch_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// Checks that `id` can name an additional launch, before anything is
+/// The handle that names an instance's first launch, which holds the unnamed
+/// lock. No additional launch can be given it.
+pub const FIRST_LAUNCH_HANDLE: &str = "first";
+
+/// Checks that `id` can name a new additional launch, before anything is
 /// prepared for it.
 ///
-/// This is the rule every additional-launch entry point applies, so a handle
-/// refused here is refused identically by [`LaunchLock::acquire_additional`]
-/// and [`force_release`].
+/// This is the rule every new additional launch is held to, so a handle refused
+/// here is refused identically by [`LaunchLock::acquire_additional`]. Beyond
+/// being a safe file name, a new handle may not be only digits, because a
+/// number where a launch is named means a process id, and may not be
+/// [`FIRST_LAUNCH_HANDLE`]. A lock an earlier version left under such a name is
+/// still read and released, since that launch may be running.
 pub fn validate_launch_id(id: &str) -> Result<(), LockError> {
-    if is_valid_launch_id(id) {
-        Ok(())
-    } else {
+    if !is_valid_launch_id(id) {
         Err(LockError::InvalidLaunchId)
+    } else if id.bytes().all(|byte| byte.is_ascii_digit()) {
+        Err(LockError::NumericLaunchId)
+    } else if id == FIRST_LAUNCH_HANDLE {
+        Err(LockError::ReservedLaunchId)
+    } else {
+        Ok(())
     }
 }
 
@@ -139,6 +150,12 @@ pub enum LockError {
     /// digits, `-` and `_`.
     #[error("a launch id must be non-empty and use only letters, digits, '-' and '_'")]
     InvalidLaunchId,
+    /// A new launch id is only digits, which reads as a process id.
+    #[error("a launch id must not be only digits")]
+    NumericLaunchId,
+    /// A new launch id is the name the first launch already goes by.
+    #[error("the launch id 'first' names the first launch")]
+    ReservedLaunchId,
     /// The lock file could not be created, read, or removed.
     #[error("the launch lock at {path} could not be used")]
     Unusable {
@@ -160,6 +177,8 @@ impl LockError {
             Self::Lost { .. } => "error-launch-lock-lost",
             Self::Unusable { .. } => "error-launch-lock-unusable",
             Self::InvalidLaunchId => "error-launch-id-invalid",
+            Self::NumericLaunchId => "error-launch-id-numeric",
+            Self::ReservedLaunchId => "error-launch-id-reserved",
             Self::Path(error) => error.message_id(),
         }
     }
@@ -171,7 +190,11 @@ impl LockError {
             Self::Unusable { path, .. } | Self::Busy { path } | Self::Lost { path } => {
                 Some(path.clone())
             }
-            Self::AlreadyRunning { .. } | Self::InvalidLaunchId | Self::Path(_) => None,
+            Self::AlreadyRunning { .. }
+            | Self::InvalidLaunchId
+            | Self::NumericLaunchId
+            | Self::ReservedLaunchId
+            | Self::Path(_) => None,
         }
     }
 
@@ -440,6 +463,7 @@ impl LaunchLock {
     /// The file is named after `id`, so it can never collide with another
     /// launch's and neither can clear the other's on the way out.
     pub fn acquire_additional(instance_root: &Path, id: &str) -> Result<Self, LockError> {
+        validate_launch_id(id)?;
         let name = additional_lock_file(id).ok_or(LockError::InvalidLaunchId)?;
         let directory = metadata_dir(instance_root);
         create_dir_all(&directory)?;
@@ -2015,6 +2039,34 @@ mod tests {
         }
         assert!(validate_launch_id("second-1_a").is_ok());
         assert!(running_launches(root.path()).is_empty());
+    }
+
+    /// A number where a launch is named means a process id, and `first` means
+    /// the first launch, so no new launch can be given either as its handle.
+    #[test]
+    fn a_new_launch_cannot_be_named_like_a_process_id_or_the_first_launch() {
+        let root = instance();
+        for id in ["239745", "0"] {
+            assert!(matches!(
+                validate_launch_id(id),
+                Err(LockError::NumericLaunchId)
+            ));
+            assert!(matches!(
+                LaunchLock::acquire_additional(root.path(), id),
+                Err(LockError::NumericLaunchId)
+            ));
+        }
+        assert!(matches!(
+            validate_launch_id(FIRST_LAUNCH_HANDLE),
+            Err(LockError::ReservedLaunchId)
+        ));
+        assert!(matches!(
+            LaunchLock::acquire_additional(root.path(), FIRST_LAUNCH_HANDLE),
+            Err(LockError::ReservedLaunchId)
+        ));
+        assert!(running_launches(root.path()).is_empty());
+        // One an earlier version took under such a name can still be released.
+        assert!(force_release(root.path(), Some("239745")).is_ok());
     }
 
     /// Only this launcher's own lock files are launches; everything else under

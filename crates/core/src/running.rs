@@ -66,6 +66,14 @@ pub struct RunningProcess {
     /// second launch -- so the host alone does not name a row. `None` is the
     /// first launch, and every server.
     pub launch: Option<String>,
+    /// The text that names this launch where a user is asked which one, such
+    /// as when stopping it, and that [`LaunchSelector::parse`] reads back as
+    /// this launch: the name its starter gave it, or
+    /// [`FIRST_LAUNCH_HANDLE`](ephervex_storage::FIRST_LAUNCH_HANDLE) for an
+    /// instance's first launch. A server has none.
+    ///
+    /// [`LaunchSelector::parse`]: crate::LaunchSelector::parse
+    pub handle: Option<String>,
     pub name: String,
     /// The game or server process, once it exists.
     ///
@@ -178,6 +186,7 @@ impl App {
             for launch in launches {
                 running.push(RunningProcess {
                     host: InstalledHost::Instance(record.id),
+                    handle: Some(crate::hosted_launch::launch_handle(&launch)),
                     launch: launch.id,
                     name: record.name.clone(),
                     pid: launch.state.game_pid,
@@ -201,6 +210,7 @@ impl App {
             running.push(RunningProcess {
                 host: InstalledHost::Server(record.id),
                 launch: None,
+                handle: None,
                 name: record.name,
                 pid: Some(process.pid),
                 owner_pid: None,
@@ -583,6 +593,7 @@ mod tests {
         let mut mine = vec![RunningProcess {
             host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
             launch: None,
+            handle: None,
             name: "self".to_owned(),
             pid: Some(std::process::id()),
             owner_pid: None,

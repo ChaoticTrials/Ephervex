@@ -143,7 +143,7 @@ pub use health::{
     ConfigurationHealth, CredentialBackendHealth, DirectoryHealth, DirectoryState,
     InstallationHealth, JavaHealth, PlatformIdentity, installation_health,
 };
-pub use hosted_launch::{HostedStop, HostedStopOutcome};
+pub use hosted_launch::{HostedStop, HostedStopOutcome, LaunchSelector};
 pub use import::{ImportRequest, ImportedPack, suggested_instance_name};
 pub use instance::{
     CreatedClient, MAX_ENTITY_NAME_CHARS, NameRefusal, PreferenceContext,

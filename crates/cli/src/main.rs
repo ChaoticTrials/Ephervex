@@ -41,8 +41,8 @@ use ephervex_core::{
     JavaRuntimePins, JavaRuntimeSummary, JavaSelectionMode, JavaTarget, JavaUnavailable,
     LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions,
     LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
-    LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
-    MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
+    LaunchOutcome, LaunchSelector, LaunchState, LinkingState, LoginFlow, LoginOptions,
+    LoginRequest, MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
     ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModMutation,
     ModMutationPlan, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
     ModSearchResults, ModVersionChoice, NetworkAccess, NewClient, NewServer, OperationReporter,
@@ -211,6 +211,10 @@ enum Command {
     /// Client instances with a live launch, and servers this launcher is still
     /// supervising. A server whose supervisor is gone is a recovery case: see
     /// `ephervex server recover`.
+    ///
+    /// Each client launch is shown with its handle: "first" for an instance's
+    /// first launch, or the name given with `ephervex launch --alongside`.
+    /// `ephervex instance stop <ID> --launch HANDLE` stops that launch.
     Running,
     /// Reconcile the index against what is actually on disk.
     Reconcile,
@@ -258,12 +262,20 @@ struct LaunchArgs {
     /// Download a managed runtime if nothing installed is compatible.
     #[arg(long)]
     install_java: bool,
-    /// Run alongside a launch this instance already has.
+    /// Run alongside a launch this instance already has, as a new launch named
+    /// HANDLE.
     ///
-    /// A second client, under a second account, sharing the instance's game
-    /// directory: its saves, its options and its logs. Fine when both clients
-    /// join a server. Two clients opening the same singleplayer world is
-    /// decided by Minecraft's own world lock, not by Ephervex.
+    /// HANDLE is a name you pick for the new launch. It is not the launch to
+    /// join and not a process id: use letters, digits, "-" and "_", not digits
+    /// alone, and not "first", which names the instance's first launch.
+    /// `ephervex running` lists each launch's handle, and `ephervex instance
+    /// stop <ID> --launch HANDLE` stops this one.
+    ///
+    /// The new launch is a second client, usually under a second account,
+    /// sharing the instance's game directory: its saves, its options and its
+    /// logs. Fine when both clients join a server. Two clients opening the
+    /// same singleplayer world is decided by Minecraft's own world lock, not by
+    /// Ephervex.
     #[arg(long, value_name = "HANDLE")]
     alongside: Option<String>,
     /// Play as this account instead of the default one.
@@ -1251,7 +1263,13 @@ enum InstanceCommand {
     /// application's force stop handles it.
     Stop {
         id: InstanceId,
-        /// Which launch, for an instance running more than one alongside.
+        /// Which launch to stop, for an instance running more than one.
+        ///
+        /// Takes the handle `ephervex running` shows: the name given with
+        /// `ephervex launch --alongside`, or "first" for the instance's first
+        /// launch. A number is a process id, the game's or its launcher's, as
+        /// `ephervex running` lists them. Without this, the first launch is
+        /// stopped.
         #[arg(long, value_name = "HANDLE")]
         launch: Option<String>,
         /// Ask the game to terminate instead of ending it.
@@ -2652,7 +2670,10 @@ async fn run_instance_command(
             } else {
                 HostedStop::Kill
             };
-            match app.stop_hosted_launch(*id, launch.as_deref(), how).await? {
+            let selector = launch
+                .as_deref()
+                .map_or(LaunchSelector::First, LaunchSelector::parse);
+            match app.stop_hosted_launch(*id, &selector, how).await? {
                 HostedStopOutcome::Answered(ControlResponse::Refused(detail)) => {
                     anyhow::bail!("the launch refused the request: {detail}")
                 }
@@ -2663,9 +2684,15 @@ async fn run_instance_command(
                     "the request was accepted but Minecraft had not exited after 30 seconds; \
                      it may still be running"
                 ),
-                HostedStopOutcome::NotRunning => {
-                    anyhow::bail!("this instance has no such launch running")
-                }
+                HostedStopOutcome::NotRunning => anyhow::bail!(
+                    "this instance has no such launch running; `ephervex running` shows each \
+                     launch's handle"
+                ),
+                HostedStopOutcome::Ambiguous { handles } => anyhow::bail!(
+                    "that process runs more than one launch of this instance; name one with \
+                     --launch and its handle: {}",
+                    handles.join(", ")
+                ),
                 HostedStopOutcome::NotHosted => anyhow::bail!(
                     "this launch has no background process to ask; the desktop application's \
                      force stop ends a launch whose background process is gone"
@@ -11226,6 +11253,7 @@ fn print_running(app: &App, json: bool) -> anyhow::Result<()> {
             "running": running.iter().map(|process| serde_json::json!({
                 "kind": process.host.kind(),
                 "id": process.host.id(),
+                "launch": process.handle,
                 "name": process.name,
                 "pid": process.pid,
                 "owner_pid": process.owner_pid,
@@ -11246,8 +11274,13 @@ fn print_running(app: &App, json: bool) -> anyhow::Result<()> {
         let pid = process
             .pid
             .map_or_else(|| "-".to_owned(), |pid| pid.to_string());
+        let launch = process
+            .handle
+            .as_ref()
+            .map(|handle| format!("  launch {handle}"))
+            .unwrap_or_default();
         outln!(
-            "{}  {}  pid {pid}  {}",
+            "{}  {}{launch}  pid {pid}  {}",
             process.host.kind(),
             process.name,
             format_uptime(process.uptime_seconds())

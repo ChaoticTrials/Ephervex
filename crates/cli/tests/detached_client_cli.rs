@@ -236,6 +236,63 @@ fn a_game_keeps_running_after_its_starter_is_gone_and_a_later_command_ends_it() 
 }
 
 #[test]
+fn running_names_each_launch_and_stop_reaches_it_by_that_name_or_its_process_id() {
+    let sandbox = Sandbox::new();
+    let (id, root) = sandbox.client();
+    let (mut runner, starter) = sandbox.start_runner(&root, "sleep 60");
+    let runner_pid = runner.id();
+    let mut cleanup = Reaper(vec![runner_pid]);
+    let game = running_pid(&mut runner);
+    cleanup.0.push(game);
+    drop(starter);
+
+    let shown = sandbox.run(&["running", "--json"]);
+    assert!(shown.status.success(), "{}", stderr_of(&shown));
+    let listing: serde_json::Value = serde_json::from_slice(&shown.stdout).expect("JSON");
+    assert_eq!(listing["running"][0]["launch"], "first");
+    let text = sandbox.run(&["running"]);
+    assert!(
+        stdout_of(&text).contains("launch first"),
+        "{}",
+        stdout_of(&text)
+    );
+
+    // A process id that is no launch of this instance reaches nothing.
+    let mut unrelated = sleeper();
+    let unrelated_pid = unrelated.id();
+    cleanup.0.push(unrelated_pid);
+    let missed = sandbox.run(&[
+        "instance",
+        "stop",
+        &id,
+        "--launch",
+        &unrelated_pid.to_string(),
+    ]);
+    assert!(!missed.status.success());
+    assert!(
+        stderr_of(&missed).contains("ephervex running"),
+        "{}",
+        stderr_of(&missed)
+    );
+    assert!(alive(game) && alive(unrelated_pid));
+
+    let stopped = sandbox.run(&["instance", "stop", &id, "--launch", &game.to_string()]);
+    assert!(stopped.status.success(), "{}", stderr_of(&stopped));
+    wait_until("the game to end", || !alive(game));
+    wait_until("the runner to finish", || {
+        runner.try_wait().expect("wait").is_some()
+    });
+    cleanup.0.retain(|pid| *pid == unrelated_pid);
+    assert!(
+        unrelated.try_wait().expect("wait").is_none(),
+        "only the named launch was stopped"
+    );
+    unrelated.kill().expect("kill");
+    unrelated.wait().expect("reap");
+    cleanup.0.clear();
+}
+
+#[test]
 fn a_game_that_ends_by_itself_is_reported_and_releases_the_instance() {
     let sandbox = Sandbox::new();
     let (_id, root) = sandbox.client();

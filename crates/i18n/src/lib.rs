@@ -835,6 +835,8 @@ mod tests {
             "error-launch-lock-busy",
             "error-launch-lock-lost",
             "error-launch-id-invalid",
+            "error-launch-id-numeric",
+            "error-launch-id-reserved",
             "error-launch-invalid-version-metadata",
             "error-launch-loader-not-supported",
             "error-launch-incompatible-native-library",

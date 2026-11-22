@@ -11671,12 +11671,17 @@ async fn stop_hosted_launch(
     launch: Option<&str>,
 ) {
     match app
-        .stop_hosted_launch(instance, launch, ephervex_core::HostedStop::Kill)
+        .stop_hosted_launch(
+            instance,
+            &ephervex_core::LaunchSelector::of_handle(launch),
+            ephervex_core::HostedStop::Kill,
+        )
         .await
     {
         Ok(
             ephervex_core::HostedStopOutcome::Answered(ControlResponse::Refused(_))
             | ephervex_core::HostedStopOutcome::NotRunning
+            | ephervex_core::HostedStopOutcome::Ambiguous { .. }
             | ephervex_core::HostedStopOutcome::NotHosted,
         ) => {
             let _ = events.send(Event::Toast {
