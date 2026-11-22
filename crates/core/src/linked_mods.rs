@@ -1819,6 +1819,7 @@ pub(crate) mod tests {
             project_json("MOVEPROJ", "Moving Mod", "required", "required"),
             project_json("NEWLIB", "Moving Library", "required", "required"),
             project_json("PINNER", "Release Pinner", "required", "required"),
+            project_json("SHARER", "Library Sharer", "required", "required"),
             project_json("RELDECLPROJ", "Release Declared", "required", "required"),
             project_json("NEEDSUNK", "Needs Undeclared", "required", "required"),
             project_json("SERVERONLY", "Server Only", "unsupported", "required"),
@@ -1884,6 +1885,7 @@ pub(crate) mod tests {
                 "NEWLIB",
                 "NEWV1",
             ),
+            version_json(base, "SHAREV1", "SHARER", &[MINECRAFT], &["NEWLIB"], 0),
         ];
         projects.extend(duplicated_projects);
         versions.extend(duplicated_versions);
@@ -3905,6 +3907,67 @@ Details:\n\
             vec![
                 "moveproj-MOVEV2.jar".to_owned(),
                 "newlib-NEWV1.jar".to_owned()
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn installing_another_mod_keeps_the_release_a_dependency_was_moved_to() {
+        let world = world().await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("MOVEPROJ")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("MOVEV2"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the mod installs with its library");
+        world
+            .app
+            .change_managed_mod_version(
+                world.client,
+                Path::new("mods/newlib-NEWV2.jar"),
+                &crate::mutation::ModVersionChoice::Exact("NEWV1".to_owned()),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the library moves back");
+
+        let installed = world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("SHARER").from_provider(ModProvider::Modrinth),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a second mod needing the library installs beside the chosen release");
+
+        assert_eq!(
+            installed
+                .plan
+                .already_installed
+                .iter()
+                .map(|project| (project.project_id.as_str(), project.version_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("NEWLIB", "NEWV1")]
+        );
+        assert_eq!(
+            client_recorded(&world, "NEWLIB"),
+            ("NEWV1".to_owned(), ModOrigin::RequiredDependency)
+        );
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "moveproj-MOVEV2.jar".to_owned(),
+                "newlib-NEWV1.jar".to_owned(),
+                "sharer-SHAREV1.jar".to_owned()
             ]
         );
     }

@@ -238,10 +238,11 @@ pub enum ModPlatformError {
     #[error("a dependency of `{declared_by}` identifies nothing to install")]
     MalformedDependency { declared_by: String },
 
-    /// The instance already has this project at a different version.
+    /// An install would move a project the instance already has at a different
+    /// version.
     ///
-    /// Replacing it is a mod *update*, which this build does not implement.
-    /// Raised during planning, so the instance is never touched.
+    /// An install never moves an installed mod; a version change or an update
+    /// does. Raised during planning, so the instance is never touched.
     #[error(
         "`{project_id}` is already installed from {provider} at `{installed}`, not `{requested}`"
     )]

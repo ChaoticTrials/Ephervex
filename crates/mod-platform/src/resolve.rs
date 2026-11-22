@@ -129,9 +129,10 @@ pub struct InstalledProject {
 /// Making it a parameter rather than a second resolver keeps one implementation
 /// of "what does this mod need", which is the part that is hard to get right.
 ///
-/// `Replace` moves the root and nothing else on its own account: an installed
-/// dependency that nothing pins stays at its release while that release still
-/// fits. Only a pin, or a release that no longer fits, moves one.
+/// Under either policy an installed dependency that nothing pins stays at its
+/// release while that release still fits, so `Replace` moves the root and
+/// nothing else on its own account, and `Preserve` reuses it. Only a pin, or a
+/// release that no longer fits, asks for another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InstalledPolicy {
     /// Refuse to plan anything that would change an installed project.
@@ -1464,7 +1465,7 @@ impl<'a> Resolver<'a> {
     /// 0. a project pinned by a release that is not itself superseded, since
     ///    that choice is forced;
     /// 1. a project nothing pins, reached the same way, which takes its newest
-    ///    release (or, under `Replace`, the one it already has);
+    ///    release (or the one it already has);
     /// 2. a project pinned only through superseded releases;
     /// 3. a project whose pin has gone, which keeps its release in the graph
     ///    until nothing else can still be explored through it;
@@ -1609,9 +1610,10 @@ impl<'a> Resolver<'a> {
 
     /// The release a non-root project already has, when nothing asks it to move.
     ///
-    /// Under [`InstalledPolicy::Replace`] only the root is being changed on
-    /// purpose. An unpinned dependency has no opinion about its release, so
-    /// moving it to the newest one would be a side effect nobody asked for.
+    /// An unpinned dependency has no opinion about its release. Moving it to the
+    /// newest one would be a side effect nobody asked for under
+    /// [`InstalledPolicy::Replace`], and a refusal of an install the installed
+    /// release already satisfies under [`InstalledPolicy::Preserve`].
     ///
     /// A provider's listing can leave out a release that is still installed
     /// (unlisted, or beyond the pages read), so one missing from it is looked up
@@ -1621,9 +1623,7 @@ impl<'a> Resolver<'a> {
         project_id: &str,
         versions: &[ModVersionInfo],
     ) -> ModPlatformResult<Option<ModVersionInfo>> {
-        if self.request.installed_policy != InstalledPolicy::Replace
-            || project_id == self.request.selection.project_id
-        {
+        if project_id == self.request.selection.project_id {
             return Ok(None);
         }
         let Some((installed, _)) = self.recorded(project_id) else {
@@ -6073,11 +6073,9 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn a_dependency_resolving_past_an_installed_version_refuses_the_whole_install() {
-        // The user asked about ROOT and said nothing about LIB. Quietly moving
-        // LIB to another version is exactly the surprise this refuses.
-        let catalog = Catalog::default()
+    /// ROOT needs LIB, which has an older and a newer release.
+    fn sharing_a_library() -> Catalog {
+        Catalog::default()
             .with(
                 "ROOT",
                 vec![needs(
@@ -6092,7 +6090,41 @@ mod tests {
                     at(compatible("old", "LIB"), 0),
                     at(compatible("new", "LIB"), 60),
                 ],
-            );
+            )
+    }
+
+    #[tokio::test]
+    async fn an_install_reuses_the_release_of_an_installed_dependency_nothing_pins() {
+        // The user asked about ROOT and said nothing about LIB, so LIB neither
+        // moves nor turns the install into a refusal.
+        let installed = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "old".to_owned(),
+        }];
+
+        let plan = plan_with(
+            &sharing_a_library(),
+            InstallSelection::new("ROOT"),
+            &installed,
+        )
+        .await
+        .expect("the installed release satisfies ROOT");
+
+        assert_eq!(plan.already_installed, installed.to_vec());
+        assert_eq!(ids(plan.to_install()), vec!["ROOT".to_owned()]);
+        assert!(plan.replacements.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_install_needing_another_release_of_an_installed_dependency_is_refused() {
+        let mut root = compatible("v1", "ROOT");
+        root.dependencies.push(ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: Some("LIB".to_owned()),
+            version_id: Some("new".to_owned()),
+            file_name: None,
+        });
+        let catalog = sharing_a_library().with("ROOT", vec![root]);
         let installed = [InstalledProject {
             project_id: "LIB".to_owned(),
             version_id: "old".to_owned(),
@@ -6100,7 +6132,31 @@ mod tests {
 
         let error = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
             .await
-            .expect_err("must refuse");
+            .expect_err("a pin moves LIB, and an install does not move a mod");
+        assert!(matches!(
+            error,
+            ModPlatformError::ProjectAlreadyInstalled { ref project_id, ref requested, .. }
+                if project_id == "LIB" && requested == "new"
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_install_does_not_reuse_an_installed_dependency_release_that_no_longer_fits() {
+        let catalog = sharing_a_library().with(
+            "LIB",
+            vec![
+                at(version("old", "LIB", &["1.21.1"], &["neoforge"]), 0),
+                at(compatible("new", "LIB"), 60),
+            ],
+        );
+        let installed = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "old".to_owned(),
+        }];
+
+        let error = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect_err("a release that does not fit is not kept");
         assert!(matches!(
             error,
             ModPlatformError::ProjectAlreadyInstalled { ref project_id, .. } if project_id == "LIB"

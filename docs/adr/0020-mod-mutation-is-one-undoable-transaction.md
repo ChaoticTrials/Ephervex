@@ -141,12 +141,12 @@ to isolate one.
 ## Amendment: a dependency's release may be chosen
 
 A bug report often names the library release it happened on, not only the mod.
-Refusing to move a dependency left only a workaround: remove the library,
-install it by name at the older release, then install the mod that needs it.
-That also made the library a root it never was.
+Without a way to move a dependency, the only route to that release is to install
+the library by name before the mod that needs it, which makes the library a root
+it never was.
 
-A required or optional dependency whose installed release is proven may now
-change version and update like a mod chosen by name:
+A required or optional dependency whose installed release is proven may change
+version and update like a mod chosen by name:
 
 | Origin | Change version | Update | Remove |
 |---|---|---|---|
@@ -159,6 +159,14 @@ The move keeps the entry's origin, as every replacement does, so removing the
 mods that need the library still collects it. Changing or updating another mod
 later keeps the moved release while nothing pins a different one, because
 replacing never moves an installed dependency that nothing pins.
+
+Installing a mod keeps it too. Under `InstalledPolicy::Preserve` an installed
+dependency that nothing pins resolves to the release it has while that release
+still fits, and the plan reports it as already installed. Asking for the newest
+release instead would refuse an install that the installed release already
+satisfies. A pin to another release, or an installed release that no longer
+fits, still refuses the install: an install never moves a mod that is already
+there.
 
 A move is refused when another recorded mod's relations require one exact
 release of the mod being moved, other than the one chosen. This holds for every

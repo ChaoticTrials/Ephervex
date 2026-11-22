@@ -282,7 +282,9 @@ A dependency that another mod pulled in can change version and update too, for
 example to reproduce a report that names an older library release. It stays a
 dependency, so it is still removed together with the mods that need it, and it
 cannot be removed on its own. Ephervex refuses the change when another
-installed mod requires one exact release of it, and names that mod.
+installed mod requires one exact release of it, and names that mod. Mods you
+install later that also need it use the release you chose, unless one of them
+requires a different exact release.
 
 An imported pack starts with **Independent mod changes** off, and so does a
 server built from a pack or from server files. While it is off, you can
