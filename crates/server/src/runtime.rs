@@ -1669,11 +1669,14 @@ mod tests {
 
     /// Spawns a process whose name is not valid UTF-8 and returns once `/proc` shows it.
     fn spawn_with_non_utf8_name(directory: &Path) -> KillOnDrop {
+        // A shell blocked in `read` on its open stdin: a multicall coreutils
+        // `sleep` refuses to run under a name that is not a utility's.
         let program = directory.join(std::ffi::OsStr::from_bytes(b"sl\xffeep"));
-        copy_executable(Path::new("/bin/sleep"), &program);
+        copy_executable(Path::new("/bin/sh"), &program);
         let child = KillOnDrop(
             std::process::Command::new(&program)
-                .arg("60")
+                .args(["-c", "read _"])
+                .stdin(std::process::Stdio::piped())
                 .spawn()
                 .expect("spawn"),
         );
@@ -1698,7 +1701,7 @@ mod tests {
         evidence.supervisor.start_ticks = u64::MAX;
         write_runtime_evidence(root.path(), &evidence).expect("write");
 
-        assert!(read_stat(odd.0.id()).is_ok());
+        assert_ne!(read_stat(odd.0.id()).expect("stat").state, 'Z');
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
             RuntimeClassification::ProvenStale { .. }
@@ -1896,10 +1899,11 @@ mod tests {
     fn a_live_orphan_whose_executable_was_replaced_is_not_proven_dead() {
         let root = root();
         let bin = tempfile::tempdir().expect("bin dir");
-        let java = bin.path().join("java");
-        copy_executable(Path::new("/bin/sleep"), &java);
+        // Named `sleep`: a multicall coreutils runs a copy only under a utility's name.
+        let program = bin.path().join("sleep");
+        copy_executable(Path::new("/bin/sleep"), &program);
         let child = KillOnDrop(
-            std::process::Command::new(&java)
+            std::process::Command::new(&program)
                 .arg("60")
                 .spawn()
                 .expect("spawn"),
@@ -1907,9 +1911,9 @@ mod tests {
         record_orphan(root.path(), &child);
         assert_orphaned_and_not_clearable(root.path());
 
-        let replacement = bin.path().join("java.new");
+        let replacement = bin.path().join("sleep.new");
         std::fs::copy("/bin/sleep", &replacement).expect("copy replacement");
-        std::fs::rename(&replacement, &java).expect("replace by rename");
+        std::fs::rename(&replacement, &program).expect("replace by rename");
         assert_orphaned_and_not_clearable(root.path());
     }
 
@@ -1933,10 +1937,11 @@ mod tests {
     fn a_supervisor_whose_executable_was_replaced_stays_controlled() {
         let root = root();
         let bin = tempfile::tempdir().expect("bin dir");
-        let launcher = bin.path().join("launcher");
-        copy_executable(Path::new("/bin/sleep"), &launcher);
+        // Named `sleep`: a multicall coreutils runs a copy only under a utility's name.
+        let program = bin.path().join("sleep");
+        copy_executable(Path::new("/bin/sleep"), &program);
         let supervisor = KillOnDrop(
-            std::process::Command::new(&launcher)
+            std::process::Command::new(&program)
                 .arg("60")
                 .spawn()
                 .expect("spawn"),
@@ -1949,9 +1954,9 @@ mod tests {
         write_runtime_evidence(root.path(), &evidence).expect("write");
         let listener = UnixListener::bind(&socket).expect("bind");
 
-        let replacement = bin.path().join("launcher.new");
+        let replacement = bin.path().join("sleep.new");
         std::fs::copy("/bin/sleep", &replacement).expect("copy replacement");
-        std::fs::rename(&replacement, &launcher).expect("replace by rename");
+        std::fs::rename(&replacement, &program).expect("replace by rename");
 
         assert!(matches!(
             classify_runtime(root.path()).expect("classify"),
