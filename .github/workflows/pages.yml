@@ -63,7 +63,9 @@ jobs:
             libfontconfig-dev libfreetype-dev libssl-dev fonts-dejavu-core
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        # The toolchain and components rust-toolchain.toml names.
+        working-directory: source
+        run: rustup toolchain install
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

@@ -112,9 +112,9 @@ it captures. Do not add unfinished product screens to satisfy a screenshot.
 
 ## Platform requirements
 
-- Linux with Rust 1.99.1 or newer and the native build dependencies required by
-  `ephervex-gui` (including the fontconfig and FreeType development
-  libraries).
+- Linux with the Rust toolchain pinned in `rust-toolchain.toml` (rustup
+  installs it) and the native build dependencies required by `ephervex-gui`
+  (including the fontconfig and FreeType development libraries).
 - Bash and a fontconfig setup with the fonts used by the launcher.
 - No Wayland or X11 display is required.
 - Network access while building: the Skia build downloads prebuilt Skia

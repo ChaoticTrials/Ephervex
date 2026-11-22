@@ -340,7 +340,8 @@ uninstall behavior, offline expectations, and how a release is built.
 
 ## Building and testing
 
-Use a stable Rust toolchain, version 1.99.1 or newer:
+`rust-toolchain.toml` pins the Rust toolchain to the minimum supported version,
+1.99.1, and rustup installs it on first use:
 
 ```bash
 cargo build --workspace

@@ -501,9 +501,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libfontconfig-dev libfreetype-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-      | sh -s -- -y --default-toolchain stable --profile minimal
+      | sh -s -- -y --default-toolchain none --profile minimal
 ENV PATH=/root/.cargo/bin:$PATH
+COPY rust-toolchain.toml /toolchain/
+RUN cd /toolchain && rustup toolchain install
 ```
+
+The image installs the Rust toolchain `rust-toolchain.toml` names, so rebuild it
+after that file changes.
 
 `dpkg-dev` is what `build-deb.sh` needs and `rpm` and `cpio` are what
 `build-rpm.sh` and its smoke test need. The image is the same for both release
