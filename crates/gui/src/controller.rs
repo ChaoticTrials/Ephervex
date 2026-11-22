@@ -5325,6 +5325,12 @@ fn register_mod_state_actions(
     register_dependency_actions(ui, commands);
 }
 
+/// Whether the open impact dialog shows the switch that takes the other mods
+/// along, the same condition its markup shows it under.
+fn offers_cascade(ui: &AppWindow) -> bool {
+    ui.get_mod_impact_breaks().row_count() > 0 || ui.get_mod_requires_disabled().row_count() > 0
+}
+
 /// Answering the dialog that says what a mod change affects.
 ///
 /// Its own registration because it is a whole conversation rather than one
@@ -5343,8 +5349,20 @@ fn register_dependency_actions(ui: &AppWindow, commands: &Sender<Command>) {
         else {
             return;
         };
+        // Remembers the answer, not only that the question was asked: taking
+        // the other mods too stops asking, and leaving them alone stops
+        // following relations, so the next switch changes only its own mod.
+        // A dialog that offered nothing to take along only stops asking.
         if ui.get_mod_impact_remember() {
-            send(&sender, Command::SaveDependencyWarning(false));
+            let declined = !cascade && offers_cascade(&ui);
+            send(
+                &sender,
+                if declined {
+                    Command::SaveDependencyFollowing(false)
+                } else {
+                    Command::SaveDependencyWarning(false)
+                },
+            );
         }
         let target = mod_path_key::decode(ui.get_mod_impact_path().as_str());
         if ui.get_mod_impact_deleting() {
@@ -25007,6 +25025,74 @@ mod tests {
                 (PathBuf::from("mods/LibX.jar"), true),
                 (PathBuf::from("mods/Addon.jar"), true),
             ]
+        );
+    }
+
+    #[test]
+    fn do_not_ask_again_remembers_whether_the_other_mods_were_taken_too() {
+        for (cascade, remembered) in [(true, "warning"), (false, "following")] {
+            let ui = test_window();
+            let host = ephervex_model::InstanceId::new().to_string();
+            apply_mod_impact(
+                &ui,
+                &ModImpactPresentation {
+                    breaks: vec![impact_row("UtilitiX")],
+                    ..turn_off_impact(&host, Vec::new())
+                },
+            );
+            ui.set_mod_impact_remember(true);
+            let (sender, commands) = std::sync::mpsc::channel();
+            register_dependency_actions(&ui, &sender);
+
+            ui.invoke_apply_mod_impact(cascade);
+
+            let sent: Vec<Command> = commands.try_iter().collect();
+            match (remembered, sent.as_slice()) {
+                (
+                    "warning",
+                    [
+                        Command::SaveDependencyWarning(false),
+                        Command::SetModsEnabled { changes, .. },
+                    ],
+                ) => {
+                    assert_eq!(changes.len(), 2, "the dependent goes too");
+                }
+                (
+                    "following",
+                    [
+                        Command::SaveDependencyFollowing(false),
+                        Command::SetModsEnabled { changes, .. },
+                    ],
+                ) => {
+                    assert_eq!(changes, &vec![(PathBuf::from("mods/LibX.jar"), false)]);
+                }
+                _ => panic!("cascade {cascade}: {sent:?}"),
+            }
+        }
+    }
+
+    /// Nothing was offered to take along, so remembering only stops asking.
+    #[test]
+    fn do_not_ask_again_on_a_dialog_with_nothing_to_take_along_only_stops_asking() {
+        let ui = test_window();
+        let host = ephervex_model::InstanceId::new().to_string();
+        apply_mod_impact(&ui, &turn_off_impact(&host, vec![impact_row("Mystery")]));
+        ui.set_mod_impact_remember(true);
+        let (sender, commands) = std::sync::mpsc::channel();
+        register_dependency_actions(&ui, &sender);
+
+        ui.invoke_apply_mod_impact(ui.get_mod_impact_cascade());
+
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Command::SaveDependencyWarning(false),
+                    Command::SetModsEnabled { .. }
+                ]
+            ),
+            "{sent:?}"
         );
     }
 
