@@ -360,6 +360,8 @@ pub enum Command {
     DuplicateClient {
         instance: InstanceId,
         absent_mods: AbsentModPolicy,
+        /// Where the copy lives. Asked for when the original is persistent.
+        storage: StorageClass,
     },
     DeleteClient {
         id: InstanceId,
@@ -1228,14 +1230,17 @@ pub struct LocalModClashData {
     pub existing_is_recorded: bool,
 }
 
-/// The recorded mods an instance has no jar for, as a prompt needs them.
+/// What duplicating an instance has to ask first, as a prompt needs it.
 ///
-/// Empty means there is nothing to ask, which is the common case and the one
-/// that has to stay a single click.
+/// No absent mods and a temporary original means there is nothing to ask,
+/// which is the common case and the one that has to stay a single click.
 #[derive(Debug, Clone)]
-pub struct AbsentModsData {
+pub struct DuplicatePlanData {
     pub instance: String,
+    /// The recorded mods the instance has no jar for.
     pub names: Vec<String>,
+    /// Whether the original is persistent, so the copy's storage is asked for.
+    pub persistent: bool,
 }
 
 /// The modpack-link settings, as the settings page needs them.
@@ -1844,7 +1849,7 @@ pub enum ModalScope {
 
 impl ModalScope {
     pub const NONE: Self = Self::Dialogs(&[]);
-    pub const ABSENT_MODS: Self = Self::Dialogs(&["absent-mods"]);
+    pub const DUPLICATE_INSTANCE: Self = Self::Dialogs(&["duplicate-instance"]);
     pub const DELETE_INSTANCE: Self = Self::Dialogs(&["delete-instance"]);
     pub const DELETE_SERVER: Self = Self::Dialogs(&["delete-server"]);
     pub const DELETE_MOD: Self = Self::Dialogs(&["delete-mod", "mod-impact"]);
@@ -2001,7 +2006,7 @@ pub enum Event {
     LocalModPlan(LocalModPlanData),
     /// The mods a copy would inherit without their jars, so the user can say
     /// whether the copy should carry them.
-    AbsentMods(AbsentModsData),
+    DuplicatePlan(DuplicatePlanData),
     /// Where making an instance persistent would put it, and which servers the
     /// user can bring along.
     PromotionPlan(PromotionPlanData),
@@ -3863,12 +3868,17 @@ fn run_worker(
                 );
             }
             Command::PlanDuplicate(instance) => {
-                match app.absent_recorded_mods(InstalledHost::Instance(instance)) {
-                    Ok(absent) => {
-                        let _ = events.send(Event::AbsentMods(AbsentModsData {
-                            instance: instance.to_string(),
-                            names: absent.into_iter().map(|entry| entry.name).collect(),
-                        }));
+                let planned = app.client(instance).and_then(|record| {
+                    let absent = app.absent_recorded_mods(InstalledHost::Instance(instance))?;
+                    Ok(DuplicatePlanData {
+                        instance: instance.to_string(),
+                        names: absent.into_iter().map(|entry| entry.name).collect(),
+                        persistent: record.storage == StorageClass::Persistent,
+                    })
+                });
+                match planned {
+                    Ok(plan) => {
+                        let _ = events.send(Event::DuplicatePlan(plan));
                     }
                     Err(error) => send_error(&events, &error),
                 }
@@ -3924,6 +3934,7 @@ fn run_worker(
             Command::DuplicateClient {
                 instance,
                 absent_mods,
+                storage,
             } => {
                 // Said in the dialog that asked, when one did: the copy would be
                 // taken from files a change is still rewriting.
@@ -3931,21 +3942,18 @@ fn run_worker(
                     &app,
                     &changing,
                     &[InstalledHost::Instance(instance)],
-                    ModalScope::ABSENT_MODS,
+                    ModalScope::DUPLICATE_INSTANCE,
                     &events,
                 ) {
                     continue;
                 }
-                match app.duplicate_client(
-                    instance,
-                    &ephervex_core::DuplicateClient::default(),
-                    absent_mods,
-                ) {
+                let request = ephervex_core::DuplicateClient::default().with_storage(storage);
+                match app.duplicate_client(instance, &request, absent_mods) {
                     Ok(copy) => {
                         // Before the toast: the dialog that asked the question
                         // has its answer, and leaving it open invites the same
                         // answer again and a second copy nobody asked for.
-                        let _ = events.send(Event::CloseModal(ModalScope::ABSENT_MODS));
+                        let _ = events.send(Event::CloseModal(ModalScope::DUPLICATE_INSTANCE));
                         let _ = events.send(Event::Toast {
                             message: localized_value("gui-created-entity", &copy.record.name),
                             error: false,
@@ -16799,7 +16807,7 @@ mod tests {
         let client = InstalledHost::Instance(ephervex_model::InstanceId::new());
         let server = InstalledHost::Server(ServerId::new());
 
-        for dialogs in [ModalScope::RENAME, ModalScope::ABSENT_MODS] {
+        for dialogs in [ModalScope::RENAME, ModalScope::DUPLICATE_INSTANCE] {
             assert!(!refuse_dialog_while_changing(
                 &app,
                 &hosts,
@@ -16811,7 +16819,7 @@ mod tests {
         }
 
         let in_flight = HostChangeInFlight::mark(&hosts, client, "gui-snapshot-busy");
-        for dialogs in [ModalScope::RENAME, ModalScope::ABSENT_MODS] {
+        for dialogs in [ModalScope::RENAME, ModalScope::DUPLICATE_INSTANCE] {
             assert!(refuse_dialog_while_changing(
                 &app,
                 &hosts,

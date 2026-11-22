@@ -94,23 +94,27 @@ fn the_new_snapshot_dialog_keeps_the_body_padding_under_cancel() {
 }
 
 #[test]
-fn the_absent_mods_dialog_keeps_the_body_padding_under_cancel_whatever_it_lists() {
+fn the_duplicate_dialog_keeps_the_body_padding_under_cancel_whatever_it_asks() {
     let ui = support::test_window();
     for scale in [1.0_f32, 1.25] {
         ui.global::<Theme>().set_text_scale(scale);
-        for count in [0, 1, 3, 40] {
-            let names: Vec<SharedString> = (0..count)
-                .map(|index| format!("Absent Mod Number {index}").into())
-                .collect();
-            ui.set_absent_mods(ModelRc::new(VecModel::from(names)));
-            ui.set_modal("absent-mods".into());
-            settle(&ui);
+        for persistent in [false, true] {
+            for count in [0, 1, 3, 40] {
+                let names: Vec<SharedString> = (0..count)
+                    .map(|index| format!("Absent Mod Number {index}").into())
+                    .collect();
+                ui.set_absent_mods(ModelRc::new(VecModel::from(names)));
+                ui.set_duplicate_source_persistent(persistent);
+                ui.set_modal("duplicate-instance".into());
+                settle(&ui);
 
-            let gap = space_under_cancel(&ui);
-            assert!(
-                gap >= BODY_PADDING,
-                "absent-mods at text scale {scale} with {count} names: {gap}px under Cancel"
-            );
+                let gap = space_under_cancel(&ui);
+                assert!(
+                    gap >= BODY_PADDING,
+                    "duplicate-instance at text scale {scale}, persistent {persistent}, \
+                     {count} names: {gap}px under Cancel"
+                );
+            }
         }
     }
 }

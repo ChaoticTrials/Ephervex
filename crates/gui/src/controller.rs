@@ -17,6 +17,7 @@ use ephervex_i18n::{Arg, lookup, lookup_args};
 use ephervex_model::AbsentModPolicy;
 use ephervex_model::InstanceId;
 use ephervex_model::ModProvider;
+use ephervex_model::StorageClass;
 use slint::{
     ComponentHandle as _, Image, LogicalSize, Model as _, ModelRc, SharedPixelBuffer, SharedString,
     Timer, TimerMode, VecModel,
@@ -5719,7 +5720,7 @@ fn register_local_mod_actions(
     });
 
     let sender = commands.clone();
-    ui.on_duplicate_client_deciding(move |id, drop_absent| {
+    ui.on_duplicate_client_deciding(move |id, drop_absent, persistent| {
         if let Some(instance) = backend::parse_instance_id(&id) {
             send(
                 &sender,
@@ -5729,6 +5730,11 @@ fn register_local_mod_actions(
                         AbsentModPolicy::Drop
                     } else {
                         AbsentModPolicy::Keep
+                    },
+                    storage: if persistent {
+                        StorageClass::Persistent
+                    } else {
+                        StorageClass::Temporary
                     },
                 },
             );
@@ -9049,17 +9055,26 @@ fn render_local_mod_refusals(ui: &AppWindow, plan: &backend::LocalModPlanData) {
     ui.invoke_present_toast(detail.into(), true);
 }
 
-/// Asks what a copy should do with the mods whose jars are gone, if any are.
-fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands: &Sender<Command>) {
-    let Some(instance) = backend::parse_instance_id(&absent.instance) else {
+/// Asks what a copy should be, when there is anything to ask.
+///
+/// A persistent original asks where the copy lives, with temporary chosen: a
+/// copy is usually made to try something disposable. Recorded mods whose jars
+/// are gone ask whether the copy records them too.
+fn apply_duplicate_plan(
+    ui: &AppWindow,
+    plan: &backend::DuplicatePlanData,
+    commands: &Sender<Command>,
+) {
+    let Some(instance) = backend::parse_instance_id(&plan.instance) else {
         return;
     };
-    if absent.names.is_empty() {
+    if plan.names.is_empty() && !plan.persistent {
         send(
             commands,
             Command::DuplicateClient {
                 instance,
                 absent_mods: AbsentModPolicy::Keep,
+                storage: StorageClass::Temporary,
             },
         );
         return;
@@ -9068,16 +9083,18 @@ fn apply_absent_mods(ui: &AppWindow, absent: &backend::AbsentModsData, commands:
         return;
     }
     ui.set_absent_mods(
-        absent
-            .names
+        plan.names
             .iter()
             .map(|name| SharedString::from(name.as_str()))
             .collect::<Vec<_>>()
             .as_slice()
             .into(),
     );
-    ui.set_pending_action_id(absent.instance.as_str().into());
-    ui.set_modal("absent-mods".into());
+    ui.set_duplicate_source_persistent(plan.persistent);
+    ui.set_duplicate_persistent(false);
+    ui.set_pending_action_id(plan.instance.as_str().into());
+    ui.set_modal_error(SharedString::default());
+    ui.set_modal("duplicate-instance".into());
 }
 
 /// Opens the dialog that asks what to bring along.
@@ -9190,7 +9207,7 @@ fn apply_event(
         Event::LocalModPlan(plan) => {
             apply_local_mod_plan(ui, &plan, local_mods, &workspace.state.borrow(), commands);
         }
-        Event::AbsentMods(absent) => apply_absent_mods(ui, &absent, commands),
+        Event::DuplicatePlan(plan) => apply_duplicate_plan(ui, &plan, commands),
         Event::PromotionPlan(plan) => apply_promotion_plan(ui, &plan),
         event @ (Event::PackUrlConsent { .. }
         | Event::PackUrlDownloading { .. }
@@ -12671,6 +12688,71 @@ mod tests {
             ui.get_startup_error(),
             lookup("gui-background-service-stopped")
         );
+    }
+
+    fn duplicate_plan(
+        instance: InstanceId,
+        persistent: bool,
+        names: &[&str],
+    ) -> backend::DuplicatePlanData {
+        backend::DuplicatePlanData {
+            instance: instance.to_string(),
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+            persistent,
+        }
+    }
+
+    #[test]
+    fn duplicating_a_temporary_instance_with_nothing_absent_copies_at_once_as_temporary() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let instance = InstanceId::new();
+
+        apply_duplicate_plan(&ui, &duplicate_plan(instance, false, &[]), &sender);
+
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::DuplicateClient {
+                instance: copied,
+                absent_mods: AbsentModPolicy::Keep,
+                storage: StorageClass::Temporary,
+            }) if copied == instance
+        ));
+        assert_eq!(ui.get_modal(), "");
+    }
+
+    #[test]
+    fn duplicating_a_persistent_instance_asks_where_the_copy_lives_with_temporary_chosen() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        ui.set_duplicate_persistent(true);
+
+        apply_duplicate_plan(&ui, &duplicate_plan(InstanceId::new(), true, &[]), &sender);
+
+        assert!(
+            commands.try_recv().is_err(),
+            "nothing is copied before the answer"
+        );
+        assert_eq!(ui.get_modal(), "duplicate-instance");
+        assert!(ui.get_duplicate_source_persistent());
+        assert!(!ui.get_duplicate_persistent(), "a copy starts as temporary");
+    }
+
+    #[test]
+    fn duplicating_a_temporary_instance_with_absent_mods_asks_only_about_them() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+
+        apply_duplicate_plan(
+            &ui,
+            &duplicate_plan(InstanceId::new(), false, &["Gone"]),
+            &sender,
+        );
+
+        assert!(commands.try_recv().is_err());
+        assert_eq!(ui.get_modal(), "duplicate-instance");
+        assert!(!ui.get_duplicate_source_persistent());
+        assert_eq!(ui.get_absent_mods().row_count(), 1);
     }
 
     #[test]

@@ -476,8 +476,8 @@ pub struct DuplicateClient {
     pub name: Option<String>,
     /// Where the copy lives, or `None` for the original's storage class.
     ///
-    /// The caller must choose how to handle a persistent
-    /// instance to try something disposable is the common case.
+    /// Copying a persistent instance to try something disposable is the common
+    /// case, so an interactive caller asks rather than inheriting persistence.
     pub storage: Option<StorageClass>,
 }
 
