@@ -195,6 +195,10 @@ export component AppWindow inherits Window {
     // every visit, because measuring walks the cache.
     private property <bool> artifact-cache-requested: false;
     in-out property <[InstanceRow]> instances;
+    // -- one localized line per instance or server the lists leave out because
+    // this build cannot read its saved entry.
+    in-out property <[string]> unreadable-instances;
+    in-out property <[string]> unreadable-servers;
     // Every server the combined list search and the linked-servers setting let
     // through, favorites first, written by Rust from `list-query`.
     in-out property <[ServerRow]> listed-servers;
@@ -1431,6 +1435,8 @@ export component AppWindow inherits Window {
                     servers: root.listed-servers;
                     pending-instances: root.pending-instances;
                     pending-servers: root.pending-servers;
+                    unreadable-instances: root.unreadable-instances;
+                    unreadable-servers: root.unreadable-servers;
                     instance-group-entries: root.instance-group-entries;
                     loading: root.loading;
                     startup-error: root.startup-error;

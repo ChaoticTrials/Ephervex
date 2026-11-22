@@ -80,6 +80,9 @@ export component HostList inherits Rectangle {
     in property <[ServerRow]> servers;
     in property <[PendingEntityRow]> pending-instances;
     in property <[PendingEntityRow]> pending-servers;
+    // One line per host left out because its saved entry cannot be read.
+    in property <[string]> unreadable-instances;
+    in property <[string]> unreadable-servers;
     // One row per group an instance can be put in, its id the group's.
     in property <[MenuRow]> instance-group-entries;
     in property <bool> loading;
@@ -157,7 +160,7 @@ export component HostList inherits Rectangle {
     // The reveal request that has been carried out. A card that appears after
     // `reveal-token` changed still finds its request outstanding.
     private property <int> handled-reveal: 0;
-    private property <bool> nothing-listed: root.instances.length == 0 && root.servers.length == 0 && root.pending-instances.length == 0 && root.pending-servers.length == 0;
+    private property <bool> nothing-listed: root.instances.length == 0 && root.servers.length == 0 && root.pending-instances.length == 0 && root.pending-servers.length == 0 && root.unreadable-instances.length == 0 && root.unreadable-servers.length == 0;
     VerticalLayout {
         spacing: 12px;
         // The search field and the button beside it raise a hard shadow, so
@@ -294,7 +297,9 @@ export component HostList inherits Rectangle {
                     rename(id, name) => { root.rename-client(id, name); }
                     delete(row) => { root.delete-client(row); }
                 }
-                if root.instances.length == 0 && root.pending-instances.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-instances"); color: Theme.text-muted; }
+                // A plain repeated text row, which measures its wrapped height.
+                for line in root.unreadable-instances : BodyText { text: line; color: Theme.warning; wrap: word-wrap; }
+                if root.instances.length == 0 && root.pending-instances.length == 0 && root.unreadable-instances.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-instances"); color: Theme.text-muted; }
                 SectionHeader {
                     text: GuiI18n.text("gui-servers");
                     count: root.servers.length;
@@ -325,7 +330,8 @@ export component HostList inherits Rectangle {
                     rename(id, name) => { root.rename-server(id, name); }
                     delete(row) => { root.delete-server(row); }
                 }
-                if root.servers.length == 0 && root.pending-servers.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-servers"); color: Theme.text-muted; }
+                for line in root.unreadable-servers : BodyText { text: line; color: Theme.warning; wrap: word-wrap; }
+                if root.servers.length == 0 && root.pending-servers.length == 0 && root.unreadable-servers.length == 0 : BodyText { text: GuiI18n.text("gui-host-list-no-servers"); color: Theme.text-muted; }
             }
         }
     }

@@ -1005,6 +1005,10 @@ pub struct Snapshot {
     /// Where an unreadable favorites, groups and icons file was kept, and
     /// whether its previous copy was restored, when reading it set one aside.
     pub organization_set_aside: Option<ephervex_core::SetAsideNotice>,
+    /// One localized notice per instance or server whose index row this build
+    /// cannot read, so the lists can say a host is hidden rather than drop it
+    /// silently.
+    pub unreadable_hosts: Vec<UnreadableHostNotice>,
     /// The order the instance list is kept in, as stored.
     pub instance_sort: ephervex_core::InstanceSort,
     /// How Minecraft versions rank, when the list is ordered by them.
@@ -1014,6 +1018,31 @@ pub struct Snapshot {
     pub minecraft_preferences: MinecraftPreferenceSnapshot,
     pub settings: SettingsData,
     pub eula: EulaData,
+}
+
+/// A host the lists leave out because this build cannot read its index row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableHostNotice {
+    /// Whether the host is a server rather than an instance.
+    pub server: bool,
+    /// The localized message, followed by what to do about it when there is
+    /// something to do.
+    pub text: String,
+}
+
+impl UnreadableHostNotice {
+    fn of(host: &ephervex_core::UnreadableHost) -> Self {
+        let args = [("name", Arg::from(host.name.clone()))];
+        let message = lookup_args(host.message_id(), args.clone());
+        let text = match lookup_attribute_args(host.message_id(), "action", args) {
+            Some(action) => format!("{message} {action}"),
+            None => message,
+        };
+        Self {
+            server: host.kind == ephervex_core::UnreadableHostKind::Server,
+            text,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -7125,6 +7154,11 @@ fn snapshot(app: &App) -> Result<Snapshot, CoreError> {
         organization_set_aside: ephervex_core::take_organization_notices()
             .into_iter()
             .next_back(),
+        unreadable_hosts: app
+            .unreadable_hosts()?
+            .iter()
+            .map(UnreadableHostNotice::of)
+            .collect(),
         instance_sort,
         version_order: if instance_sort == ephervex_core::InstanceSort::Minecraft {
             minecraft_version_order(app)
@@ -17042,6 +17076,50 @@ mod tests {
             Event::JavaRuntimes(rows) if rows.is_empty()
         ));
         assert!(slot.lock().expect("slot").is_some());
+    }
+
+    #[test]
+    fn a_snapshot_names_an_instance_whose_index_row_it_cannot_read_and_lists_the_rest() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let hidden = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Written Later", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        let other = ephervex_core::test_support::create_client_offline(
+            &app,
+            NewClient::new("Survival", "1.20.1", LoaderSelection::vanilla()),
+        )
+        .expect("a client");
+        ephervex_core::test_support::mark_client_row_written_by_newer(&app, hidden.id)
+            .expect("tamper");
+
+        let snapshot = snapshot(&app).expect("snapshot");
+
+        assert_eq!(
+            snapshot
+                .instances
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>(),
+            vec![other.id.to_string()]
+        );
+        let args = [("name", Arg::from("Written Later"))];
+        let expected = format!(
+            "{} {}",
+            lookup_args("error-registry-index-row-written-by-newer", args.clone()),
+            lookup_attribute_args("error-registry-index-row-written-by-newer", "action", args)
+                .expect("an action")
+        );
+        assert_eq!(
+            snapshot.unreadable_hosts,
+            vec![UnreadableHostNotice {
+                server: false,
+                text: expected,
+            }]
+        );
     }
 
     #[test]

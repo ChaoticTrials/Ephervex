@@ -52,6 +52,12 @@ pub fn commit_client_without_index(
     app.commit_client_without_index_for_test(id, change)
 }
 
+/// Makes a client's index row name a loader this build does not know, so the
+/// listings leave it out and report it as unreadable.
+pub fn mark_client_row_written_by_newer(app: &App, id: InstanceId) -> CoreResult<()> {
+    app.mark_client_row_written_by_newer_for_test(id)
+}
+
 /// A storage cleanup plan with these items, as a frontend shows one for review.
 ///
 /// It lists what it was given and removes nothing: a plan core makes carries

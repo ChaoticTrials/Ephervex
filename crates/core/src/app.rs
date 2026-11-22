@@ -773,6 +773,26 @@ impl App {
         Ok(record)
     }
 
+    /// Rewrites a client's index row to name a loader this build does not
+    /// know, as a newer build would have written it.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn mark_client_row_written_by_newer_for_test(
+        &self,
+        id: InstanceId,
+    ) -> CoreResult<()> {
+        self.registry()
+            .index()
+            .connection()
+            .execute(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = ?1",
+                [id.to_string()],
+            )
+            .map_err(|error| {
+                ephervex_storage::RegistryError::from(ephervex_storage::IndexError::from(error))
+            })?;
+        Ok(())
+    }
+
     /// Fetches one client instance.
     pub fn client(&self, id: InstanceId) -> CoreResult<ClientRecord> {
         Ok(self.registry().client(id)?)

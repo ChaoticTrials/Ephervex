@@ -10838,6 +10838,22 @@ fn apply_server_link_choices(ui: &AppWindow, clients: &[InstanceRow]) {
     }
 }
 
+/// Puts each host the lists leave out under its own section, so a missing
+/// instance or server is explained rather than silently gone.
+fn apply_unreadable_hosts(ui: &AppWindow, hosts: &[backend::UnreadableHostNotice]) {
+    let lines = |server: bool| {
+        model(
+            hosts
+                .iter()
+                .filter(|host| host.server == server)
+                .map(|host| SharedString::from(host.text.as_str()))
+                .collect(),
+        )
+    };
+    ui.set_unreadable_instances(lines(false));
+    ui.set_unreadable_servers(lines(true));
+}
+
 fn apply_snapshot(
     ui: &AppWindow,
     snapshot: Snapshot,
@@ -10852,6 +10868,7 @@ fn apply_snapshot(
         servers,
         groups,
         organization_set_aside,
+        unreadable_hosts,
         instance_sort,
         version_order,
         accounts,
@@ -10887,6 +10904,7 @@ fn apply_snapshot(
             true,
         );
     }
+    apply_unreadable_hosts(ui, &unreadable_hosts);
     let clients = apply_instance_snapshot(
         ui,
         instances,
@@ -12753,6 +12771,33 @@ mod tests {
         assert_eq!(ui.get_modal(), "duplicate-instance");
         assert!(!ui.get_duplicate_source_persistent());
         assert_eq!(ui.get_absent_mods().row_count(), 1);
+    }
+
+    #[test]
+    fn each_unreadable_host_goes_under_its_own_section() {
+        let ui = test_window();
+        let notice = |server: bool, text: &str| backend::UnreadableHostNotice {
+            server,
+            text: text.to_owned(),
+        };
+
+        apply_unreadable_hosts(
+            &ui,
+            &[
+                notice(false, "instance"),
+                notice(true, "server"),
+                notice(false, "second"),
+            ],
+        );
+
+        let texts = |rows: ModelRc<SharedString>| -> Vec<String> {
+            rows.iter().map(|row| row.to_string()).collect()
+        };
+        assert_eq!(texts(ui.get_unreadable_instances()), ["instance", "second"]);
+        assert_eq!(texts(ui.get_unreadable_servers()), ["server"]);
+
+        apply_unreadable_hosts(&ui, &[]);
+        assert_eq!(ui.get_unreadable_instances().row_count(), 0);
     }
 
     #[test]

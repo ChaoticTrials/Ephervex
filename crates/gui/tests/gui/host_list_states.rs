@@ -7,7 +7,7 @@ use crate::support;
 use ephervex_gui::ui::{AppWindow, InstanceRow};
 use ephervex_i18n::lookup;
 use i_slint_backend_testing::ElementHandle;
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 #[derive(Clone, Copy, Debug)]
 enum State {
@@ -98,6 +98,55 @@ fn a_loaded_list_names_its_sections_and_an_empty_one_says_so() {
         shows(&ui, &lookup("gui-host-list-no-servers")),
         "a section with nothing in it says so"
     );
+}
+
+const HIDDEN_INSTANCE: &str = "\"Written Later\" names a value only a newer version knows.";
+const HIDDEN_SERVER: &str = "The saved entry for \"Old Server\" could not be read.";
+
+#[test]
+fn a_host_the_list_cannot_read_is_named_in_its_section() {
+    let ui = window();
+    enter(&ui, State::Loaded);
+    ui.set_instances(ModelRc::new(VecModel::from(vec![instance()])));
+    ui.set_instance_total(1);
+    ui.set_unreadable_instances(lines(&[HIDDEN_INSTANCE]));
+    ui.set_unreadable_servers(lines(&[HIDDEN_SERVER]));
+    settle(&ui);
+
+    assert!(
+        shows(&ui, "Repro Client"),
+        "the readable instance stays listed"
+    );
+    assert!(shows(&ui, HIDDEN_INSTANCE));
+    assert!(shows(&ui, HIDDEN_SERVER));
+    assert!(
+        !shows(&ui, &lookup("gui-host-list-no-servers")),
+        "a section holding a hidden server is not empty"
+    );
+}
+
+/// With every host unreadable the list still explains itself instead of
+/// inviting the user to make a first instance.
+#[test]
+fn a_list_of_only_unreadable_hosts_is_not_the_empty_state() {
+    let ui = window();
+    enter(&ui, State::Loaded);
+    ui.set_unreadable_instances(lines(&[HIDDEN_INSTANCE]));
+    settle(&ui);
+
+    assert!(shows(&ui, HIDDEN_INSTANCE));
+    assert!(!shows(&ui, &lookup("gui-no-client-instances")));
+    assert!(!shows(&ui, &lookup("gui-host-list-no-instances")));
+    assert!(shows(&ui, &lookup("gui-host-list-no-servers")));
+}
+
+fn lines(texts: &[&str]) -> ModelRc<SharedString> {
+    ModelRc::new(VecModel::from(
+        texts
+            .iter()
+            .map(|text| SharedString::from(*text))
+            .collect::<Vec<_>>(),
+    ))
 }
 
 /// A list that loaded before the service stopped is still a real list.
