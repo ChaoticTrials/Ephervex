@@ -117,9 +117,13 @@ panel at the top of the list), the host list, and the account chip. The chip
 shows the default account's initial, name, and kind, and opens a menu to choose
 another default or to manage accounts; the gear opens the settings.
 
-Home lists what is running, each problem the launcher recorded or a run of this
-session reported (with a way to the host and the surface that explains it, never
-a fix: ADR 0043), the hosts that ran last, and the launcher's activity. The cards
+Home lists what is running, each problem or warning the launcher recorded or a
+run of this session reported (with a way to the host and the surface that
+explains it, never a fix: ADR 0043), the hosts that ran last, and the
+launcher's activity. Its summary counts problems, which keep a host from
+starting, apart from warnings, which a host starts with. A recorded reason opens
+the host's Overview, which lists both; a failed run of an instance opens its
+Diagnostics. The cards
 sit in as many columns as the page's own width allows, each at least
 `Theme.home-card-min-width` wide. Sections with nothing to say keep a muted line,
 except the hosts to continue with, which is left out.

@@ -38,9 +38,10 @@ pub(super) struct HomeHost {
     pub run: RunState,
     pub can_launch: bool,
     pub last_run: Option<DateTime<Utc>>,
-    /// Each recorded reason the host needs attention, already worded: its
-    /// problems, then the warnings it starts with.
-    pub attention: Vec<String>,
+    /// Each recorded reason that keeps the host from starting, already worded.
+    pub problems: Vec<String>,
+    /// Each recorded reason the host starts anyway, already worded.
+    pub warnings: Vec<String>,
 }
 
 /// Whether a host's process runs, as far as the launcher can tell.
@@ -80,12 +81,8 @@ impl HomeHost {
             run: RunState::of(item.state_kind),
             can_launch: item.can_launch,
             last_run: item.last_launched_at,
-            attention: item
-                .problems
-                .iter()
-                .chain(&item.warnings)
-                .cloned()
-                .collect(),
+            problems: item.problems.clone(),
+            warnings: item.warnings.clone(),
         })
     }
 
@@ -103,12 +100,8 @@ impl HomeHost {
             run: RunState::of(item.state_kind),
             can_launch: item.can_start,
             last_run: item.last_started_at,
-            attention: item
-                .problems
-                .iter()
-                .chain(&item.warnings)
-                .cloned()
-                .collect(),
+            problems: item.problems.clone(),
+            warnings: item.warnings.clone(),
         })
     }
 }
@@ -148,21 +141,30 @@ pub(super) struct HomeState {
     published_minute: Option<i64>,
 }
 
-fn host_surface(host: InstalledHost) -> &'static str {
+/// Whether an attention row is a problem or a warning the host starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Severity {
+    Problem,
+    Warning,
+}
+
+/// The surface a failed run opens: an instance's Diagnostics can analyze the
+/// crash, a server's Overview shows its state.
+fn failure_surface(host: InstalledHost) -> &'static str {
     match host {
         InstalledHost::Instance(_) => "Diagnostics",
         InstalledHost::Server(_) => "Overview",
     }
 }
 
-fn attention_row(host: &HomeHost, title: &str, detail: &str) -> AttentionRow {
+fn attention_row(host: &HomeHost, title: &str, detail: &str, surface: &str) -> AttentionRow {
     AttentionRow {
         kind: host.host.kind().into(),
         id: host.host.id().into(),
         host_name: host.name.as_str().into(),
         title: bounded_text(title, ATTENTION_TEXT_LIMIT).into(),
         detail: bounded_text(detail, ATTENTION_TEXT_LIMIT).into(),
-        surface: host_surface(host.host).into(),
+        surface: surface.into(),
     }
 }
 
@@ -183,8 +185,8 @@ fn greeting(hour: u32, name: &str) -> String {
     .unwrap_or_else(|| lookup(id))
 }
 
-/// "2 running | 2 problems | 1 building", leaving out what is zero.
-fn summary(running: usize, problems: usize, building: usize) -> String {
+/// "2 running | 2 problems | 1 warning | 1 building", leaving out what is zero.
+fn summary(running: usize, problems: usize, warnings: usize, building: usize) -> String {
     let mut parts = Vec::new();
     if running > 0 {
         parts.push(lookup_args(
@@ -196,6 +198,12 @@ fn summary(running: usize, problems: usize, building: usize) -> String {
         parts.push(lookup_args(
             "gui-home-summary-problems",
             [("count", Arg::from(problems))],
+        ));
+    }
+    if warnings > 0 {
+        parts.push(lookup_args(
+            "gui-home-summary-warnings",
+            [("count", Arg::from(warnings))],
         ));
     }
     if building > 0 {
@@ -263,23 +271,38 @@ impl HomeState {
         self.failures.iter().any(|known| known.host == host)
     }
 
-    /// Every problem: each recorded reason of each host, then each failed run
-    /// of a host that is still listed.
-    fn attention_rows(&self) -> Vec<AttentionRow> {
+    /// Every row Home lists: each recorded reason of each host, then each
+    /// failed run of a host that is still listed, with whether it is a problem
+    /// or a warning.
+    fn attention_rows(&self) -> Vec<(Severity, AttentionRow)> {
         let hosts = || self.clients.iter().chain(&self.servers);
         let orphan = lookup("gui-state-orphaned-detail");
         let recorded = hosts().flat_map(|host| {
             let orphan = (host.run == RunState::Orphaned).then(|| orphan.clone());
-            host.attention
+            let reason = move |severity, text: &String| {
+                (
+                    severity,
+                    attention_row(host, text, &host.target, "Overview"),
+                )
+            };
+            host.problems
                 .iter()
-                .cloned()
-                .chain(orphan)
-                .map(move |reason| attention_row(host, &reason, &host.target))
+                .map(|text| reason(Severity::Problem, text))
+                .chain(orphan.iter().map(|text| reason(Severity::Problem, text)))
+                .chain(
+                    host.warnings
+                        .iter()
+                        .map(|text| reason(Severity::Warning, text)),
+                )
                 .collect::<Vec<_>>()
         });
         let failed = self.failures.iter().filter_map(|notice| {
             let host = hosts().find(|host| host.host == notice.host)?;
-            Some(attention_row(host, &notice.title, &notice.failure))
+            let surface = failure_surface(host.host);
+            Some((
+                Severity::Problem,
+                attention_row(host, &notice.title, &notice.failure, surface),
+            ))
         });
         recorded.chain(failed).collect()
     }
@@ -323,7 +346,14 @@ impl HomeState {
 
     /// What Home shows at `now`, with the local clock at `hour`.
     pub(super) fn view(&self, now: DateTime<Utc>, hour: u32) -> HomeView {
-        let attention = self.attention_rows();
+        let rows = self.attention_rows();
+        let count = |wanted| {
+            rows.iter()
+                .filter(|(severity, _)| *severity == wanted)
+                .count()
+        };
+        let (problems, warnings) = (count(Severity::Problem), count(Severity::Warning));
+        let attention: Vec<AttentionRow> = rows.into_iter().map(|(_, row)| row).collect();
         let running = self
             .clients
             .iter()
@@ -332,7 +362,7 @@ impl HomeState {
             .count();
         HomeView {
             greeting: greeting(hour, &self.default_account),
-            summary: summary(running, attention.len(), self.building),
+            summary: summary(running, problems, warnings, self.building),
             attention,
             resume: self.resume_rows(now),
             temporary: self.clients.iter().filter(|host| !host.persistent).count(),
@@ -396,7 +426,8 @@ mod tests {
             run: RunState::Idle,
             can_launch: true,
             last_run: ago.map(|ago| now() - ago),
-            attention: Vec::new(),
+            problems: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -434,10 +465,14 @@ mod tests {
 
     #[test]
     fn the_summary_counts_running_problems_and_building_and_skips_zeros() {
-        assert_eq!(summary(2, 2, 1), "2 running | 2 problems | 1 building");
-        assert_eq!(summary(0, 1, 0), "1 problem");
-        assert_eq!(summary(3, 0, 0), "3 running");
-        assert_eq!(summary(0, 0, 0), "Nothing is running.");
+        assert_eq!(
+            summary(2, 2, 3, 1),
+            "2 running | 2 problems | 3 warnings | 1 building"
+        );
+        assert_eq!(summary(0, 1, 0, 0), "1 problem");
+        assert_eq!(summary(0, 0, 1, 0), "1 warning");
+        assert_eq!(summary(3, 0, 0, 0), "3 running");
+        assert_eq!(summary(0, 0, 0, 0), "Nothing is running.");
     }
 
     #[test]
@@ -506,11 +541,12 @@ mod tests {
     }
 
     #[test]
-    fn every_recorded_reason_is_a_row_that_opens_the_surface_that_explains_it() {
+    fn every_recorded_reason_is_a_row_that_opens_the_overview_that_lists_it() {
         let mut broken = client("Frostbound", None);
-        broken.attention = vec!["Folder missing".to_owned(), "Review files".to_owned()];
+        broken.problems = vec!["Folder missing".to_owned()];
+        broken.warnings = vec!["Review files".to_owned()];
         let mut conversion = server("Pack server", None);
-        conversion.attention = vec!["Best effort".to_owned()];
+        conversion.warnings = vec!["Best effort".to_owned()];
         let home = state(vec![broken.clone(), client("Fine", None)], vec![conversion]);
 
         let rows = home.view(now(), 9).attention;
@@ -528,13 +564,41 @@ mod tests {
         assert_eq!(
             shown,
             [
-                ("client", "Frostbound", "Folder missing", "Diagnostics"),
-                ("client", "Frostbound", "Review files", "Diagnostics"),
+                ("client", "Frostbound", "Folder missing", "Overview"),
+                ("client", "Frostbound", "Review files", "Overview"),
                 ("server", "Pack server", "Best effort", "Overview"),
             ]
         );
         assert_eq!(rows[0].id.as_str(), broken.host.id());
         assert_eq!(rows[0].detail.as_str(), "Minecraft 1.20.1 | Forge");
+    }
+
+    #[test]
+    fn warnings_a_host_starts_with_are_counted_apart_from_problems() {
+        let mut warned = client("Warned", None);
+        warned.warnings = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        let mut blocked = client("Blocked", None);
+        blocked.problems = vec!["Folder missing".to_owned()];
+        blocked.warnings = vec!["d".to_owned()];
+
+        let only_warnings = state(vec![warned.clone()], Vec::new()).view(now(), 9);
+        assert_eq!(only_warnings.summary, "3 warnings");
+        assert_eq!(only_warnings.attention.len(), 3);
+
+        let both = state(vec![warned, blocked], Vec::new()).view(now(), 9);
+        assert_eq!(both.summary, "1 problem | 4 warnings");
+        assert_eq!(both.attention.len(), 5);
+    }
+
+    #[test]
+    fn a_failed_run_of_an_instance_opens_its_diagnostics_and_counts_as_a_problem() {
+        let crashed = client("Crashy", None);
+        let host = crashed.host;
+        let mut home = state(vec![crashed], Vec::new());
+        home.note_run_failure(host, "Minecraft crashed".to_owned(), "exit 1".to_owned());
+        let view = home.view(now(), 9);
+        assert_eq!(view.summary, "1 problem");
+        assert_eq!(view.attention[0].surface, "Diagnostics");
     }
 
     #[test]
@@ -678,7 +742,7 @@ mod tests {
     fn publishing_writes_every_home_property() {
         let ui = test_window();
         let mut broken = client("Frostbound", Some(TimeDelta::hours(2)));
-        broken.attention = vec!["Folder missing".to_owned()];
+        broken.problems = vec!["Folder missing".to_owned()];
         let mut home = state(vec![broken], vec![server("srv", None)]);
         home.set_default_account(Some("Quiet".to_owned()));
         home.set_building(1);

@@ -2040,7 +2040,7 @@ gui-attention-manual-download-required = { $detail } must be downloaded manually
 gui-attention-unknown-server-applicability = { $detail } declares no server side and was left out
 gui-attention-interrupted-mutation = An interrupted change left files that need review
 gui-attention-missing-logged-file = { $detail } is in the imported mod list, but could not be downloaded automatically
-gui-attention-unknown = A newer Ephervex recorded a problem this version cannot describe
+gui-attention-unknown = A newer Ephervex recorded a warning this version cannot describe
 # The Home page's greeting by time of day, and the same without an account name.
 gui-home-greeting-morning = Good morning
     .named = Good morning, { $name }
@@ -2081,6 +2081,10 @@ gui-home-summary-running = { $count } running
 gui-home-summary-problems = { $count ->
     [one] 1 problem
    *[other] { $count } problems
+}
+gui-home-summary-warnings = { $count ->
+    [one] 1 warning
+   *[other] { $count } warnings
 }
 gui-home-summary-building = { $count } building
 gui-home-summary-separator = { " | " }

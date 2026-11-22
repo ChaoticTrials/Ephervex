@@ -123,6 +123,6 @@ pub(crate) fn home_page(ui: &AppWindow) {
         host_name: FOG_HOST.into(),
         title: lookup("gui-attention-missing-root").into(),
         detail: target.into(),
-        surface: "Diagnostics".into(),
+        surface: "Overview".into(),
     }]));
 }
