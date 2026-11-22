@@ -12236,6 +12236,13 @@ fn apply_linked_section(ui: &AppWindow, section: backend::LinkedSectionData) {
     ui.set_linked_name(section.name.into());
     ui.set_linked_version_number(section.version_number.into());
     ui.set_linked_support(section.support.into());
+    ui.set_linked_notes(model(
+        section
+            .notes
+            .iter()
+            .map(|line| SharedString::from(line.as_str()))
+            .collect(),
+    ));
     ui.set_linked_targets(model(linked_target_rows(section.targets)));
 }
 
@@ -20025,6 +20032,7 @@ mod tests {
                         selected: true,
                     })
                     .collect(),
+                notes: Vec::new(),
             },
             ..backend::ModPlanData::default()
         }

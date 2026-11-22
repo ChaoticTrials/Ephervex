@@ -514,6 +514,7 @@ async fn resolving_from_the_catalog_installs_the_mod_and_its_required_library() 
         installed: &[],
         recorded_elsewhere: &[],
         installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        follows_pins: &std::collections::BTreeSet::new(),
         reporter: &reporter(),
         cancel: &CancellationToken::new(),
     })
@@ -579,6 +580,7 @@ async fn an_optional_dependency_is_offered_under_its_project_title() {
         installed: &[],
         recorded_elsewhere: &[],
         installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        follows_pins: &std::collections::BTreeSet::new(),
         reporter: &reporter(),
         cancel: &CancellationToken::new(),
     })
@@ -631,6 +633,7 @@ async fn planned_sides(environment: &str) -> (SideSupport, SideSupport) {
         installed: &[],
         recorded_elsewhere: &[],
         installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        follows_pins: &std::collections::BTreeSet::new(),
         reporter: &reporter(),
         cancel: &CancellationToken::new(),
     })
@@ -1493,6 +1496,7 @@ async fn a_dependency_that_is_not_a_mod_fails_resolution_instead_of_being_planne
         installed: &[],
         recorded_elsewhere: &[],
         installed_policy: ephervex_mod_platform::InstalledPolicy::Preserve,
+        follows_pins: &std::collections::BTreeSet::new(),
         reporter: &reporter(),
         cancel: &CancellationToken::new(),
     })

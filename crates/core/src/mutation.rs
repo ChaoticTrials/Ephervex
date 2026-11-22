@@ -35,8 +35,8 @@
 //! | `PackDeclared` | no | no | no |
 //!
 //! A dependency's release may be chosen, because a bug report often names the
-//! library release it happened on. Moving it keeps its origin, and any move is
-//! refused while another recorded mod requires one exact release of it.
+//! library release it happened on. Moving it keeps its origin. A release
+//! another recorded mod pins is a warning, never a refusal (ADR 0020).
 //!
 //! An optional dependency was *selected*: a human ticked it, so un-ticking it is
 //! theirs to do, and nothing else may collect it. A required dependency is not
@@ -51,12 +51,12 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::{
     AnnotatedVersion, InstalledPolicy, InstanceTarget, ModInstallPlan, ModProject, PlanWarning,
-    PlannedMod, ProjectReplacement, annotate, newest_compatible,
+    PlannedMod, annotate, newest_compatible,
 };
 use ephervex_model::{AttentionReason, ModOrigin, ModProvider, ModRelationKind};
 use ephervex_pack::{
     ArtifactFetch, ManagedMutation, ManagedProject, ModIdentity, PackError, PackFileRecipe,
-    PackRecipe, ProviderFileIdentity, RecordedMod, RelationTarget, SourceStore,
+    PackRecipe, RecordedMod, SourceStore,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{info, instrument, warn};
@@ -224,8 +224,8 @@ impl ModMutability {
                 Self::restricted(MutationRestriction::PackOwned, has_project)
             }
             // A bug report often names the library release it happened on, so
-            // the release may be chosen. The move keeps the dependency origin
-            // and is refused while another mod requires one exact release.
+            // the release may be chosen. The move keeps the dependency origin;
+            // another mod pinning a different release is only a warning.
             // Taking it out of the desired state is not the user's: removing
             // what needs it is what collects it.
             ModOrigin::RequiredDependency if has_version => Self {
@@ -1477,9 +1477,9 @@ pub(crate) struct UnmovableReplacement {
 /// must not.
 ///
 /// An automatic dependency follows what requires it, so another release of it
-/// may be installed when nothing else installed needs the release it has now.
-/// A mod a pack declared or a person chose is never moved as a side effect of
-/// changing something else.
+/// may be installed; a mod that lists the release it has now is told so in a
+/// warning. A mod a pack declared or a person chose is never moved as a side
+/// effect of changing something else.
 pub(crate) fn unmovable_replacement(
     recipe: &PackRecipe,
     plan: &ModInstallPlan,
@@ -1490,103 +1490,22 @@ pub(crate) fn unmovable_replacement(
         .filter(|replacement| replacement.project_id != acted_on)
         .find_map(|replacement| {
             let recorded = recipe.managed_project(plan.provider, &replacement.project_id)?;
-            let movable = recorded.origin == ModOrigin::RequiredDependency
-                && !needed_at_its_release(recipe, plan.provider, acted_on, replacement);
+            let movable = recorded.origin == ModOrigin::RequiredDependency;
             (!movable).then(|| UnmovableReplacement {
                 path: recorded.logical_path.clone(),
             })
         })
 }
 
-/// Whether an installed mod other than the one being changed requires the
-/// release a plan would replace.
-fn needed_at_its_release(
-    recipe: &PackRecipe,
-    provider: ModProvider,
-    acted_on: &str,
-    replacement: &ProjectReplacement,
-) -> bool {
-    recipe
-        .files
-        .iter()
-        .filter(|file| {
-            file.identity
-                .as_ref()
-                .and_then(ProviderFileIdentity::project)
-                .is_some_and(|(kind, id)| {
-                    kind == provider && id != acted_on && id != replacement.project_id
-                })
-        })
-        .filter_map(|file| file.relations.as_deref())
-        .flatten()
-        .any(|relation| {
-            relation.kind == ModRelationKind::Required
-                && matches!(
-                    &relation.target,
-                    RelationTarget::Project { project_id, version_id: Some(version_id) }
-                        if *project_id == replacement.project_id && *version_id == replacement.from
-                )
-        })
-}
-
-/// Another recorded mod that requires `project_id` at an exact release other
-/// than `release`, and the release it requires.
-pub(crate) fn required_at_another_release<'r>(
-    recipe: &'r PackRecipe,
-    provider: ModProvider,
-    project_id: &str,
-    release: &str,
-) -> Option<(&'r PackFileRecipe, &'r str)> {
-    recipe
-        .files
-        .iter()
-        .filter(|file| {
-            file.identity
-                .as_ref()
-                .and_then(ProviderFileIdentity::project)
-                .is_some_and(|(kind, id)| kind == provider && id != project_id)
-        })
-        .find_map(|file| {
-            file.relations
-                .as_deref()?
-                .iter()
-                .find_map(|relation| match &relation.target {
-                    RelationTarget::Project {
-                        project_id: named,
-                        version_id: Some(pinned),
-                    } if relation.kind == ModRelationKind::Required
-                        && named == project_id
-                        && pinned != release =>
-                    {
-                        Some((file, pinned.as_str()))
-                    }
-                    _ => None,
-                })
-        })
-}
-
-/// Refuses a version change that would also move a mod it must not, or that
-/// would leave another mod without the exact release it requires.
+/// Refuses a version change that would also move a mod it must not.
+///
+/// A release another mod lists is not a reason on its own: the resolver and
+/// [`crate::mods`] report such a pin as a warning (ADR 0020).
 fn refuse_to_move_other_mods(
     context: &MutationContext,
     resolved: &ModInstallPlan,
 ) -> CoreResult<()> {
     let acted_on = context.entry.identity.project_id().unwrap_or_default();
-    let moves = context.entry.identity.version_id() != Some(resolved.root.version.id.as_str());
-    if let Some((file, version)) = required_at_another_release(
-        &context.recipe,
-        resolved.provider,
-        acted_on,
-        &resolved.root.version.id,
-    )
-    .filter(|_| moves)
-    {
-        return Err(CoreError::ModReleaseRequiredByAnother {
-            path: context.entry.logical_path.clone(),
-            required_by: file.logical_path.clone(),
-            version: version.to_owned(),
-        });
-    }
     match unmovable_replacement(&context.recipe, resolved, acted_on) {
         Some(unmovable) => Err(CoreError::ModDependencyNotMovable {
             target: context.entry.logical_path.clone(),

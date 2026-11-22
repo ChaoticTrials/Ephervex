@@ -1392,8 +1392,10 @@ changes are allowed, so removing one takes it out of the recipe. That setting is
 kept in the server's metadata only (ADR 0045).
 
 Exact selections are preserved. A pinned version that does not fit is refused
-rather than moved to a neighboring release, two mods pinning one project to
-different versions is a conflict rather than an arbitration, and a required
+rather than moved to a neighboring release, two mods pinning one project
+nothing has decided yet to different versions is a conflict rather than an
+arbitration, a pin on a release the user chose or the host already has is a
+warning rather than a refusal (ADR 0020), and a required
 dependency naming only a file fails rather than being skipped or given an
 invented project identity. The instance's Minecraft version and loader are
 inputs throughout; no graph is satisfied by changing them.

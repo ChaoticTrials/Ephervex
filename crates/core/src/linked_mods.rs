@@ -49,7 +49,7 @@ use std::path::{Path, PathBuf};
 use ephervex_download::{CacheLayout, OperationReporter};
 use ephervex_mod_platform::{
     Compatibility, IncompatibilityReason, InstalledPolicy, InstanceTarget, ModInstallPlan,
-    ModPlatformError, ModProject, ModVersionInfo, PlannedMod, SideSupport,
+    ModPlatformError, ModProject, ModVersionInfo, PlanWarning, PlannedMod, SideSupport,
 };
 use ephervex_model::{AttentionReason, InstanceId, LoaderSelection, ModProvider, ServerId};
 use ephervex_pack::{
@@ -62,7 +62,9 @@ use tracing::{info, instrument, warn};
 
 use crate::app::App;
 use crate::error::{CoreError, CoreResult, ProvidedDependency};
-use crate::mods::{InstalledHost, InstalledMods, ModInstallRequest, side_requirement};
+use crate::mods::{
+    InstalledHost, InstalledMods, ModInstallRequest, ResolvePolicy, side_requirement,
+};
 use crate::mutation::{
     DependencyScope, ModMutation, ModMutationPlan, ModVersionChoice, PlannedFile,
 };
@@ -195,12 +197,11 @@ pub enum LinkedTargetBlock {
     /// The server's pack declares this mod. Pack-owned content is reconstructed,
     /// never independently mutated.
     PackOwned,
-    /// Another of this server's mods requires this one: at one exact release
-    /// other than the one being synced, or at all when the sync removes it.
+    /// Another of this server's mods requires this one, and the sync would
+    /// remove it. A release another mod lists is a warning, not this.
     ServerDependency,
     /// Syncing this release would also move another of this server's mods,
-    /// which its pack declared, a person chose, or something else needs at its
-    /// current release.
+    /// which its pack declared or a person chose.
     MovesAnotherMod,
 }
 
@@ -345,6 +346,9 @@ pub struct LinkedTargetPlan {
     /// True when the catalog could not confirm which of this server's
     /// dependencies are still needed, so none were collected.
     pub orphans_unprovable: bool,
+    /// What resolving this server's graph found worth saying, such as a
+    /// release another of its mods lists and this target does not use.
+    pub warnings: Vec<PlanWarning>,
 }
 
 impl LinkedTargetPlan {
@@ -1017,26 +1021,6 @@ impl App {
                 return Some(blocked(&record, root, LinkedTargetBlock::ServerDependency));
             }
         }
-        // The client's rule for every origin: a release another server mod
-        // does not accept is not synced onto it.
-        if let Some(release) = release {
-            let installed = existing
-                .as_ref()
-                .and_then(|entry| entry.identity.as_ref())
-                .and_then(|identity| identity.version_id.as_deref());
-            if installed != Some(release.id.as_str())
-                && crate::mutation::required_at_another_release(
-                    &recipe,
-                    root.provider,
-                    &root.project_id,
-                    &release.id,
-                )
-                .is_some()
-            {
-                return Some(blocked(&record, root, LinkedTargetBlock::ServerDependency));
-            }
-        }
-
         Some(match release {
             Some(release) => {
                 self.resolve_installing_target(
@@ -1093,6 +1077,9 @@ impl App {
             return blocked(record, root, incompatibility(&reasons, release));
         }
 
+        let game_dir = ephervex_storage::metadata::server_game_dir(&record.root);
+        let state = installing_state(existing.as_ref(), root, &game_dir);
+
         let request = ModInstallRequest::new(root.project_id.clone())
             .from_provider(root.provider)
             .at_version(root.version_id.clone().unwrap_or_default());
@@ -1102,7 +1089,13 @@ impl App {
                 Some(&recipe),
                 PackSide::Server,
                 &request,
-                InstalledPolicy::Replace,
+                ResolvePolicy {
+                    installed: InstalledPolicy::Replace,
+                    // A server receiving the mod for the first time takes the
+                    // client's install rule, so it keeps the releases its
+                    // dependencies have as the client does.
+                    dependencies_follow_pins: !matches!(state, LinkedTargetState::WillInstall),
+                },
                 reporter,
                 cancel,
             )
@@ -1115,9 +1108,6 @@ impl App {
         if let Some(block) = unmovable_mod_block(&recipe, &resolved, &root.project_id) {
             return blocked(record, root, block);
         }
-
-        let game_dir = ephervex_storage::metadata::server_game_dir(&record.root);
-        let state = installing_state(existing.as_ref(), root, &game_dir);
 
         // A provider file name that cannot safely name a destination is refused
         // rather than sanitized into one that writes somewhere.
@@ -1164,6 +1154,7 @@ impl App {
             installs,
             removes,
             orphans_unprovable,
+            warnings: resolved.warnings.clone(),
             state: state.clone(),
         };
         let mutation = state.is_actionable().then(|| TargetMutation {
@@ -1231,6 +1222,7 @@ impl App {
             installs: Vec::new(),
             removes,
             orphans_unprovable,
+            warnings: Vec::new(),
             state,
         };
         ResolvedTarget {
@@ -1423,6 +1415,7 @@ fn unactionable(
             installs: Vec::new(),
             removes: Vec::new(),
             orphans_unprovable: false,
+            warnings: Vec::new(),
             state,
         },
         mutation: None,
@@ -3723,13 +3716,35 @@ Details:\n\
         );
     }
 
+    /// Each pin a plan reports as not followed: the project, the release it
+    /// names, the mods naming it, and the release used instead.
+    fn unfollowed_pins(warnings: &[PlanWarning]) -> Vec<(&str, &str, Vec<&str>, &str)> {
+        warnings
+            .iter()
+            .filter_map(|warning| match warning {
+                PlanWarning::PinNotFollowed {
+                    project_id,
+                    pinned_version,
+                    pinned_by,
+                    used_version,
+                } => Some((
+                    project_id.as_str(),
+                    pinned_version.as_str(),
+                    pinned_by.iter().map(String::as_str).collect(),
+                    used_version.as_str(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[tokio::test]
-    async fn a_release_pinning_a_pack_declared_dependency_elsewhere_is_refused() {
+    async fn a_release_pinning_a_pack_declared_dependency_elsewhere_keeps_it_with_a_warning() {
         let world = world().await;
         client_with_the_older_moving_mod_and_library(&world, ModOrigin::PackDeclared).await;
         let choice = crate::mutation::ModVersionChoice::Exact("MOVEV3".to_owned());
 
-        let error = world
+        let mutation = world
             .app
             .change_managed_mod_version(
                 world.client,
@@ -3739,16 +3754,19 @@ Details:\n\
                 &CancellationToken::new(),
             )
             .await
-            .expect_err("moving the pack's library as a side effect is refused");
+            .expect("a pin does not refuse the change");
 
-        assert!(matches!(error, CoreError::ModDependencyNotMovable { .. }));
+        assert_eq!(
+            unfollowed_pins(&mutation.plan.warnings),
+            vec![("NEWLIB", "NEWV2", vec!["MOVEPROJ"], "NEWV1")]
+        );
         assert_eq!(
             world.client_jars(),
             vec![
-                "moveproj-MOVEV1.jar".to_owned(),
+                "moveproj-MOVEV3.jar".to_owned(),
                 "newlib-NEWV1.jar".to_owned()
             ],
-            "a refused change leaves the instance as it was"
+            "the pack's library stays where it is"
         );
         assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
     }
@@ -3795,7 +3813,7 @@ Details:\n\
     }
 
     #[tokio::test]
-    async fn a_release_pinning_a_dependency_another_installed_mod_needs_is_refused() {
+    async fn a_release_pinning_a_dependency_another_installed_mod_lists_moves_it_with_a_warning() {
         let world = world().await;
         client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
         world
@@ -3811,7 +3829,7 @@ Details:\n\
             .await
             .expect("a mod that needs the older library release installs");
 
-        let error = world
+        let mutation = world
             .app
             .change_managed_mod_version(
                 world.client,
@@ -3821,10 +3839,13 @@ Details:\n\
                 &CancellationToken::new(),
             )
             .await
-            .expect_err("moving the library would break the mod that needs it");
+            .expect("the release another mod lists is a warning, not a refusal");
 
-        assert!(matches!(error, CoreError::ModDependencyNotMovable { .. }));
-        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
+        assert_eq!(
+            unfollowed_pins(&mutation.plan.warnings),
+            vec![("NEWLIB", "NEWV1", vec!["PINNER"], "NEWV2")]
+        );
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV2");
     }
 
     /// Rewrites how a server's recipe owns one project.
@@ -3855,10 +3876,20 @@ Details:\n\
 
         let plan = plan(&world, &change(MOVE_V1, "MOVEV3")).await;
 
+        let target = target(&plan, server);
         assert_eq!(
-            target(&plan, server).state.block(),
-            Some(&LinkedTargetBlock::MovesAnotherMod),
-            "the server's pack mod stays where its pack put it, and the reason names the move"
+            target.state.block(),
+            None,
+            "a pin does not block the sync on its own"
+        );
+        assert_eq!(
+            written_projects(&target.installs),
+            vec!["MOVEPROJ"],
+            "the server's pack mod stays where its pack put it"
+        );
+        assert_eq!(
+            unfollowed_pins(&target.warnings),
+            vec![("NEWLIB", "NEWV2", vec!["MOVEPROJ"], "NEWV1")]
         );
     }
 
@@ -3973,7 +4004,7 @@ Details:\n\
     }
 
     #[tokio::test]
-    async fn a_dependency_another_mod_requires_at_its_release_is_not_moved() {
+    async fn a_dependency_another_mod_lists_at_its_release_changes_with_a_warning() {
         let world = world().await;
         client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
         world
@@ -3989,7 +4020,24 @@ Details:\n\
             .await
             .expect("a mod that needs the older library release installs");
 
-        let error = world
+        let planned = world
+            .app
+            .plan_mod_version_change(
+                world.client,
+                Path::new(NEWLIB_V1),
+                &crate::mutation::ModVersionChoice::Exact("NEWV2".to_owned()),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a plan");
+        assert_eq!(
+            unfollowed_pins(&planned.warnings),
+            vec![("NEWLIB", "NEWV1", vec!["PINNER"], "NEWV2")],
+            "the plan names the mod that lists the old release"
+        );
+
+        let mutation = world
             .app
             .change_managed_mod_version(
                 world.client,
@@ -3999,17 +4047,102 @@ Details:\n\
                 &CancellationToken::new(),
             )
             .await
-            .expect_err("moving the library would break the mod that requires its release");
+            .expect("the release another mod lists is a warning, not a refusal");
 
-        assert!(
-            matches!(
-                &error,
-                CoreError::ModReleaseRequiredByAnother { required_by, version, .. }
-                    if required_by == Path::new("mods/pinner-PINNERV1.jar") && version == "NEWV1"
-            ),
-            "{error:?}"
+        assert_eq!(
+            unfollowed_pins(&mutation.plan.warnings),
+            vec![("NEWLIB", "NEWV1", vec!["PINNER"], "NEWV2")]
         );
-        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV1");
+        assert_eq!(client_recorded(&world, "NEWLIB").0, "NEWV2");
+        assert_eq!(client_recorded(&world, "PINNER").0, "PINNERV1");
+    }
+
+    #[tokio::test]
+    async fn a_linked_install_keeps_the_library_on_the_server_as_on_the_client() {
+        let world = world().await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("NEWLIB")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("NEWV2"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the library installs");
+        let root = world.app.client(world.client).expect("client").root;
+        let store = SourceStore::new(ephervex_storage::metadata::source_dir(&root));
+        let mut recipe = store.read_recipe().expect("recipe");
+        for file in &mut recipe.files {
+            file.origin = ModOrigin::RequiredDependency;
+        }
+        store.write_recipe(&recipe).expect("write recipe");
+        let server = world.link_server("Reproduction Server", MINECRAFT);
+        set_server_origin(&world, server, "NEWLIB", ModOrigin::RequiredDependency);
+
+        let plan = plan(&world, &pinned("PINNER", "PINNERV1")).await;
+
+        let expected = vec![("NEWLIB", "NEWV1", vec!["PINNER"], "NEWV2")];
+        let ClientModPlan::Install(client) = &plan.client_plan else {
+            panic!("an install plan");
+        };
+        assert_eq!(unfollowed_pins(&client.warnings), expected);
+        let target = target(&plan, server);
+        assert_eq!(target.state, LinkedTargetState::WillInstall);
+        assert_eq!(
+            written_projects(&target.installs),
+            vec!["PINNER"],
+            "the server keeps its automatic library where the client keeps it"
+        );
+        assert_eq!(unfollowed_pins(&target.warnings), expected);
+    }
+
+    #[tokio::test]
+    async fn installing_a_mod_that_lists_another_release_of_an_installed_library_keeps_it() {
+        let world = world().await;
+        world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("NEWLIB")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("NEWV2"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("the library installs");
+
+        let installed = world
+            .app
+            .install_mods(
+                world.client,
+                &ModInstallRequest::new("PINNER")
+                    .from_provider(ModProvider::Modrinth)
+                    .at_version("PINNERV1"),
+                &silent(),
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("a mod listing another release of the library installs beside it");
+
+        assert_eq!(
+            unfollowed_pins(&installed.plan.warnings),
+            vec![("NEWLIB", "NEWV1", vec!["PINNER"], "NEWV2")]
+        );
+        assert_eq!(
+            client_recorded(&world, "NEWLIB"),
+            ("NEWV2".to_owned(), ModOrigin::UserSelected)
+        );
+        assert_eq!(
+            world.client_jars(),
+            vec![
+                "newlib-NEWV2.jar".to_owned(),
+                "pinner-PINNERV1.jar".to_owned()
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4027,13 +4160,13 @@ Details:\n\
     }
 
     #[tokio::test]
-    async fn a_linked_server_keeps_a_mod_one_of_its_mods_requires_at_its_release() {
+    async fn a_linked_server_changes_a_mod_one_of_its_mods_lists_at_its_release_with_a_warning() {
         for origin in [ModOrigin::RequiredDependency, ModOrigin::UserSelected] {
-            a_linked_server_keeps_a_pinned_release(origin).await;
+            a_linked_server_changes_a_pinned_release(origin).await;
         }
     }
 
-    async fn a_linked_server_keeps_a_pinned_release(origin: ModOrigin) {
+    async fn a_linked_server_changes_a_pinned_release(origin: ModOrigin) {
         let world = world().await;
         client_with_the_older_moving_mod_and_library(&world, ModOrigin::RequiredDependency).await;
         let server = world.link_server("Reproduction Server", MINECRAFT);
@@ -4062,9 +4195,19 @@ Details:\n\
 
         let plan = plan(&world, &change(NEWLIB_V1, "NEWV2")).await;
 
+        let target = target(&plan, server);
+        assert_eq!(target.state.block(), None, "{origin:?}");
         assert_eq!(
-            target(&plan, server).state.block(),
-            Some(&LinkedTargetBlock::ServerDependency),
+            target.state,
+            LinkedTargetState::WillChangeVersion {
+                from: "NEWV1".to_owned(),
+                to: "NEWV2".to_owned()
+            },
+            "{origin:?}"
+        );
+        assert_eq!(
+            unfollowed_pins(&target.warnings),
+            vec![("NEWLIB", "NEWV1", vec!["MOVEPROJ"], "NEWV2")],
             "{origin:?}"
         );
     }

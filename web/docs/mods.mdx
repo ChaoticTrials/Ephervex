@@ -84,6 +84,9 @@ Repeat `--optional PROJECT_ID` to include an optional dependency. If you omit
 `--provider`, commands use your preferred catalog. Set that preference with
 `ephervex mod catalog modrinth` or `ephervex mod catalog curseforge`.
 
+`mod install` never moves a mod that is already installed. To install a
+different release of one, use [`mod set-version`](#change-or-remove-a-managed-mod).
+
 The CLI does not run the desktop's manual browser download flow. If a release
 cannot be downloaded automatically, install it through the desktop app.
 
@@ -295,10 +298,22 @@ host's managed set and can also remove dependencies that nothing else needs.
 A dependency that another mod pulled in can change version and update too, for
 example to reproduce a report that names an older library release. It stays a
 dependency, so it is still removed together with the mods that need it, and it
-cannot be removed on its own. Ephervex refuses the change when another
-installed mod requires one exact release of it, and names that mod. Mods you
-install later that also need it use the release you chose, unless one of them
-requires a different exact release.
+cannot be removed on its own. Mods you install later that also need it use the
+release you chose.
+
+### Releases another mod lists
+
+A catalog can list one exact release of a dependency, for example a mod
+release that lists the library release it was built with. Ephervex treats
+that as a warning, not a rule. When the release you chose, or a release the
+instance or server already has, differs from the listed one, the change goes
+ahead, and the plan and the result name the mod that lists another release
+and the release it lists. This applies to installing, changing a version,
+updating, and syncing linked servers. A listed release is still what
+Ephervex installs for a dependency that is not installed yet, and changing a
+mod's version still moves a dependency that was installed automatically to
+the release the new version lists. If the mod does not work with the release
+you kept, change the dependency's version.
 
 An imported pack starts with **Independent mod changes** off, and so does a
 server built from a pack or from server files. While it is off, you can
@@ -321,11 +336,20 @@ gets the change the next time it starts. A change that would add a mod whose
 catalog does not state server support is refused. Install that mod from **Add
 Mods** first, which asks you to confirm it.
 
-Changing an installed mod's release and permanently removing a managed mod
-are currently desktop actions. The CLI's `mod install --version` installs a
-new project at an exact release; it does not replace a different release of a
-project already installed. The CLI's `mod delete` removes a JAR but keeps its
-record.
+From the CLI, `mod set-version` changes an installed mod's release with the
+same rules as **Change Version**. Name the mod by its path inside the game
+directory, its project ID, or its slug, and the release by its version ID.
+`--newest` moves it to the newest compatible release instead, and `--dry-run`
+shows what would change without changing anything. Linked servers are not
+changed.
+
+```bash
+ephervex mod set-version --instance INSTANCE_ID MOD VERSION
+ephervex mod set-version --server SERVER_ID MOD --newest --dry-run
+```
+
+Permanently removing a managed mod is currently a desktop action. The CLI's
+`mod delete` removes a JAR but keeps its record.
 
 In the desktop app, the install plan, the change and remove dialogs, and
 **Apply Mod Change** show a **Linked servers** panel when the instance has

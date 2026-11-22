@@ -18,6 +18,13 @@
 //! and a project whose constraint strengthened is resolved again. Two different
 //! pins on one project do not arbitrate: they fail, naming both requesters.
 //!
+//! # A pin does not override a release that is already decided
+//!
+//! A catalog's pin chooses the release of a project nothing else has decided.
+//! It does not move the release the user selected, nor a release the host
+//! already has while that release still fits: such a pin is reported as a
+//! [`PlanWarning::PinNotFollowed`] and leaves the constraint alone (ADR 0020).
+//!
 //! # Plans that only a pin can justify
 //!
 //! A pass takes each project's newest release until a pin says otherwise, which
@@ -129,10 +136,12 @@ pub struct InstalledProject {
 /// Making it a parameter rather than a second resolver keeps one implementation
 /// of "what does this mod need", which is the part that is hard to get right.
 ///
-/// Under either policy an installed dependency that nothing pins stays at its
-/// release while that release still fits, so `Replace` moves the root and
-/// nothing else on its own account, and `Preserve` reuses it. Only a pin, or a
-/// release that no longer fits, asks for another one.
+/// Under either policy an installed dependency stays at its release while that
+/// release still fits, so `Replace` moves the root and nothing else on its own
+/// account, and `Preserve` reuses it. A pin is reported rather than followed,
+/// except that `Replace` moves an automatic dependency to the release a pin
+/// names (see [`ResolveRequest::follows_pins`]). A release that no longer fits
+/// asks for another one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InstalledPolicy {
     /// Refuse to plan anything that would change an installed project.
@@ -310,6 +319,19 @@ pub enum PlanWarning {
     },
     /// The user selected an optional dependency nothing in the graph offers.
     OptionalNotOffered { project_id: String },
+    /// Mods pin a project to one exact release, and the plan uses another: the
+    /// one the user chose, or the one the host already has. A catalog's pin is
+    /// advice, and an older or newer release is often exactly what a
+    /// reproduction needs (ADR 0020).
+    PinNotFollowed {
+        project_id: String,
+        /// The release the pin names.
+        pinned_version: String,
+        /// The mods whose releases declare the pin, sorted.
+        pinned_by: Vec<String>,
+        /// The release the plan uses instead.
+        used_version: String,
+    },
 }
 
 impl PlanWarning {
@@ -321,6 +343,7 @@ impl PlanWarning {
             Self::ServerSideUnsupported { .. } => "mod-warning-server-side-unsupported",
             Self::UncheckableConflict { .. } => "mod-warning-uncheckable-conflict",
             Self::OptionalNotOffered { .. } => "mod-warning-optional-not-offered",
+            Self::PinNotFollowed { .. } => "mod-warning-pin-not-followed",
         }
     }
 }
@@ -440,6 +463,9 @@ struct Constraint {
     pin_sources: BTreeSet<String>,
     requesters: BTreeSet<String>,
     origin: ModOrigin,
+    /// Pins left out because the project's release is already decided, by the
+    /// release they name and with the mods that declare them.
+    unfollowed: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Constraint {
@@ -565,6 +591,11 @@ pub struct ResolveRequest<'a> {
     pub recorded_elsewhere: &'a [InstalledProject],
     /// What to do about an installed project this resolution moves.
     pub installed_policy: InstalledPolicy,
+    /// Recorded projects a pin may move under [`InstalledPolicy::Replace`]:
+    /// automatic dependencies, which follow what requires them. Any other
+    /// recorded release that still fits stays, and the pin is reported. So does
+    /// one of these when its pins disagree or name a refused release.
+    pub follows_pins: &'a BTreeSet<String>,
     pub reporter: &'a OperationReporter,
     pub cancel: &'a CancellationToken,
 }
@@ -866,6 +897,11 @@ struct Resolver<'a> {
     /// The project each release looked up for a version-only pin belongs to,
     /// so the plan's releases can state which project such a relation names.
     pinned_owners: BTreeMap<String, String>,
+    /// Recorded releases, other than the root's, that a pin asked to move and
+    /// that still fit, so the pin is not followed.
+    kept: BTreeMap<String, String>,
+    /// Projects whose recorded release has been checked for `kept`.
+    kept_checked: BTreeSet<String>,
 }
 
 impl<'a> Resolver<'a> {
@@ -892,6 +928,8 @@ impl<'a> Resolver<'a> {
             warnings: Vec::new(),
             honored_optional: BTreeSet::new(),
             pinned_owners: BTreeMap::new(),
+            kept: BTreeMap::new(),
+            kept_checked: BTreeSet::new(),
         }
     }
 
@@ -1161,7 +1199,12 @@ impl<'a> Resolver<'a> {
             }
             self.spend_search_round(round)?;
 
-            self.refold();
+            if self.refold_keeping_recorded().await? {
+                // The graph now asks for different things, so an earlier state
+                // seen again is not a loop.
+                seen.clear();
+                steps.clear();
+            }
             self.refused.retain(|project, refusal| {
                 self.constraints.get(project).is_some_and(|constraint| {
                     constraint.pin == refusal.pin && constraint.pin_sources == refusal.declarers
@@ -1256,6 +1299,17 @@ impl<'a> Resolver<'a> {
         Err(ModPlatformError::ResolutionDidNotConverge {
             iterations: MAX_RESOLUTION_ROUNDS,
         })
+    }
+
+    /// [`Self::refold`], then again if a recorded release a pin would move is
+    /// newly kept. Returns whether one was.
+    async fn refold_keeping_recorded(&mut self) -> ModPlatformResult<bool> {
+        self.refold();
+        let kept = self.keep_recorded_releases().await?;
+        if kept {
+            self.refold();
+        }
+        Ok(kept)
     }
 
     /// Rebuilds the constraint map from the root plus the edges reachable from it.
@@ -1381,12 +1435,19 @@ impl<'a> Resolver<'a> {
                 let Some(origin) = self.graph_origin(*kind, project_id) else {
                     continue;
                 };
-                if let Err(error) = constraints.entry(project_id.clone()).or_default().merge(
-                    project_id,
-                    pinned_version.as_deref(),
-                    source,
-                    origin,
-                ) {
+                let constraint = constraints.entry(project_id.clone()).or_default();
+                let pin = match (pinned_version.as_deref(), self.decided_release(project_id)) {
+                    (Some(pinned), Some(decided)) if pinned != decided => {
+                        constraint
+                            .unfollowed
+                            .entry(pinned.to_owned())
+                            .or_default()
+                            .insert(source.clone());
+                        None
+                    }
+                    (pin, _) => pin,
+                };
+                if let Err(error) = constraint.merge(project_id, pin, source, origin) {
                     conflicts.entry(project_id.clone()).or_insert(error);
                 }
             }
@@ -1396,7 +1457,12 @@ impl<'a> Resolver<'a> {
             let Some(constraint) = constraints.get_mut(project_id) else {
                 continue;
             };
-            match constraint.pin.as_deref() {
+            // An assumption cannot move a decided release any more than a pin
+            // can, so assuming another one is a dead end.
+            let decided = self
+                .decided_release(project_id)
+                .filter(|decided| decided != release);
+            match decided.or(constraint.pin.as_deref()) {
                 None => constraint.pin = Some(release.clone()),
                 Some(existing) if existing == release => {}
                 Some(existing) => {
@@ -1629,12 +1695,21 @@ impl<'a> Resolver<'a> {
         let Some((installed, _)) = self.recorded(project_id) else {
             return Ok(None);
         };
-        let release = match versions
-            .iter()
-            .find(|version| version.id == installed.version_id)
-        {
+        self.fitting_release(project_id, &installed.version_id, versions)
+            .await
+    }
+
+    /// The release `release_id` of `project_id`, when it still fits the
+    /// instance. Taken from `listed` when it is there, and looked up otherwise.
+    async fn fitting_release(
+        &self,
+        project_id: &str,
+        release_id: &str,
+        listed: &[ModVersionInfo],
+    ) -> ModPlatformResult<Option<ModVersionInfo>> {
+        let release = match listed.iter().find(|version| version.id == release_id) {
             Some(listed) => listed.clone(),
-            None => match self.fetch_version(&installed.version_id).await {
+            None => match self.fetch_version(release_id).await {
                 Ok(fetched) if fetched.project_id == project_id => fetched,
                 Ok(_) => return Ok(None),
                 // The provider describing the release as unusable is an answer
@@ -1656,6 +1731,59 @@ impl<'a> Resolver<'a> {
             .compatibility(self.request.target, self.request.loader_name)
             .is_compatible()
             .then_some(release))
+    }
+
+    /// The release a project must be resolved to whatever pins say: the one
+    /// the user selected for the root, or a recorded one that still fits.
+    fn decided_release(&self, project_id: &str) -> Option<&str> {
+        if project_id == self.request.selection.project_id {
+            return self.request.selection.version_id.as_deref();
+        }
+        self.kept.get(project_id).map(String::as_str)
+    }
+
+    /// Checks, once per project, whether the recorded release of a project the
+    /// graph pins elsewhere still fits, and keeps it when it does. Returns
+    /// whether anything new is kept.
+    async fn keep_recorded_releases(&mut self) -> ModPlatformResult<bool> {
+        let root = &self.request.selection.project_id;
+        let pinned_elsewhere: Vec<(String, String)> = self
+            .constraints
+            .iter()
+            .filter(|(project, _)| *project != root && !self.kept_checked.contains(*project))
+            // A dependency that follows pins still keeps its release when
+            // following them is impossible: they disagree, or the release
+            // they name is refused.
+            .filter(|(project, _)| {
+                self.request.installed_policy == InstalledPolicy::Preserve
+                    || !self.request.follows_pins.contains(*project)
+                    || self.conflicts.contains_key(*project)
+                    || self.refused.contains_key(*project)
+            })
+            .filter_map(|(project, constraint)| {
+                let (recorded, _) = self.recorded(project)?;
+                let moved = self.conflicts.contains_key(project)
+                    || constraint
+                        .pin
+                        .as_deref()
+                        .is_some_and(|pin| pin != recorded.version_id);
+                moved.then(|| (project.clone(), recorded.version_id.clone()))
+            })
+            .collect();
+        let mut grew = false;
+        for (project, release) in pinned_elsewhere {
+            self.kept_checked.insert(project.clone());
+            let listed = self.listings.get(&project).cloned().unwrap_or_default();
+            if self
+                .fitting_release(&project, &release, &listed)
+                .await?
+                .is_some()
+            {
+                self.kept.insert(project, release);
+                grew = true;
+            }
+        }
+        Ok(grew)
     }
 
     /// Turns one version's raw relations into a single shape.
@@ -1886,6 +2014,26 @@ impl<'a> Resolver<'a> {
                 });
             }
         }
+        let unfollowed: Vec<PlanWarning> = self
+            .constraints
+            .iter()
+            .filter_map(|(project, constraint)| {
+                Some((project, constraint, self.resolved.get(project)?))
+            })
+            .flat_map(|(project, constraint, resolution)| {
+                constraint
+                    .unfollowed
+                    .iter()
+                    .filter(|(pinned, _)| **pinned != resolution.version.id)
+                    .map(|(pinned, sources)| PlanWarning::PinNotFollowed {
+                        project_id: project.clone(),
+                        pinned_version: pinned.clone(),
+                        pinned_by: sources.iter().cloned().collect(),
+                        used_version: resolution.version.id.clone(),
+                    })
+            })
+            .collect();
+        self.warnings.extend(unfollowed);
 
         let projects = self.fetch_projects().await?;
         self.name_optional().await?;
@@ -2713,6 +2861,30 @@ mod tests {
             installed,
             recorded_elsewhere,
             installed_policy,
+            follows_pins: &BTreeSet::new(),
+            reporter: &OperationReporter::silent("resolving-mods"),
+            cancel: &CancellationToken::new(),
+        })
+        .await
+    }
+
+    /// A change, under which the projects named in `follows_pins` move to the
+    /// release a pin names.
+    async fn plan_following(
+        catalog: &Catalog,
+        selection: InstallSelection,
+        installed: &[InstalledProject],
+        follows_pins: &[&str],
+    ) -> ModPlatformResult<ModInstallPlan> {
+        resolve(ResolveRequest {
+            provider: catalog,
+            target: &target(),
+            loader_name: "neoforge",
+            selection: &selection,
+            installed,
+            recorded_elsewhere: &[],
+            installed_policy: InstalledPolicy::Replace,
+            follows_pins: &follows_pins.iter().map(|id| (*id).to_owned()).collect(),
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &CancellationToken::new(),
         })
@@ -3193,6 +3365,7 @@ mod tests {
             installed: &[],
             recorded_elsewhere: &[],
             installed_policy: InstalledPolicy::Preserve,
+            follows_pins: &BTreeSet::new(),
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &token,
         })
@@ -3416,6 +3589,7 @@ mod tests {
             installed: &[],
             recorded_elsewhere: &[],
             installed_policy: InstalledPolicy::Preserve,
+            follows_pins: &BTreeSet::new(),
             reporter: &OperationReporter::silent("resolving-mods"),
             cancel: &token,
         })
@@ -4155,8 +4329,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_release_the_user_selected_is_not_moved_to_find_a_plan() {
-        // K pins the newest ROOT, so the only plan runs that release. Selecting
-        // the older one is refused rather than answered with that plan.
+        // K pins the newest ROOT. Selecting the older one keeps it and names
+        // the pin rather than answering with the newest.
         let catalog = Catalog::default()
             .with(
                 "ROOT",
@@ -4188,20 +4362,25 @@ mod tests {
             chosen_versions(&unselected),
             pairs([("K", "k-1"), ("ROOT", "root-new")])
         );
-        let error = plan_with(
+        let selected = plan_with(
             &catalog,
             InstallSelection::new("ROOT").at_version("root-old"),
             &[],
         )
         .await
-        .expect_err("must refuse");
-        assert!(
-            matches!(
-                error,
-                ModPlatformError::ConflictingPinnedVersions { ref project_id, .. }
-                    if project_id == "ROOT"
-            ),
-            "{error:?}"
+        .expect("a pin on the selected release is a warning");
+        assert_eq!(
+            chosen_versions(&selected),
+            pairs([("K", "k-1"), ("ROOT", "root-old")])
+        );
+        assert_eq!(
+            selected.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "ROOT".to_owned(),
+                pinned_version: "root-new".to_owned(),
+                pinned_by: vec!["K".to_owned()],
+                used_version: "root-old".to_owned(),
+            }]
         );
     }
 
@@ -6116,7 +6295,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_install_needing_another_release_of_an_installed_dependency_is_refused() {
+    async fn an_install_keeps_an_installed_dependency_another_release_of_which_it_pins() {
         let mut root = compatible("v1", "ROOT");
         root.dependencies.push(ModDependency {
             kind: ModRelationKind::Required,
@@ -6130,9 +6309,92 @@ mod tests {
             version_id: "old".to_owned(),
         }];
 
+        let plan = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect("a pin is advice, and an install does not move a mod");
+        assert_eq!(plan.already_installed, installed.to_vec());
+        assert_eq!(ids(plan.to_install()), vec!["ROOT".to_owned()]);
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "LIB".to_owned(),
+                pinned_version: "new".to_owned(),
+                pinned_by: vec!["ROOT".to_owned()],
+                used_version: "old".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_install_keeps_an_installed_release_whichever_of_two_pins_lists_it() {
+        // Two mods list different LIB releases. With LIB already installed,
+        // neither pin decides, so there is nothing to conflict about.
+        let catalog = sharing_a_library()
+            .with(
+                "ROOT",
+                vec![pins_of(
+                    needs(compatible("v1", "ROOT"), ModRelationKind::Required, "OTHER"),
+                    ModRelationKind::Required,
+                    "LIB",
+                    "new",
+                )],
+            )
+            .with(
+                "OTHER",
+                vec![pins_of(
+                    compatible("o1", "OTHER"),
+                    ModRelationKind::Required,
+                    "LIB",
+                    "old",
+                )],
+            );
+        let installed = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "new".to_owned(),
+        }];
+
+        let plan = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
+            .await
+            .expect("an installed release settles what the pins disagree about");
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("LIB", "new"), ("OTHER", "o1"), ("ROOT", "v1")])
+        );
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "LIB".to_owned(),
+                pinned_version: "old".to_owned(),
+                pinned_by: vec!["OTHER".to_owned()],
+                used_version: "new".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_install_follows_a_pin_on_an_installed_release_that_no_longer_fits() {
+        let mut root = compatible("v1", "ROOT");
+        root.dependencies.push(ModDependency {
+            kind: ModRelationKind::Required,
+            project_id: Some("LIB".to_owned()),
+            version_id: Some("new".to_owned()),
+            file_name: None,
+        });
+        let catalog = sharing_a_library().with("ROOT", vec![root]).with(
+            "LIB",
+            vec![
+                at(version("old", "LIB", &["1.21.1"], &["neoforge"]), 0),
+                at(compatible("new", "LIB"), 60),
+            ],
+        );
+        let installed = [InstalledProject {
+            project_id: "LIB".to_owned(),
+            version_id: "old".to_owned(),
+        }];
+
         let error = plan_with(&catalog, InstallSelection::new("ROOT"), &installed)
             .await
-            .expect_err("a pin moves LIB, and an install does not move a mod");
+            .expect_err("an installed release that does not fit is not kept");
         assert!(matches!(
             error,
             ModPlatformError::ProjectAlreadyInstalled { ref project_id, ref requested, .. }
@@ -6532,9 +6794,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_dependency_pinned_to_another_release_is_moved_and_reported() {
-        let catalog = Catalog::default()
+    /// The catalog of a root release that pins a library's newer release.
+    fn root_pinning_a_newer_library() -> Catalog {
+        Catalog::default()
             .with(
                 "ROOTPROJ",
                 vec![at(
@@ -6552,13 +6814,153 @@ mod tests {
                     at(compatible("LIBV1", "LIBPROJ"), 0),
                     at(compatible("LIBV2", "LIBPROJ"), 20),
                 ],
-            );
+            )
+    }
 
+    #[tokio::test]
+    async fn a_change_keeps_a_dependency_that_does_not_follow_pins_and_reports_the_pin() {
         let plan = plan_under(
-            &catalog,
+            &root_pinning_a_newer_library(),
             InstallSelection::new("ROOTPROJ"),
             &[installed("LIBPROJ", "LIBV1")],
             InstalledPolicy::Replace,
+        )
+        .await
+        .expect("a plan");
+
+        assert!(plan.replacements.is_empty());
+        assert_eq!(plan.already_installed, vec![installed("LIBPROJ", "LIBV1")]);
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "LIBPROJ".to_owned(),
+                pinned_version: "LIBV2".to_owned(),
+                pinned_by: vec!["ROOTPROJ".to_owned()],
+                used_version: "LIBV1".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_keeps_a_dependency_that_follows_pins_when_its_pins_disagree() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(compatible("v1", "ROOT"), 0),
+                    at(
+                        pins_of(
+                            needs(compatible("v2", "ROOT"), ModRelationKind::Required, "OTHER"),
+                            ModRelationKind::Required,
+                            "LIB",
+                            "new",
+                        ),
+                        10,
+                    ),
+                ],
+            )
+            .with(
+                "OTHER",
+                vec![pins_of(
+                    compatible("o1", "OTHER"),
+                    ModRelationKind::Required,
+                    "LIB",
+                    "old",
+                )],
+            )
+            .with(
+                "LIB",
+                vec![
+                    at(compatible("old", "LIB"), 0),
+                    at(compatible("new", "LIB"), 20),
+                ],
+            );
+
+        let plan = plan_following(
+            &catalog,
+            InstallSelection::new("ROOT").at_version("v2"),
+            &[
+                installed("ROOT", "v1"),
+                installed("OTHER", "o1"),
+                installed("LIB", "old"),
+            ],
+            &["OTHER", "LIB"],
+        )
+        .await
+        .expect("pins that disagree do not refuse a change");
+
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("LIB", "old"), ("OTHER", "o1"), ("ROOT", "v2")])
+        );
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "LIB".to_owned(),
+                pinned_version: "new".to_owned(),
+                pinned_by: vec!["ROOT".to_owned()],
+                used_version: "old".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_change_keeps_a_dependency_that_follows_pins_when_the_pinned_release_does_not_fit() {
+        let catalog = Catalog::default()
+            .with(
+                "ROOT",
+                vec![
+                    at(compatible("v1", "ROOT"), 0),
+                    at(
+                        pins_of(
+                            compatible("v2", "ROOT"),
+                            ModRelationKind::Required,
+                            "LIB",
+                            "elsewhere",
+                        ),
+                        10,
+                    ),
+                ],
+            )
+            .with(
+                "LIB",
+                vec![
+                    at(compatible("old", "LIB"), 0),
+                    at(version("elsewhere", "LIB", &["1.21.1"], &["neoforge"]), 20),
+                ],
+            );
+
+        let plan = plan_following(
+            &catalog,
+            InstallSelection::new("ROOT").at_version("v2"),
+            &[installed("ROOT", "v1"), installed("LIB", "old")],
+            &["LIB"],
+        )
+        .await
+        .expect("a pinned release that does not fit does not refuse a change");
+
+        assert_eq!(
+            chosen_versions(&plan),
+            pairs([("LIB", "old"), ("ROOT", "v2")])
+        );
+        assert_eq!(
+            plan.warnings,
+            vec![PlanWarning::PinNotFollowed {
+                project_id: "LIB".to_owned(),
+                pinned_version: "elsewhere".to_owned(),
+                pinned_by: vec!["ROOT".to_owned()],
+                used_version: "old".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dependency_pinned_to_another_release_is_moved_and_reported() {
+        let plan = plan_following(
+            &root_pinning_a_newer_library(),
+            InstallSelection::new("ROOTPROJ"),
+            &[installed("LIBPROJ", "LIBV1")],
+            &["LIBPROJ"],
         )
         .await
         .expect("a plan");
@@ -6571,6 +6973,7 @@ mod tests {
                 to: "LIBV2".to_owned(),
             }]
         );
+        assert!(plan.warnings.is_empty(), "the pin was followed");
     }
 
     #[tokio::test]
@@ -6797,7 +7200,8 @@ mod tests {
 
     /// Every set of `(project, release)` choices that is consistent: each
     /// project the root reaches runs the release the reached graph pins it to,
-    /// or its newest when nothing pins it.
+    /// or its newest when nothing pins it. A root release the user selected
+    /// stands whatever the graph pins it to.
     fn consistent_plans(
         catalog: &Catalog,
         root_pin: Option<&str>,
@@ -6828,7 +7232,10 @@ mod tests {
                     let Some(target) = dependency.project_id.clone() else {
                         continue;
                     };
-                    if let Some(pin) = &dependency.version_id {
+                    // A pin does not override the release the user selected.
+                    if let Some(pin) = &dependency.version_id
+                        && !(root_pin.is_some() && target == "P0")
+                    {
                         pins.entry(target.clone()).or_default().insert(pin.clone());
                     }
                     if reached.insert(target.clone()) {

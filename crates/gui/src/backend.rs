@@ -1538,6 +1538,9 @@ pub struct LinkedSectionData {
     /// A sentence about what the project declares for the server side.
     pub support: String,
     pub targets: Vec<LinkedTargetData>,
+    /// One sentence per release a mod lists that this operation does not use,
+    /// on the client or on a server that would take part.
+    pub notes: Vec<String>,
 }
 
 /// The per-target result of one finished linked operation.
@@ -4263,7 +4266,10 @@ fn run_worker(
                             drop(in_flight);
                             let _ = events.send(Event::LinkedApply {
                                 request: ask,
-                                section: linked_section(&plan),
+                                section: linked_section(
+                                    &plan,
+                                    &recorded_names(&app, InstalledHost::Instance(instance)),
+                                ),
                             });
                         }
                         Err(error) => {
@@ -5456,10 +5462,13 @@ fn run_worker(
                             Answered::Finished(result, _) => result?,
                             Answered::Abandoned => return Ok(OperationReport::Reported),
                         };
-                        let mut message = installed_message(
+                        let mut message = std::iter::once(installed_message(
                             &installed.installation,
                             installed.plan.all_mods().len(),
-                        );
+                        ))
+                        .chain(install_pin_notes(&installed.plan, &BTreeMap::new()))
+                        .collect::<Vec<_>>()
+                        .join(" ");
                         if server_is_running(&app, server) {
                             message =
                                 format!("{message} {}", lookup("gui-server-mod-plan-restart"));
@@ -11844,6 +11853,138 @@ impl ServerModChange {
     }
 }
 
+/// One sentence per release mods list that a plan does not use, naming each
+/// mod by `name`.
+fn pin_notes(warnings: &[PlanWarning], name: &dyn Fn(&str) -> String) -> Vec<String> {
+    warnings
+        .iter()
+        .filter_map(|warning| match warning {
+            PlanWarning::PinNotFollowed {
+                project_id,
+                pinned_version,
+                pinned_by,
+                used_version,
+            } => Some(lookup_args(
+                warning.message_id(),
+                [
+                    ("project", Arg::from(name(project_id))),
+                    ("pinned", Arg::from(pinned_version.as_str())),
+                    (
+                        "pinned_by",
+                        Arg::from(
+                            pinned_by
+                                .iter()
+                                .map(|id| name(id))
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ),
+                    ("used", Arg::from(used_version.as_str())),
+                ],
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The names a host's mods go by, by project id. Empty when the host cannot
+/// be read: a warning then names mods by their ids.
+fn recorded_names(app: &App, host: InstalledHost) -> BTreeMap<String, String> {
+    app.host_mod_snapshot(host)
+        .map(|snapshot| snapshot_names(&snapshot))
+        .unwrap_or_default()
+}
+
+fn snapshot_names(snapshot: &ManagedModSnapshot) -> BTreeMap<String, String> {
+    snapshot
+        .mods
+        .iter()
+        .filter_map(|entry| {
+            Some((
+                entry.identity.project_id()?.to_owned(),
+                entry.display_name().to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// The pin notes of an install plan, naming its mods by their titles.
+fn install_pin_notes(plan: &ModInstallPlan, recorded: &BTreeMap<String, String>) -> Vec<String> {
+    pin_notes(&plan.warnings, &|project| {
+        plan.all_mods()
+            .into_iter()
+            .find(|planned| planned.project.id == project && !planned.project.title.is_empty())
+            .map(|planned| planned.project.title.clone())
+            .or_else(|| recorded.get(project).cloned())
+            .unwrap_or_else(|| project.to_owned())
+    })
+}
+
+/// The pin notes of a version change, naming its mods by what the change
+/// writes and what the host records.
+fn mutation_pin_notes(plan: &ModMutationPlan, recorded: &BTreeMap<String, String>) -> Vec<String> {
+    pin_notes(&plan.warnings, &|project| {
+        if plan.project_id.as_deref() == Some(project) {
+            return plan.name.clone();
+        }
+        plan.installs
+            .iter()
+            .find(|file| file.project_id.as_deref() == Some(project))
+            .map(|file| file.name.clone())
+            .or_else(|| recorded.get(project).cloned())
+            .unwrap_or_else(|| project.to_owned())
+    })
+}
+
+/// The pin notes of one linked operation: the client's, then each server's
+/// under its name.
+fn linked_pin_notes(plan: &LinkedModPlan, recorded: &BTreeMap<String, String>) -> Vec<String> {
+    let mut notes = match &plan.client_plan {
+        ClientModPlan::Install(plan) => install_pin_notes(plan, recorded),
+        ClientModPlan::Mutate(plan) => mutation_pin_notes(plan, recorded),
+    };
+    for target in plan
+        .targets
+        .iter()
+        .filter(|target| target.state.is_actionable())
+    {
+        let name = |project: &str| {
+            if Some(project) == Some(plan.root.project_id.as_str()) {
+                return plan.root.name.clone();
+            }
+            target
+                .installs
+                .iter()
+                .find(|file| file.project_id.as_deref() == Some(project))
+                .map(|file| file.name.clone())
+                .or_else(|| recorded.get(project).cloned())
+                .unwrap_or_else(|| project.to_owned())
+        };
+        notes.extend(pin_notes(&target.warnings, &name).into_iter().map(|note| {
+            lookup_args(
+                "gui-linked-target-note",
+                [
+                    ("server", Arg::from(target.name.as_str())),
+                    ("note", Arg::from(note)),
+                ],
+            )
+        }));
+    }
+    notes
+}
+
+/// What the client half of a finished linked operation warns about.
+fn client_outcome_notes(outcome: &LinkedModOutcome) -> Vec<String> {
+    match &outcome.client {
+        ClientModOutcome::Installed(installed) => {
+            install_pin_notes(&installed.plan, &BTreeMap::new())
+        }
+        ClientModOutcome::Mutated(mutation) => {
+            mutation_pin_notes(&mutation.plan, &snapshot_names(&mutation.snapshot))
+        }
+    }
+}
+
 /// Says which client-only mods a server change installed anyway, and for whom.
 fn client_only_dependencies(plan: &ModMutationPlan) -> Vec<String> {
     let name = |project: &str| {
@@ -11926,7 +12067,9 @@ fn apply_server_mod_change(
                 Ok(mutation) => {
                     let _ = events.send(Event::CloseModal(dialogs));
                     let mut message = mutation_message(&mutation);
-                    for warning in client_only_dependencies(&mutation.plan) {
+                    for warning in client_only_dependencies(&mutation.plan).into_iter().chain(
+                        mutation_pin_notes(&mutation.plan, &snapshot_names(&mutation.snapshot)),
+                    ) {
                         message = format!("{message} {warning}");
                     }
                     if server_is_running(&app, server) {
@@ -12457,7 +12600,10 @@ fn spawn_mod_plan(
             ));
             match result {
                 Ok(plan) => {
-                    let _ = events.send(Event::ModPlan(install_plan_data(&plan, &project)));
+                    let recorded = recorded_names(&app, InstalledHost::Instance(instance));
+                    let _ = events.send(Event::ModPlan(install_plan_data(
+                        &plan, &project, &recorded,
+                    )));
                 }
                 Err(error) => {
                     send_error(&events, &error);
@@ -12556,7 +12702,10 @@ fn server_plan_data(
         optional_count: plan.optional.len(),
         already_installed_count: plan.already_installed.len(),
         warning_count: plan.warnings.len(),
-        linked: LinkedSectionData::default(),
+        linked: LinkedSectionData {
+            notes: install_pin_notes(plan, &BTreeMap::new()),
+            ..LinkedSectionData::default()
+        },
         unstated: plan
             .undeclared_server_support()
             .into_iter()
@@ -13671,7 +13820,7 @@ fn removal_plan_data(linked: &LinkedModPlan) -> ModRemovalPlanData {
     let Some(plan) = mutation_plan_of(linked) else {
         return ModRemovalPlanData::default();
     };
-    removal_data(plan, linked_section(linked))
+    removal_data(plan, linked_section(linked, &BTreeMap::new()))
 }
 
 /// What removing one mod would take with it, and which linked servers could
@@ -13693,7 +13842,11 @@ fn removal_data(plan: &ModMutationPlan, linked: LinkedSectionData) -> ModRemoval
 }
 
 /// What installing a mod would involve, on this client and on its servers.
-fn install_plan_data(linked: &LinkedModPlan, requested: &str) -> ModPlanData {
+fn install_plan_data(
+    linked: &LinkedModPlan,
+    requested: &str,
+    recorded: &BTreeMap<String, String>,
+) -> ModPlanData {
     let Some(plan) = install_plan_of(linked) else {
         return ModPlanData::default();
     };
@@ -13710,7 +13863,7 @@ fn install_plan_data(linked: &LinkedModPlan, requested: &str) -> ModPlanData {
         optional_count: plan.optional.len(),
         already_installed_count: plan.already_installed.len(),
         warning_count: plan.warnings.len(),
-        linked: linked_section(linked),
+        linked: linked_section(linked, recorded),
         ..ModPlanData::default()
     }
 }
@@ -13765,7 +13918,7 @@ fn planned_request(plan: &LinkedModPlan) -> LinkedModRequest {
 }
 
 /// The linked-server half of a confirmation, and what applying it needs.
-fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
+fn linked_section(plan: &LinkedModPlan, recorded: &BTreeMap<String, String>) -> LinkedSectionData {
     // A mod no server could ever run is not a decision, and neither is a client
     // with no linked servers. Dropping the rows here rather than in each modal
     // keeps "is this worth asking about" one answer.
@@ -13791,6 +13944,7 @@ fn linked_section(plan: &LinkedModPlan) -> LinkedSectionData {
         } else {
             Vec::new()
         },
+        notes: linked_pin_notes(plan, recorded),
     }
 }
 
@@ -13932,8 +14086,12 @@ fn finish_linked(
         Ok(outcome) => {
             let _ = events.send(Event::CloseModal(dialogs));
             if outcome.targets.is_empty() {
+                let message = std::iter::once(client_outcome_message(&outcome))
+                    .chain(client_outcome_notes(&outcome))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 let _ = events.send(Event::Toast {
-                    message: client_outcome_message(&outcome),
+                    message,
                     error: false,
                 });
             } else {
@@ -14033,11 +14191,14 @@ fn linked_result_data(outcome: &LinkedModOutcome, scope: ModalScope) -> LinkedRe
     LinkedResultData {
         scope,
         title: outcome.root.name.clone(),
-        summary: lookup(if outcome.unfinished().count() == 0 {
+        summary: std::iter::once(lookup(if outcome.unfinished().count() == 0 {
             "gui-linked-all-applied"
         } else {
             "gui-linked-partial"
-        }),
+        }))
+        .chain(client_outcome_notes(outcome))
+        .collect::<Vec<_>>()
+        .join(" "),
         rows,
     }
 }
@@ -14969,6 +15130,51 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+
+    /// A version change of LibX to 3.2.18, which UtilitiX lists at 3.2.19.
+    fn libx_change() -> ModMutationPlan {
+        ModMutationPlan {
+            host: InstalledHost::Instance(ephervex_model::InstanceId::new()),
+            target: PathBuf::from("mods/libx-1.18.2-3.2.18.jar"),
+            name: "LibX".to_owned(),
+            provider: Some(ModProvider::Modrinth),
+            project_id: Some("qEH6GYul".to_owned()),
+            candidate_version: Some("74agt1cB".to_owned()),
+            outcome: PlannedOutcome::ChangeVersion {
+                from: "Rw7rEJk3".to_owned(),
+                to: "74agt1cB".to_owned(),
+            },
+            installs: Vec::new(),
+            removes: Vec::new(),
+            orphans_unprovable: false,
+            warnings: vec![PlanWarning::PinNotFollowed {
+                project_id: "qEH6GYul".to_owned(),
+                pinned_version: "Rw7rEJk3".to_owned(),
+                pinned_by: vec!["Utilitix".to_owned()],
+                used_version: "74agt1cB".to_owned(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_version_change_names_the_mod_that_lists_another_release() {
+        let recorded = BTreeMap::from([("Utilitix".to_owned(), "UtilitiX".to_owned())]);
+
+        let notes = mutation_pin_notes(&libx_change(), &recorded);
+
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("UtilitiX"), "{notes:?}");
+        assert!(notes[0].contains("LibX"), "{notes:?}");
+        assert!(notes[0].contains("Rw7rEJk3"), "{notes:?}");
+        assert!(notes[0].contains("74agt1cB"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_pin_note_names_a_mod_nothing_describes_by_its_project_id() {
+        let notes = mutation_pin_notes(&libx_change(), &BTreeMap::new());
+
+        assert!(notes[0].contains("Utilitix"), "{notes:?}");
+    }
 
     fn cache_status(
         used: u64,

@@ -70,12 +70,28 @@ to do exactly that. `InstalledPolicy` chooses between them, and the plan reports
 replacements separately so a caller knows what to retire.
 
 Replacing moves the mod being changed and nothing else on its own account. An
-installed dependency that nothing pins stays at its release while that release
-still fits; only a pin, or a release that no longer fits, moves one. Such a move
-is refused when the dependency is not an automatic one (a mod a pack declared or
-a person chose) or when another installed mod requires the release it has, and
-is otherwise shown in the plan with the release it replaces. A linked server
-applies the same rule to its own mods.
+installed dependency stays at its release while that release still fits, and a
+release that no longer fits moves it. Such a move is refused when the
+dependency is not an automatic one (a mod a pack declared or a person chose),
+and is otherwise shown in the plan with the release it replaces. A linked
+server applies the same rule to its own mods.
+
+**A catalog's exact-release pin is advice.** A pin chooses the release of a
+project nothing has decided yet. It does not move the release the user chose
+for the mod being installed or changed, nor a release the host already has
+while that release fits. The one exception is replacing, which moves an
+automatic dependency to the release the new release pins, because an
+automatic dependency follows what requires it; when the pins on it disagree,
+or the release they name is refused, it keeps its release too. The same
+exception does not apply to a linked server receiving a mod for the first
+time, which follows the client's install rule. A pin that is not followed is
+a warning in the plan and the result, naming the mods that list it and the
+release used instead, and never a refusal: reproducing a report often needs
+exactly the older or newer release a catalog's pin rules out. This is the same
+answer declared incompatibilities already get. Two pins that disagree about a
+project nothing has decided yet are still refused, because choosing between
+them would be the launcher inventing an answer; installing the project first
+at the wanted release, or changing it to that release, decides it.
 
 **Ownership is the policy.**
 
@@ -157,21 +173,20 @@ version and update like a mod chosen by name:
 
 The move keeps the entry's origin, as every replacement does, so removing the
 mods that need the library still collects it. Changing or updating another mod
-later keeps the moved release while nothing pins a different one, because
-replacing never moves an installed dependency that nothing pins.
+later keeps the moved release unless that mod's new release pins a different
+one, which moves an automatic dependency as described above.
 
 Installing a mod keeps it too. Under `InstalledPolicy::Preserve` an installed
-dependency that nothing pins resolves to the release it has while that release
-still fits, and the plan reports it as already installed. Asking for the newest
-release instead would refuse an install that the installed release already
-satisfies. A pin to another release, or an installed release that no longer
-fits, still refuses the install: an install never moves a mod that is already
-there.
+dependency resolves to the release it has while that release still fits, and
+the plan reports it as already installed. Asking for the newest release instead
+would refuse an install that the installed release already satisfies. A pin to
+another release is reported and the installed release kept. An installed
+release that no longer fits still refuses the install: an install never moves a
+mod that is already there.
 
-A move is refused when another recorded mod's relations require one exact
-release of the mod being moved, other than the one chosen. This holds for every
-origin, not only dependencies: moving a mod away from a release another mod
-pins breaks that mod. A linked server applies the same rule to its own recipe;
-it follows the client's move unless one of its mods pins the release, and it
-still never removes a dependency it holds. A mod whose relations were never
-recorded (ADR 0034) cannot be checked, so it does not block a move.
+Another recorded mod whose relations pin one exact release of the mod being
+moved, other than the one chosen, does not block the move, for any origin. The
+plan and the result name that mod and the release it lists. A linked server
+applies the same rule to its own recipe: it follows the client's move with the
+same warning, and it still never removes a dependency it holds. A mod whose
+relations were never recorded (ADR 0034) cannot be checked, so it is not named.

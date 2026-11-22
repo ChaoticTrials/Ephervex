@@ -2259,7 +2259,10 @@ impl App {
                 recipe.as_ref(),
                 host.side(),
                 request,
-                policy,
+                ResolvePolicy {
+                    installed: policy,
+                    dependencies_follow_pins: policy == InstalledPolicy::Replace,
+                },
                 reporter,
                 &CancellationToken::new(),
             )
@@ -2279,16 +2282,21 @@ impl App {
         recipe: Option<&PackRecipe>,
         side: PackSide,
         request: &ModInstallRequest,
-        policy: InstalledPolicy,
+        policy: ResolvePolicy,
         reporter: &OperationReporter,
         cancel: &CancellationToken,
     ) -> CoreResult<ModInstallPlan> {
-        let installed = installed_projects_of(recipe, request.provider, side);
+        let mut installed = installed_projects_of(recipe, request.provider, side);
+        if !policy.dependencies_follow_pins {
+            installed.follows_pins.clear();
+        }
+        let policy = policy.installed;
         let mut plan = self
             .resolve_against(target, &installed, request, policy, reporter, cancel)
             .await?;
         if let Some(recipe) = recipe {
             reuse_identical_files(&mut plan, recipe, side, policy);
+            warn_about_recorded_pins(&mut plan, recipe, side);
         }
         Ok(plan)
     }
@@ -2365,6 +2373,7 @@ impl App {
                 installed: &installed.present,
                 recorded_elsewhere: &installed.elsewhere,
                 installed_policy: policy,
+                follows_pins: &installed.follows_pins,
                 reporter,
                 cancel,
             })
@@ -2439,6 +2448,16 @@ impl App {
     }
 }
 
+/// How a resolution treats what the host already has.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ResolvePolicy {
+    pub(crate) installed: InstalledPolicy,
+    /// Whether an automatic dependency the host has moves to the release a pin
+    /// names. True only for a change of a mod the host already has: an install
+    /// keeps every installed release and reports the pin.
+    pub(crate) dependencies_follow_pins: bool,
+}
+
 /// One catalog's projects a desired state records, split by whether they are
 /// installed on the host's side.
 #[derive(Debug, Default)]
@@ -2449,6 +2468,9 @@ pub(crate) struct InstalledSet {
     /// mirrors its client's, so a client-only entry there has no jar on the
     /// server, and a plan for the server installs it rather than reusing it.
     pub(crate) elsewhere: Vec<InstalledProject>,
+    /// The automatic dependencies among them, which a version change may move
+    /// to the release a pin names.
+    pub(crate) follows_pins: BTreeSet<String>,
 }
 
 /// The provider projects one desired state already records, for resolution.
@@ -2474,6 +2496,9 @@ pub(crate) fn installed_projects_of(
         else {
             continue;
         };
+        if file.origin == ModOrigin::RequiredDependency {
+            set.follows_pins.insert(managed.project_id.clone());
+        }
         let project = InstalledProject {
             project_id: managed.project_id,
             version_id: managed.version_id,
@@ -2485,6 +2510,80 @@ pub(crate) fn installed_projects_of(
         }
     }
     set
+}
+
+/// Warns about each exact release a mod installed on `side`, outside the plan's
+/// graph, lists for a project the plan writes at another release.
+///
+/// The resolver reports pins from the mods in the graph. A mod outside it,
+/// such as one that needs a mod whose version is changing, is read from the
+/// relations the desired state recorded for it. A pin is advice, so it is
+/// named and never refuses the plan (ADR 0020).
+fn warn_about_recorded_pins(plan: &mut ModInstallPlan, recipe: &PackRecipe, side: PackSide) {
+    let in_graph: BTreeSet<String> = plan.resolved_projects().map(str::to_owned).collect();
+    let written: BTreeMap<String, String> = plan
+        .to_install()
+        .into_iter()
+        .map(|planned| {
+            (
+                planned.version.project_id.clone(),
+                planned.version.id.clone(),
+            )
+        })
+        .collect();
+    let none = OptionalSelection::none();
+    let mut unfollowed: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    for file in &recipe.files {
+        let Some(managed) = file
+            .managed_mod()
+            .filter(|managed| managed.provider == plan.provider)
+        else {
+            continue;
+        };
+        if in_graph.contains(&managed.project_id) || !file.is_installed_on(side, &none) {
+            continue;
+        }
+        for relation in file.relations.as_deref().unwrap_or_default() {
+            let RelationTarget::Project {
+                project_id,
+                version_id: Some(pinned),
+            } = &relation.target
+            else {
+                continue;
+            };
+            if relation.kind == ephervex_model::ModRelationKind::Required
+                && written.get(project_id).is_some_and(|used| used != pinned)
+            {
+                unfollowed
+                    .entry((project_id.clone(), pinned.clone()))
+                    .or_default()
+                    .insert(managed.project_id.clone());
+            }
+        }
+    }
+    for ((project, pinned), sources) in unfollowed {
+        let existing = plan.warnings.iter_mut().find_map(|warning| match warning {
+            PlanWarning::PinNotFollowed {
+                project_id,
+                pinned_version,
+                pinned_by,
+                ..
+            } if *project_id == project && *pinned_version == pinned => Some(pinned_by),
+            _ => None,
+        });
+        match existing {
+            Some(pinned_by) => {
+                let merged: BTreeSet<String> = pinned_by.drain(..).chain(sources).collect();
+                pinned_by.extend(merged);
+            }
+            None => plan.warnings.push(PlanWarning::PinNotFollowed {
+                used_version: written.get(&project).cloned().unwrap_or_default(),
+                project_id: project,
+                pinned_version: pinned,
+                pinned_by: sources.into_iter().collect(),
+            }),
+        }
+    }
 }
 
 /// Counts as already installed every planned mod the host already has as

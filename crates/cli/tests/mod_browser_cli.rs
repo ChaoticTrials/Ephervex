@@ -357,3 +357,60 @@ fn catalog_commands_name_a_client_or_a_server_and_say_so_in_their_help() {
         "the instance is named with --instance or --server"
     );
 }
+
+#[test]
+fn a_version_change_names_no_mod_the_host_does_not_have() {
+    let sandbox = Sandbox::new();
+    let (id, _) = sandbox.instance();
+
+    let output = sandbox.run(&["mod", "set-version", "--instance", &id, "libx", "74agt1cB"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("No mod on"), "{stderr}");
+    assert!(stderr.contains("libx"), "{stderr}");
+}
+
+#[test]
+fn a_version_change_asks_which_mod_when_a_project_id_names_two() {
+    let sandbox = Sandbox::new();
+    let (id, root) = sandbox.instance();
+    let source = root.join(".launcher/source");
+    std::fs::create_dir_all(&source).expect("source dir");
+    let file = |path: &str, provider: &str| {
+        format!(
+            r#"{{
+              "logical_path": "{path}",
+              "hashes": [{{"algorithm": "sha1", "digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709"}}],
+              "client": "required",
+              "server": "required",
+              "origin": "user_selected",
+              "identity": {{"provider": "{provider}", "project_id": "SHARED", "version_id": "V1"}}
+            }}"#
+        )
+    };
+    std::fs::write(
+        source.join("recipe.json"),
+        format!(
+            r#"{{
+              "recipe_version": 1,
+              "source_kind": "manual",
+              "original_name": "Mod browser check",
+              "minecraft_version": "1.20.1",
+              "loader": {{"kind": "forge", "version": "47.4.10"}},
+              "files": [{}, {}],
+              "provider_metadata": {{"kind": "manual"}}
+            }}"#,
+            file("mods/from-modrinth.jar", "modrinth"),
+            file("mods/from-curseforge.jar", "curseforge"),
+        ),
+    )
+    .expect("write recipe");
+
+    let output = sandbox.run(&["mod", "set-version", "--instance", &id, "SHARED", "V2"]);
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("mods/from-modrinth.jar"), "{stderr}");
+    assert!(stderr.contains("mods/from-curseforge.jar"), "{stderr}");
+}

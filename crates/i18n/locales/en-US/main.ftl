@@ -1107,7 +1107,7 @@ linked-target-state-unavailable = This server's recorded mods could not be read.
 linked-target-isolation-active = This server has an isolation session in progress, so its mods cannot change.
 linked-target-pack-owned = This server's pack declares this mod.
 linked-target-server-dependency = Another mod on this server requires this one.
-linked-target-moves-another-mod = This release would also move another mod on this server that its pack declares, that was chosen directly, or that another mod needs at its current release.
+linked-target-moves-another-mod = This release would also move another mod on this server that its pack declares or that was chosen directly.
 
 error-artwork-unusable = A mod's icon could not be shown.
 .action = The mod itself is unaffected; a generic icon is used instead.
@@ -1123,9 +1123,7 @@ error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
 error-mod-identity-incomplete = One of this instance's mods has no provider identity, so its dependencies cannot be worked out.
 .action = Mods with no identity have to be managed by hand.
-error-mod-dependency-not-movable = That change would also move a mod that the pack declared, that you chose, or that another mod needs at its current release. Change that mod's version first.
-error-mod-release-required-by-another = { $mod } requires release { $version } of this mod, so it has to stay on that release.
-.action = Change or remove { $mod } first.
+error-mod-dependency-not-movable = That change would also move a mod that the pack declared or that you chose. Change that mod's version first.
 error-single-instance-unavailable = Ephervex could not reach the launcher that is already running.
 .action = The link was not handed over. Close the other Ephervex window and try again.
 error-url-handler-unavailable = Ephervex could not change which application opens its links.
@@ -1941,7 +1939,8 @@ error-mod-rollback-incomplete = The mod change failed and the previous files cou
 # An install never moves a mod that is already there: replacing the file would
 # delete a jar the user did not ask about. Changing its version is its own action.
 error-mod-already-installed = That mod is already installed at a different version.
-.action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Installing does not move a mod that is already there; change that mod's version instead.
+.action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Installing does not move a mod that is already there; change its version with ephervex mod set-version instead.
+.desktop-action = { $project } is installed from { $provider } at { $installed }, not { $requested }. Installing does not move a mod that is already there; use Change Version on that mod instead.
 
 error-mod-managed-identity-missing = That file cannot be recorded as an installed mod.
 .action = Ephervex only records mods it can look up again by project and version, so nothing was invented for { $path }.
@@ -2128,6 +2127,21 @@ mod-install-server-support-unconfirmed = The catalog does not state whether { $m
 mod-install-dependency-already-provided = { $path } already provides { $dependency }, which this mod needs.
 .action = Add --use-installed { $project } to install without it, or remove or disable that file first if you want this release of { $dependency } instead.
 
+# `ephervex mod set-version`: what a version change did, or would do.
+mod-set-version-changed = Changed { $name } from { $from } to { $to }.
+mod-set-version-would-change = Would change { $name } from { $from } to { $to }.
+mod-set-version-repaired = Put { $name } { $to } back in place.
+mod-set-version-would-repair = Would put { $name } { $to } back in place.
+mod-set-version-current = { $name } is already at { $to }. Nothing changed.
+mod-set-version-installs = installs { $name } { $version }
+mod-set-version-moves = moves { $name } from { $from } to { $to }
+mod-set-version-removes = removes { $name }, which nothing needs any more
+mod-set-version-dependencies-kept = The catalog could not confirm which dependencies are still needed, so none were removed.
+mod-set-version-not-found = No mod on { $host } matches { $mod }.
+.action = Name it by its path inside the game directory, such as mods/example.jar, or by its project id.
+mod-set-version-ambiguous = { $mod } matches more than one mod: { $paths }.
+.action = Name the one to change by its path.
+
 # Printed after an install, for a dependency a jar already on the host provides.
 mod-install-stood-in = { $planned } was not installed: { $installed } provides mod id { $mod_ids }.
 
@@ -2136,6 +2150,10 @@ mod-warning-server-side-unsupported = { $project } says it does not run on a ser
 mod-warning-uncheckable-conflict = { $declared_by } says it conflicts with the file { $file_name }, which Ephervex cannot check automatically.
 .action = Check your mods folder for that file.
 mod-warning-optional-not-offered = { $project } was selected as an optional dependency, but nothing in this graph offers it.
+# A catalog's exact-release pin is advice: the release the user chose or the
+# host already has is kept, and the pin is named so nothing is hidden.
+mod-warning-pin-not-followed = { $pinned_by } lists { $project } at release { $pinned }, but { $used } is used.
+.action = The mod may not work with this release. Change { $project }'s version if it does not.
 
 mod-optional-unavailable = { $project } could not be checked because usable information about it could not be obtained from the provider.
 mod-optional-unknown-identity = { $project } could not be checked because the provider does not know the project or release it names.
@@ -2219,10 +2237,11 @@ error-mod-version-incompatible = That exact version does not fit this instance.
 error-mod-no-compatible-version = No version of that mod fits this instance.
 .action = Nothing published for { $project } supports Minecraft { $minecraft } with { $loader }.
 
-# Two mods each demanding a different exact version is a genuine conflict.
-# Picking one would be the launcher inventing an answer.
-error-mod-conflicting-pins = Two mods require different exact versions of the same dependency.
-.action = { $project } is required at { $first } by { $first_source } and at { $second } by { $second_source }. Install them separately, or choose versions that agree.
+# Two mods listing different exact releases of a dependency nothing has decided
+# yet is a genuine question. Picking one would be the launcher inventing an
+# answer, so the user installs the release they want first.
+error-mod-conflicting-pins = Two mods list different exact releases of the same dependency.
+.action = { $project } is listed at { $first } by { $first_source } and at { $second } by { $second_source }. Install { $project } at the release you want first, or change it to that release, then try again.
 
 error-mod-dependency-incompatible = These mods cannot be installed together.
 .action = { $declared_by } declares that it is incompatible with { $conflicting }.
@@ -4036,6 +4055,8 @@ gui-linked-support-optional = Server support is optional for this mod.
 # "Not stated" is not "not needed": the author declared nothing, and Ephervex
 # says so instead of deciding for them.
 gui-linked-support-unknown = This mod does not state whether it supports servers.
+# A warning about one linked server, under that server's name.
+gui-linked-target-note = { $server }: { $note }
 gui-linked-support-unsupported = This mod is client-only, so no server is offered it.
 gui-linked-installs = { $count ->
     [one] 1 mod

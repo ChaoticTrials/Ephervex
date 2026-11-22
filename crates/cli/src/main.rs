@@ -43,21 +43,22 @@ use ephervex_core::{
     LaunchAndConnectOutcome, LaunchEvent, LaunchFeatures, LaunchObserver, LaunchOptions,
     LaunchOutcome, LaunchState, LinkingState, LoginFlow, LoginOptions, LoginRequest,
     MAX_SEARCH_MATCHES, MINECRAFT_EULA_REFERENCE, ManagedInstallation, ManagedMod,
-    ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModPresence,
-    ModProjectDetails, ModRelations, ModSearchQuery, ModSearchResults, NetworkAccess, NewClient,
-    NewServer, OperationReporter, OptionalCandidate, OptionalSelection, OptionalStatus,
-    OrganizationView, OutputLine, PackAnalysis, PackContentOrigin, PackContentPresence,
-    PackContentSnapshot, PackRecipe, PackSide, Paths, PlanWarning, PlannedMod,
-    PreferenceApplication, PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest,
-    PromotionWarning, ReconciliationReport, RefusedJavaChoice, RelatedMod, ReleaseListing,
-    RequiredMods, RequirementBasis, RoundAnswer, RunFilter, RuntimeClassification,
-    RuntimeInventory, SearchOptions, SecretString, ServerCommitWarning, ServerContentSource,
-    ServerCreateOptions, ServerEvent, ServerExit, ServerFolder, ServerNetworkChange,
-    ServerObserver, ServerPersistenceHealth, ServerRecord, ServerWarning, Session,
-    SharedArtifactReport, SideSupport, SkipReason, SnapshotOrigin, SnapshotRecord,
-    SnapshotRestoreOptions, StartedServerLifetime, SuspectConfidence, SuspectReason,
-    TerminationRequests, TextAnchor, TextView, UnknownServerFiles, UnverifiedOptional,
-    VerificationReport, VersionMetadata, VersionOrder, VersionRecord, format_binary_bytes,
+    ManagedModInstallation, ManagedModSnapshot, ModInstallPlan, ModInstallRequest, ModMutation,
+    ModMutationPlan, ModPresence, ModProjectDetails, ModRelations, ModSearchQuery,
+    ModSearchResults, ModVersionChoice, NetworkAccess, NewClient, NewServer, OperationReporter,
+    OptionalCandidate, OptionalSelection, OptionalStatus, OrganizationView, OutputLine,
+    PackAnalysis, PackContentOrigin, PackContentPresence, PackContentSnapshot, PackRecipe,
+    PackSide, Paths, PlanWarning, PlannedFile, PlannedMod, PlannedOutcome, PreferenceApplication,
+    PreferenceId, PreferenceKey, ProcessMonitor, PromotionRequest, PromotionWarning,
+    ReconciliationReport, RefusedJavaChoice, RelatedMod, ReleaseListing, RequiredMods,
+    RequirementBasis, RoundAnswer, RunFilter, RuntimeClassification, RuntimeInventory,
+    SearchOptions, SecretString, ServerCommitWarning, ServerContentSource, ServerCreateOptions,
+    ServerEvent, ServerExit, ServerFolder, ServerNetworkChange, ServerObserver,
+    ServerPersistenceHealth, ServerRecord, ServerWarning, Session, SharedArtifactReport,
+    SideSupport, SkipReason, SnapshotOrigin, SnapshotRecord, SnapshotRestoreOptions,
+    StartedServerLifetime, SuspectConfidence, SuspectReason, TerminationRequests, TextAnchor,
+    TextView, UnknownServerFiles, UnverifiedOptional, VerificationReport, VersionMetadata,
+    VersionOrder, VersionRecord, format_binary_bytes,
 };
 use ephervex_i18n::Arg as MessageArg;
 use ephervex_model::{
@@ -482,6 +483,48 @@ enum ModCommand {
         selection: ModSelectionArgs,
         #[command(flatten)]
         consent: InstallConsentArgs,
+    },
+    /// Move a mod a client or server already has to another release.
+    ///
+    /// The same rules as the desktop app's Change Version. The mod moves to
+    /// exactly the release you name, and whatever that release needs that is
+    /// not installed yet comes with it. A dependency that was installed
+    /// automatically may move to the release the new one lists; mods you or a
+    /// pack chose stay where they are. A release another mod lists for this
+    /// one is allowed, and a warning names that mod. Dependencies nothing
+    /// needs any more are removed.
+    ///
+    /// Use this rather than `ephervex mod install` for a mod that is already
+    /// there: installing never moves an installed mod. Linked servers are not
+    /// changed. A running server picks the change up on its next start.
+    SetVersion {
+        #[command(flatten)]
+        host: HostArgs,
+        /// The mod, by its path inside the game directory such as
+        /// `mods/foo.jar`, by its project id, or by its slug.
+        #[arg(value_name = "MOD")]
+        target: String,
+        /// The release to move to, by its version id in the mod's catalog.
+        ///
+        /// Preserved exactly. If it does not fit the instance or server, the
+        /// change is refused rather than moved to a nearby release.
+        #[arg(value_name = "VERSION", required_unless_present = "newest")]
+        version: Option<String>,
+        /// Move to the newest release that fits, instead of naming one.
+        #[arg(long, conflicts_with = "version")]
+        newest: bool,
+        /// Show what would change, without changing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Let a jar already in the mods folder stand in for the dependency
+        /// with this project id, when that jar provides the same mod.
+        ///
+        /// Repeatable. The dependency is still downloaded and checked, and is
+        /// left out only if one jar already there declares every mod id it
+        /// does. Without it, a dependency that another jar already provides is
+        /// refused, because the game does not start with two copies of one mod.
+        #[arg(long = "use-installed", value_name = "PROJECT")]
+        use_installed: Vec<String>,
     },
     /// Show or set which catalog mod commands use when none is named.
     ///
@@ -5255,6 +5298,7 @@ async fn run_mod_command(app: &mut App, command: &ModCommand, json: bool) -> any
             selection,
             consent,
         } => return run_mod_install(app, host.host()?, project, selection, consent, json).await,
+        ModCommand::SetVersion { .. } => return run_mod_set_version(app, command, json).await,
         ModCommand::Catalog { catalog, clear } => {
             run_mod_catalog(app, *catalog, *clear, json)?;
         }
@@ -6086,6 +6130,275 @@ async fn run_mod_install(
     Ok(())
 }
 
+/// Moves one installed mod to another release, or shows what that would do.
+async fn run_mod_set_version(app: &App, command: &ModCommand, json: bool) -> anyhow::Result<()> {
+    let ModCommand::SetVersion {
+        host,
+        target: reference,
+        version,
+        newest: _,
+        dry_run,
+        use_installed,
+    } = command
+    else {
+        return Err(anyhow::anyhow!("not a version change"));
+    };
+    let host = host.host()?;
+    let choice = &version
+        .clone()
+        .map_or(ModVersionChoice::NewestCompatible, ModVersionChoice::Exact);
+    let target = mod_to_change(app, host, reference).await?;
+    let cancel = CancellationToken::new();
+    if *dry_run {
+        let reporter = OperationReporter::silent("planning-mod-change");
+        let plan = app
+            .plan_mod_version_change(host, &target, choice, &reporter, &cancel)
+            .await?;
+        print_mod_change(&plan, None, json);
+        return Ok(());
+    }
+    let reporter = OperationReporter::silent("changing-mod-version");
+    let stand_ins: std::collections::BTreeSet<String> = use_installed.iter().cloned().collect();
+    let mutation = match app
+        .change_managed_mod_version_using_installed(
+            host, &target, choice, &stand_ins, &reporter, &cancel,
+        )
+        .await
+    {
+        Err(CoreError::ModDependencyAlreadyProvided {
+            dependency,
+            project_id,
+            path,
+            ..
+        }) => return Err(dependency_already_provided(&dependency, &project_id, &path)),
+        mutation => mutation?,
+    };
+    print_mod_change(&mutation.plan, Some(&mutation), json);
+    Ok(())
+}
+
+/// The recorded mod a reference names: its path inside the game directory,
+/// its project id, or a slug the catalog it came from knows.
+///
+/// A slug is asked of each catalog the host's mods come from, and only when
+/// nothing recorded matches the reference as it is.
+async fn mod_to_change(app: &App, host: InstalledHost, reference: &str) -> anyhow::Result<PathBuf> {
+    let snapshot = app.host_mod_snapshot(host)?;
+    if let Some(entry) = snapshot
+        .mods
+        .iter()
+        .find(|entry| entry.logical_path == Path::new(reference))
+    {
+        return Ok(entry.logical_path.clone());
+    }
+    let recorded = |provider: Option<ModProvider>, project: &str| -> Vec<PathBuf> {
+        snapshot
+            .mods
+            .iter()
+            .filter(|entry| {
+                entry.identity.project_id() == Some(project)
+                    && provider.is_none_or(|provider| entry.identity.provider() == Some(provider))
+            })
+            .map(|entry| entry.logical_path.clone())
+            .collect()
+    };
+    let mut found = recorded(None, reference);
+    let mut failure = None;
+    let mut answered = false;
+    if found.is_empty() {
+        let providers: std::collections::BTreeSet<ModProvider> = snapshot
+            .mods
+            .iter()
+            .filter_map(|entry| entry.identity.provider())
+            .collect();
+        for provider in providers {
+            match app.mod_project(host, provider, reference, false).await {
+                Ok(details) => {
+                    answered = true;
+                    found.extend(recorded(Some(provider), &details.project.id));
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+    }
+    match found.as_slice() {
+        [path] => Ok(path.clone()),
+        // A catalog that knew the slug settles it: the mod is not installed.
+        [] => Err(match failure.filter(|_| !answered) {
+            Some(error) => error.into(),
+            None => message_failure(
+                "mod-set-version-not-found",
+                &[
+                    ("mod", MessageArg::from(reference)),
+                    ("host", MessageArg::from(host.id())),
+                ],
+            ),
+        }),
+        paths => Err(message_failure(
+            "mod-set-version-ambiguous",
+            &[
+                ("mod", MessageArg::from(reference)),
+                (
+                    "paths",
+                    MessageArg::from(
+                        paths
+                            .iter()
+                            .map(|path| path.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                ),
+            ],
+        )),
+    }
+}
+
+/// A failure whose message and next step are one localized message and its
+/// `action` attribute.
+fn message_failure(message_id: &str, args: &[(&str, MessageArg)]) -> anyhow::Error {
+    let next = ephervex_i18n::lookup_attribute_args(message_id, "action", args.iter().cloned())
+        .unwrap_or_default();
+    anyhow::anyhow!(next).context(ephervex_i18n::lookup_args(message_id, args.iter().cloned()))
+}
+
+/// Shows a version change: what it would do, or what it did when `applied`
+/// is given.
+fn print_mod_change(plan: &ModMutationPlan, applied: Option<&ModMutation>, json: bool) {
+    let stood_in = applied.map_or(&[][..], |mutation| mutation.report.stood_in.as_slice());
+    if json {
+        print_json(&mod_change_json(plan, stood_in, applied.is_some()));
+        return;
+    }
+    for line in mod_change_lines(plan, stood_in, applied.is_some()) {
+        outln!("{line}");
+    }
+    for warning in &plan.warnings {
+        eprintln!("{}", warning_text(warning));
+    }
+}
+
+/// The mods a version change writes besides the one being changed.
+fn other_installs(plan: &ModMutationPlan) -> impl Iterator<Item = &PlannedFile> {
+    plan.installs
+        .iter()
+        .filter(|file| file.logical_path != plan.target)
+}
+
+/// The JSON a version change reports, carrying the same warnings text mode
+/// prints to stderr.
+fn mod_change_json(
+    plan: &ModMutationPlan,
+    stood_in: &[ephervex_core::InstalledStandIn],
+    applied: bool,
+) -> serde_json::Value {
+    let file = |file: &PlannedFile| {
+        serde_json::json!({
+            "path": json_path(&file.logical_path),
+            "name": file.name,
+            "project_id": file.project_id,
+            "version_id": file.version_id,
+            "replaces_version_id": file.replaces_version_id,
+            "origin": file.origin.as_str(),
+        })
+    };
+    let (from, to) = match &plan.outcome {
+        PlannedOutcome::ChangeVersion { from, to } => (Some(from), Some(to)),
+        _ => (None, plan.candidate_version.as_ref()),
+    };
+    serde_json::json!({
+        "host": plan.host.id(),
+        "host_kind": plan.host.kind(),
+        "path": json_path(&plan.target),
+        "name": plan.name,
+        "provider": plan.provider.map(ModProvider::as_str),
+        "project_id": plan.project_id,
+        "outcome": plan.outcome.as_str(),
+        "from": from,
+        "to": to,
+        "applied": applied,
+        "installs": other_installs(plan).map(file).collect::<Vec<_>>(),
+        "removes": plan.collected_dependencies().map(file).collect::<Vec<_>>(),
+        "dependencies_unprovable": plan.orphans_unprovable,
+        "stood_in": stood_in.iter().map(|stand_in| serde_json::json!({
+            "planned": json_path(&stand_in.planned),
+            "installed": json_path(&stand_in.installed),
+            "mod_ids": stand_in.mod_ids,
+        })).collect::<Vec<_>>(),
+        "warnings": warnings_json(&plan.warnings),
+    })
+}
+
+/// What a version change did or would do, one line each.
+fn mod_change_lines(
+    plan: &ModMutationPlan,
+    stood_in: &[ephervex_core::InstalledStandIn],
+    applied: bool,
+) -> Vec<String> {
+    let to = plan.candidate_version.as_deref().unwrap_or_default();
+    let (message_id, from) = match (&plan.outcome, applied) {
+        (PlannedOutcome::ChangeVersion { from, .. }, true) => {
+            ("mod-set-version-changed", from.as_str())
+        }
+        (PlannedOutcome::ChangeVersion { from, .. }, false) => {
+            ("mod-set-version-would-change", from.as_str())
+        }
+        (PlannedOutcome::Repair, true) => ("mod-set-version-repaired", to),
+        (PlannedOutcome::Repair, false) => ("mod-set-version-would-repair", to),
+        _ => ("mod-set-version-current", to),
+    };
+    let mut lines = vec![ephervex_i18n::lookup_args(
+        message_id,
+        [
+            ("name", MessageArg::from(plan.name.as_str())),
+            ("from", MessageArg::from(from)),
+            ("to", MessageArg::from(to)),
+        ],
+    )];
+    lines.extend(other_installs(plan).map(|file| {
+        let name = MessageArg::from(file.name.as_str());
+        let version = MessageArg::from(file.version_id.as_deref().unwrap_or_default());
+        let line = match &file.replaces_version_id {
+            Some(previous) => ephervex_i18n::lookup_args(
+                "mod-set-version-moves",
+                [
+                    ("name", name),
+                    ("from", MessageArg::from(previous.as_str())),
+                    ("to", version),
+                ],
+            ),
+            None => ephervex_i18n::lookup_args(
+                "mod-set-version-installs",
+                [("name", name), ("version", version)],
+            ),
+        };
+        format!("  {line}")
+    }));
+    lines.extend(plan.collected_dependencies().map(|file| {
+        let line = ephervex_i18n::lookup_args(
+            "mod-set-version-removes",
+            [("name", MessageArg::from(file.name.as_str()))],
+        );
+        format!("  {line}")
+    }));
+    if plan.orphans_unprovable {
+        lines.push(format!(
+            "  {}",
+            ephervex_i18n::lookup("mod-set-version-dependencies-kept")
+        ));
+    }
+    lines.extend(stood_in.iter().map(|stand_in| {
+        ephervex_i18n::lookup_args(
+            "mod-install-stood-in",
+            [
+                ("planned", MessageArg::from(stand_in.planned.as_path())),
+                ("installed", MessageArg::from(stand_in.installed.as_path())),
+                ("mod_ids", MessageArg::from(stand_in.mod_ids.join(", "))),
+            ],
+        )
+    }));
+    lines
+}
+
 /// The projects with no stated server side a server install confirms, or the
 /// refusal naming the ones it would need confirmed.
 ///
@@ -6772,6 +7085,20 @@ fn warning_text(warning: &PlanWarning) -> String {
             [
                 ("declared_by", MessageArg::from(declared_by.as_str())),
                 ("file_name", MessageArg::from(file_name.as_str())),
+            ],
+        ),
+        PlanWarning::PinNotFollowed {
+            project_id,
+            pinned_version,
+            pinned_by,
+            used_version,
+        } => ephervex_i18n::lookup_args(
+            warning.message_id(),
+            [
+                ("project", MessageArg::from(project_id.as_str())),
+                ("pinned", MessageArg::from(pinned_version.as_str())),
+                ("pinned_by", MessageArg::from(pinned_by.join(", "))),
+                ("used", MessageArg::from(used_version.as_str())),
             ],
         ),
     }
@@ -12368,6 +12695,153 @@ mod tests {
             panic!("expected mod install");
         };
         assert_eq!(consent.use_installed, ["LIBX", "LIBY"]);
+    }
+
+    #[test]
+    fn a_version_change_takes_one_host_and_an_exact_release_or_the_newest() {
+        let exact = Cli::try_parse_from([
+            "ephervex",
+            "mod",
+            "set-version",
+            "--instance",
+            INSTANCE_ID,
+            "libx",
+            "74agt1cB",
+        ])
+        .expect("an exact release");
+        let Command::Mod {
+            command:
+                ModCommand::SetVersion {
+                    host,
+                    target,
+                    version,
+                    newest,
+                    ..
+                },
+        } = exact.command
+        else {
+            panic!("expected mod set-version");
+        };
+        assert!(matches!(host.host(), Ok(InstalledHost::Instance(_))));
+        assert_eq!(target, "libx");
+        assert_eq!(version.as_deref(), Some("74agt1cB"));
+        assert!(!newest);
+
+        let newest = Cli::try_parse_from([
+            "ephervex",
+            "mod",
+            "set-version",
+            "--server",
+            SERVER_ID,
+            "--newest",
+            "mods/libx.jar",
+        ])
+        .expect("the newest release");
+        assert!(matches!(
+            newest.command,
+            Command::Mod {
+                command: ModCommand::SetVersion {
+                    version: None,
+                    newest: true,
+                    ..
+                }
+            }
+        ));
+
+        for arguments in [
+            &["--instance", INSTANCE_ID, "libx"][..],
+            &["--instance", INSTANCE_ID, "--newest", "libx", "74agt1cB"][..],
+            &["libx", "74agt1cB"][..],
+        ] {
+            let mut full = vec!["ephervex", "mod", "set-version"];
+            full.extend_from_slice(arguments);
+            assert!(Cli::try_parse_from(&full).is_err(), "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn the_refusal_to_move_an_installed_mod_names_a_command_that_exists() {
+        let action = ephervex_i18n::lookup_attribute_args(
+            "error-mod-already-installed",
+            "action",
+            [
+                ("project", MessageArg::from("qEH6GYul")),
+                ("provider", MessageArg::from("Modrinth")),
+                ("installed", MessageArg::from("74agt1cB")),
+                ("requested", MessageArg::from("Rw7rEJk3")),
+            ],
+        )
+        .expect("an action");
+        assert!(action.contains("ephervex mod set-version"), "{action}");
+        Cli::try_parse_from([
+            "ephervex",
+            "mod",
+            "set-version",
+            "--instance",
+            INSTANCE_ID,
+            "qEH6GYul",
+            "Rw7rEJk3",
+        ])
+        .expect("the command the refusal names");
+    }
+
+    #[test]
+    fn a_version_change_reports_the_move_and_the_mod_that_lists_another_release() {
+        let plan = ModMutationPlan {
+            host: InstalledHost::Instance(INSTANCE_ID.parse().expect("an instance id")),
+            target: PathBuf::from("mods/libx-1.18.2-3.2.18.jar"),
+            name: "LibX".to_owned(),
+            provider: Some(ModProvider::Modrinth),
+            project_id: Some("qEH6GYul".to_owned()),
+            candidate_version: Some("74agt1cB".to_owned()),
+            outcome: PlannedOutcome::ChangeVersion {
+                from: "Rw7rEJk3".to_owned(),
+                to: "74agt1cB".to_owned(),
+            },
+            installs: Vec::new(),
+            removes: Vec::new(),
+            orphans_unprovable: false,
+            warnings: vec![PlanWarning::PinNotFollowed {
+                project_id: "qEH6GYul".to_owned(),
+                pinned_version: "Rw7rEJk3".to_owned(),
+                pinned_by: vec!["Utilitix".to_owned()],
+                used_version: "74agt1cB".to_owned(),
+            }],
+        };
+
+        let lines = mod_change_lines(&plan, &[], true);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        for part in ["LibX", "Rw7rEJk3", "74agt1cB"] {
+            assert!(lines[0].contains(part), "{part} is missing from {lines:?}");
+        }
+
+        let json = mod_change_json(&plan, &[], false);
+        assert_eq!(json["outcome"], "change-version");
+        assert_eq!(json["from"], "Rw7rEJk3");
+        assert_eq!(json["to"], "74agt1cB");
+        assert_eq!(json["applied"], false);
+        let warnings = json["warnings"].as_array().expect("warnings");
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0]
+                .as_str()
+                .is_some_and(|text| text.contains("Utilitix")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn a_pin_warning_names_the_mod_that_lists_a_release_and_the_release_used() {
+        let text = warning_text(&PlanWarning::PinNotFollowed {
+            project_id: "qEH6GYul".to_owned(),
+            pinned_version: "Rw7rEJk3".to_owned(),
+            pinned_by: vec!["Utilitix".to_owned()],
+            used_version: "74agt1cB".to_owned(),
+        });
+
+        for part in ["qEH6GYul", "Rw7rEJk3", "Utilitix", "74agt1cB"] {
+            assert!(text.contains(part), "{part} is missing from {text}");
+        }
     }
 
     #[test]
