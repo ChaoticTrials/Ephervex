@@ -2,6 +2,7 @@
 
 import { ListView, ScrollView } from "std-widgets.slint";
 import { ModArtwork } from "../components/artwork.slint";
+import { ContextTouchArea, PopupMenu } from "../components/menus.slint";
 import { AppButton, EmptyState, IconButton, Pill, TextField, Toggle } from "../components/controls.slint";
 import { BodyText, Heading } from "../components/text.slint";
 import { GuiI18n } from "../globals.slint";
@@ -215,9 +216,18 @@ export component ModCard inherits Rectangle {
     // says.
     property <bool> bin-removes: root.item.can-remove && root.mods-are-the-users;
     callback manage(string);
-    callback toggle(string, bool);
-    callback delete-file(string, string);
+    // The last flag asks to change only this mod, leaving the mods that need
+    // it, or that it needs, as they are: Shift held, or the menu's own entry.
+    callback toggle(string, bool, bool);
+    callback delete-file(string, string, bool);
     callback restore-file(string);
+    // The menu offers the narrow form of each action the row shows.
+    property <bool> menu-has-entries: root.shows-toggle || (root.shows-bin && root.item.can-delete-file);
+    function open-menu(x: length, y: length) {
+        if (root.menu-has-entries) {
+            menu.show-at-window(x, y);
+        }
+    }
     // A narrow pane drops the version and the chips as columns: the version
     // joins the line under the name, so the switch and the bin stay in reach.
     // Decided by the pane, not by this row's own width, which the columns
@@ -247,10 +257,27 @@ export component ModCard inherits Rectangle {
     changed asked => { root.relay(); }
     height: Theme.mod-row-height;
     background: root.item.suspect-confidence == "high" ? Theme.danger.with-alpha(0.12) : root.item.suspect-confidence != "" ? Theme.warning.with-alpha(0.12) : touch.has-hover && root.item.can-manage ? Theme.elevated : transparent;
-    touch := TouchArea {
-        enabled: root.item.can-manage;
-        mouse-cursor: pointer;
-        clicked => { root.manage(root.item.logical-path); }
+    touch := ContextTouchArea {
+        mouse-cursor: root.item.can-manage ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { if (root.item.can-manage) { root.manage(root.item.logical-path); } }
+        context-requested(x, y) => { root.open-menu(x, y); }
+    }
+    // The repeater hands this card another row when the list changes in
+    // place, and an open menu would then act on that row.
+    property <string> menu-owner: root.item.logical-path;
+    changed menu-owner => { menu.close(); }
+    menu := PopupMenu {
+        entries: [
+            { id: "toggle-alone", label: root.item.enabled ? GuiI18n.text("gui-mod-turn-off-alone") : GuiI18n.text("gui-mod-turn-on-alone"), hidden: !root.shows-toggle },
+            { id: "delete-alone", label: GuiI18n.text("gui-mod-delete-alone"), hidden: !(root.shows-bin && root.item.can-delete-file) },
+        ];
+        activated(id) => {
+            if (id == "toggle-alone") {
+                root.toggle(root.item.logical-path, !root.item.enabled, true);
+            } else if (id == "delete-alone") {
+                root.delete-file(root.item.logical-path, root.item.title, true);
+            }
+        }
     }
     HorizontalLayout {
         padding-left: 14px; padding-right: 14px; spacing: 12px;
@@ -346,7 +373,14 @@ export component ModCard inherits Rectangle {
                     focus-requested => { loads.focus-control(); root.focus-taken(); }
                     entered => { root.focus-entered(); }
                     reused => { loads.clear-keyboard-focus(); }
-                    loads := Toggle { checked: root.item.enabled; sets-its-own-position: false; accessible-name: GuiI18n.value("gui-mod-loads", root.item.title); toggled(on) => { root.toggle(root.item.logical-path, on); } }
+                    loads := Toggle {
+                        checked: root.item.enabled;
+                        sets-its-own-position: false;
+                        accessible-name: GuiI18n.value("gui-mod-loads", root.item.title);
+                        tooltip: GuiI18n.text("gui-mod-switch-alone-tooltip");
+                        toggled(on) => { root.toggle(root.item.logical-path, on, loads.with-shift); }
+                        context-requested(x, y) => { root.open-menu(x, y); }
+                    }
                 }
             }
             if root.shows-bin : VerticalLayout {
@@ -364,7 +398,11 @@ export component ModCard inherits Rectangle {
                     bin := IconButton {
                         icon: @image-url("../../../../assets/icons/trash.svg");
                         accessible-name: GuiI18n.value(root.item.can-delete-file && !root.bin-removes ? "gui-delete-mod" : "gui-remove-mod", root.item.title);
-                        clicked => { root.delete-file(root.item.logical-path, root.item.title); }
+                        tooltip: root.item.can-delete-file ? self.accessible-name + "\n" + GuiI18n.text("gui-mod-bin-alone-tooltip") : self.accessible-name;
+                        // Shift deletes only this jar, which every row with a
+                        // file allows, even where the bin otherwise removes.
+                        clicked => { root.delete-file(root.item.logical-path, root.item.title, bin.with-shift && root.item.can-delete-file); }
+                        context-requested(x, y) => { root.open-menu(x, y); }
                     }
                 }
             }
@@ -392,10 +430,10 @@ export component ManagedModsPanel inherits Rectangle {
     callback add-jars();
     callback refresh();
     callback manage(string);
-    callback toggle(string, bool);
+    callback toggle(string, bool, bool);
     callback restore-file(string);
     // The row, its path, and its title, for the confirmation the bin opens.
-    callback delete-file(ModRow, string, string);
+    callback delete-file(ModRow, string, string, bool);
     VerticalLayout {
         spacing: 12px;
         alignment: start;
@@ -486,9 +524,9 @@ export component ManagedModsPanel inherits Rectangle {
                             focus-taken => { mod-card.focus-request = -1; }
                             focus-entered => { mod-card.bring-into-view(index); }
                             manage(path) => { root.manage(path); }
-                            toggle(path, on) => { root.toggle(path, on); }
+                            toggle(path, on, alone) => { root.toggle(path, on, alone); }
                             restore-file(path) => { root.restore-file(path); }
-                            delete-file(path, title) => { root.delete-file(mod, path, title); }
+                            delete-file(path, title, alone) => { root.delete-file(mod, path, title, alone); }
                         }
                         if index > 0 : Rectangle { y: 0; height: Theme.chip-border-width; background: Theme.border-strong.with-alpha(0.25); }
                     }

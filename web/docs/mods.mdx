@@ -233,7 +233,15 @@ dialog names affected mods and can apply the dependent changes together.
 **Do not ask again** remembers your answer: if the other mods are changed too,
 later changes include them without asking; if they are left alone, later
 switches change only their own mod. Both choices are in **Settings**, under
-**Mod changes**. Use
+**Mod changes**.
+
+To change exactly one mod whatever those settings say, hold **Shift** while
+you click its switch or its delete action, or right-click the mod and choose
+**Turn Off Only This Mod**, **Turn On Only This Mod**, or **Delete Only This
+JAR...**. The mods that need it, or that it needs, stay as they are, and a
+message says how many. Use this to test a dependent against a replacement
+library, such as a locally built one. **Diagnostics** then lists each mod
+whose requirement is turned off. Use
 the card's delete action to put a recorded JAR aside; its row then offers
 **Restore**. This applies while **Independent mod changes** is off, as it is
 for an imported pack or a server built from a pack or server files. When it is

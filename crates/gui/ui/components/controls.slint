@@ -169,9 +169,12 @@ export component FocusRing inherits Rectangle {
 // focused.
 export component KeyboardFocus inherits FocusScope {
     in property <length> ring-radius: 6px;
+    // Whether Shift was held for the key that last activated this control.
+    out property <bool> shift;
     callback activated();
     key-pressed(event) => {
         if (event.text == " " || event.text == Key.Return) {
+            root.shift = event.modifiers.shift;
             // A held key is swallowed, not repeated: one press is one action.
             // A control keeps focus when it turns disabled, so the flag is
             // read again here rather than trusted from when focus arrived.
@@ -377,6 +380,9 @@ export component IconButton inherits Rectangle {
     // Why this button cannot be pressed, shown on hover while it is
     // disabled.
     in property <string> hint;
+    // Whether Shift was held for the press `clicked` reports. False for an
+    // activation from assistive technology, which has no modifier.
+    out property <bool> with-shift;
     callback clicked();
     // A press of the secondary button over the control, in window coordinates,
     // for a card that offers its menu wherever it is pressed.
@@ -390,7 +396,7 @@ export component IconButton inherits Rectangle {
     accessible-label: accessible-name;
     accessible-description: !root.enabled ? root.hint : "";
     accessible-enabled: enabled;
-    accessible-action-default => { if root.enabled { root.clicked(); } }
+    accessible-action-default => { if root.enabled { root.with-shift = false; root.clicked(); } }
     // Filled with the main action's color under the pointer.
     Plate {
         width: root.width;
@@ -419,7 +425,7 @@ export component IconButton inherits Rectangle {
             vertical-alignment: center;
         }
     }
-    keys := KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.clicked(); } }
+    keys := KeyboardFocus { width: root.width; height: root.height; enabled: root.enabled; ring-radius: Theme.small-radius; activated => { root.with-shift = keys.shift; root.clicked(); } }
     // For a virtualized list that has to track and move focus itself.
     out property <bool> has-keyboard-focus: keys.has-focus;
     public function focus-control() { keys.focus(); }
@@ -428,7 +434,7 @@ export component IconButton inherits Rectangle {
     // explain itself. The press is gated on `enabled` instead.
     area := ContextTouchArea {
         mouse-cursor: root.enabled ? MouseCursor.default : MouseCursor.not-allowed;
-        clicked => { if root.enabled { root.clicked(); } }
+        clicked => { if root.enabled { root.with-shift = area.shift-pressed; root.clicked(); } }
         context-requested(x, y) => { root.context-requested(x, y); }
     }
     HoverNote { text: root.hover-note; hovered: area.has-hover; pointer-x: area.mouse-x; pointer-y: area.mouse-y; }
@@ -616,6 +622,8 @@ export component Toggle inherits Rectangle {
     in-out property <bool> checked;
     in property <bool> enabled: true;
     in property <string> accessible-name;
+    // What hover says about the switch beyond its name; empty for none.
+    in property <string> tooltip;
     // Whether clicking this switch *is* the change, or only asks for it.
     //
     // A settings switch decides its own position: the click is the change.
@@ -628,7 +636,12 @@ export component Toggle inherits Rectangle {
     // repeater reuses elements, so the row would go on reporting a click
     // from minutes ago no matter what the list said.
     in property <bool> sets-its-own-position: true;
+    // Whether Shift was held for the press `toggled` reports. False for an
+    // activation from assistive technology, which has no modifier.
+    out property <bool> with-shift;
     callback toggled(bool);
+    // A press of the secondary button over the switch, in window coordinates.
+    callback context-requested(x: length, y: length);
     private property <float> visible-strength: root.enabled ? 1 : Theme.disabled-opacity;
     width: 42px;
     height: 24px;
@@ -637,7 +650,7 @@ export component Toggle inherits Rectangle {
     accessible-checked: checked;
     accessible-enabled: enabled;
     accessible-label: accessible-name;
-    accessible-action-default => { if root.enabled { root.request(); } }
+    accessible-action-default => { if root.enabled { root.with-shift = false; root.request(); } }
     // Disabled colors mix toward the card color, not `opacity`, which renderers
     // apply per piece or per group.
     Outlined {
@@ -656,16 +669,18 @@ export component Toggle inherits Rectangle {
             animate x { duration: 100ms; }
         }
     }
-    keys := KeyboardFocus { width: root.width; height: root.height; ring-radius: root.height / 2; enabled: root.enabled; activated => { root.request(); } }
+    keys := KeyboardFocus { width: root.width; height: root.height; ring-radius: root.height / 2; enabled: root.enabled; activated => { root.with-shift = keys.shift; root.request(); } }
     // For a virtualized list that has to track and move focus itself.
     out property <bool> has-keyboard-focus: keys.has-focus;
     public function focus-control() { keys.focus(); }
     public function clear-keyboard-focus() { keys.clear-focus(); }
-    TouchArea {
+    toggle-area := ContextTouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.not-allowed;
-        clicked => { root.request(); }
+        clicked => { root.with-shift = toggle-area.shift-pressed; root.request(); }
+        context-requested(x, y) => { root.context-requested(x, y); }
     }
+    HoverNote { text: root.tooltip; hovered: toggle-area.has-hover; pointer-x: toggle-area.mouse-x; pointer-y: toggle-area.mouse-y; }
     function request() {
         if root.sets-its-own-position {
             root.checked = !root.checked;

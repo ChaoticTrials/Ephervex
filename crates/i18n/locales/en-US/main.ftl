@@ -3313,6 +3313,19 @@ gui-mod-enabled-with-dependencies = { $count ->
     [one] Turned on one mod it needs as well.
    *[other] Turned on { $count } mods it needs as well.
 }
+gui-mod-disabled-alone = { $count ->
+    [one] Turned off only { $value }. One mod that requires it is still on.
+   *[other] Turned off only { $value }. { $count } mods that require it are still on.
+}
+gui-mod-enabled-alone = { $count ->
+    [one] Turned on only { $value }. One mod it needs is still off.
+   *[other] Turned on only { $value }. { $count } mods it needs are still off.
+}
+gui-mod-turn-off-alone = Turn Off Only This Mod
+gui-mod-turn-on-alone = Turn On Only This Mod
+gui-mod-delete-alone = Delete Only This JAR...
+gui-mod-switch-alone-tooltip = Shift+click changes only this mod and leaves the mods that need it, or that it needs, as they are. The right-click menu offers the same.
+gui-mod-bin-alone-tooltip = Shift+click deletes only this JAR and leaves the mods that need it as they are.
 gui-mod-requires = Requires
 gui-mod-required-by = Required by
 gui-mod-requires-nothing = Its catalog says it needs nothing else.
@@ -3343,6 +3356,11 @@ gui-mod-deleted-with-dependents = { $count ->
     [one] Deleted { $value } and one mod that required it.
    *[other] Deleted { $value } and { $count } mods that required it.
 }
+gui-mod-deleted-alone = { $count ->
+    [one] Deleted only { $value }. One mod that requires it is still installed.
+   *[other] Deleted only { $value }. { $count } mods that require it are still installed.
+}
+gui-delete-mod-alone-note = Only this JAR is deleted. Mods that need it stay as they are.
 gui-modal-mod-clash = Name Already Taken
 gui-mod-clash-detail = The mods folder already has a file called { $value }.
 gui-mod-clash-disabled = The one already there is turned off. Replacing it turns the mod back on.
@@ -3384,7 +3402,7 @@ gui-provider-detail = Provider configuration remains scoped. Stored secrets are 
 gui-mod-changes = Mod changes
 gui-mod-changes-detail = What a mod's switch does to the mods that need it.
 gui-follow-dependencies = Change the mods that need it too
-gui-follow-dependencies-detail = Turning a mod off takes the mods that require it with it, and turning one on brings back what it needs. Off, every switch changes only the mod it belongs to. What each mod requires stays recorded either way.
+gui-follow-dependencies-detail = Turning a mod off takes the mods that require it with it, and turning one on brings back what it needs. Off, every switch changes only the mod it belongs to. Shift+click, or a mod's right-click menu, always changes only that mod. What each mod requires stays recorded either way.
 gui-dependency-warning-unused = Nothing else is being changed, so there is nothing to confirm.
 gui-dependency-warning = Ask before changing other mods
 gui-dependency-warning-detail = Say what else a change affects and wait for an answer. Off, the change is made and reported in a message afterwards.

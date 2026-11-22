@@ -53,6 +53,7 @@ mod minecraft_default_rows_split_columns;
 mod minecraft_default_slider;
 mod mod_bin_action;
 mod mod_browser_row;
+mod mod_change_alone;
 mod mod_dependency_impact;
 mod mod_isolation_workflow;
 mod mod_relations_panel;

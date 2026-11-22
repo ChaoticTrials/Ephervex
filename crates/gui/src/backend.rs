@@ -669,6 +669,9 @@ pub enum Command {
         host: InstalledHost,
         path: PathBuf,
         enabled: bool,
+        /// Change only this mod, whatever the dependency settings say, and
+        /// report what a cascade would have changed instead.
+        alone: bool,
     },
     /// Stop asking before a mod change that affects other mods.
     ///
@@ -724,6 +727,8 @@ pub enum Command {
         host: InstalledHost,
         path: PathBuf,
         name: String,
+        /// Delete only this jar, whatever the dependency settings say.
+        alone: bool,
     },
     /// Work out what dropping these files into a host's mods folder would do.
     ///
@@ -6092,12 +6097,17 @@ fn run_worker(
                 host,
                 path,
                 enabled,
+                alone,
             } => {
                 if refuse_mod_change_while_changing(&app, &changing, host, &events, &refreshed_mods)
                 {
                     continue;
                 }
-                set_mod_enabled(&app, host, &path, enabled, &events, &refreshed_mods);
+                if alone {
+                    set_only_this_mod_enabled(&app, host, &path, enabled, &events, &refreshed_mods);
+                } else {
+                    set_mod_enabled(&app, host, &path, enabled, &events, &refreshed_mods);
+                }
             }
             Command::SaveDependencyWarning(warn) => {
                 if let Err(error) = app.set_warn_on_dependency_impact(warn) {
@@ -6214,7 +6224,12 @@ fn run_worker(
                     }
                 }
             }
-            Command::QueryDeleteImpact { host, path, name } => {
+            Command::QueryDeleteImpact {
+                host,
+                path,
+                name,
+                alone,
+            } => {
                 if let Some(refusal) = change_in_flight(&changing, host) {
                     let _ = events.send(Event::ModalError {
                         scope: ModalScope::DELETE_MOD,
@@ -6222,7 +6237,14 @@ fn run_worker(
                     });
                     continue;
                 }
-                delete_mod(&app, host, &path, name, &events, &refreshed_mods);
+                delete_mod(
+                    &app,
+                    host,
+                    &path,
+                    ModDeletion { name, alone },
+                    &events,
+                    &refreshed_mods,
+                );
             }
             Command::OpenLiveLog { source, generation } => {
                 open_live_log(
@@ -14451,6 +14473,70 @@ const fn host_kind(host: InstalledHost) -> &'static str {
     }
 }
 
+/// The mods a cascade would have changed along with `path`, which a change of
+/// only that mod leaves as they are, and the mod's own name.
+///
+/// Asked only to report it, so a relation that cannot be read reports nothing
+/// rather than stopping the change.
+fn left_alone(app: &App, host: InstalledHost, path: &Path, enabled: bool) -> (String, usize) {
+    if enabled {
+        app.dependencies_of(host, path).map_or_else(
+            |_| (String::new(), 0),
+            |needs| {
+                let view = ModRequirementPresentation::new(host_kind(host), &host.id(), &needs);
+                (view.name, view.disabled.len())
+            },
+        )
+    } else {
+        app.dependents_of(host, path).map_or_else(
+            |_| (String::new(), 0),
+            |impact| {
+                let view = ModImpactPresentation::new(host_kind(host), &host.id(), false, &impact);
+                (view.name, view.breaks.len())
+            },
+        )
+    }
+}
+
+/// Turns one mod on or off and nothing else, whatever the dependency settings
+/// say, then says how many mods that need it, or that it needs, stayed as
+/// they were.
+fn set_only_this_mod_enabled(
+    app: &App,
+    host: InstalledHost,
+    path: &Path,
+    enabled: bool,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
+    let (name, left) = left_alone(app, host, path, enabled);
+    match app.set_mods_enabled(host, &[(path.to_path_buf(), enabled)]) {
+        Ok(_) => {
+            if left > 0 {
+                let _ = events.send(Event::Toast {
+                    message: lookup_args(
+                        if enabled {
+                            "gui-mod-enabled-alone"
+                        } else {
+                            "gui-mod-disabled-alone"
+                        },
+                        [
+                            ("value", Arg::from(name)),
+                            ("count", Arg::from(i64::try_from(left).unwrap_or(0))),
+                        ],
+                    ),
+                    error: false,
+                });
+            }
+            send_host_mods(app, host, events, refreshed, false);
+        }
+        Err(error) => {
+            send_error(events, &error);
+            send_host_mods(app, host, events, refreshed, false);
+        }
+    }
+}
+
 /// Turns one mod on or off, asking first what else the change affects.
 ///
 /// Which of the outcomes happens is decided here rather than in the markup.
@@ -14552,6 +14638,15 @@ fn set_mod_enabled(
     }
 }
 
+/// What the delete dialog asked for, beside the jar it names.
+struct ModDeletion {
+    /// The row's own label, which carries a provider title the durable read
+    /// does not have.
+    name: String,
+    /// Delete only this jar, whatever the dependency settings say.
+    alone: bool,
+}
+
 /// Takes one mod's jar off disk, asking first what else that takes with it.
 ///
 /// The same three outcomes a disable has, decided the same way, because the
@@ -14565,10 +14660,24 @@ fn delete_mod(
     app: &App,
     host: InstalledHost,
     path: &Path,
-    name: String,
+    deletion: ModDeletion,
     events: &Sender<Event>,
     refreshed: &RefreshedHosts,
 ) {
+    let ModDeletion { name, alone } = deletion;
+    if alone {
+        let (_, left) = left_alone(app, host, path, false);
+        delete_mod_files_reporting(
+            app,
+            host,
+            path,
+            &[path.to_path_buf()],
+            Taken::LeftAlone(left),
+            events,
+            refreshed,
+        );
+        return;
+    }
     let policy = app.dependency_policy();
     let view = if policy.cascades() {
         let mut impact = match app.dependents_of(host, path) {
@@ -14599,24 +14708,61 @@ fn delete_mod(
     } else {
         vec![path.to_path_buf()]
     };
-    match app.delete_mod_files(host, &paths) {
+    delete_mod_files_reporting(
+        app,
+        host,
+        path,
+        &paths,
+        Taken::Along(taken),
+        events,
+        refreshed,
+    );
+}
+
+/// What a deletion did to the mods that need the jar it names.
+#[derive(Clone, Copy)]
+enum Taken {
+    /// This many went with it.
+    Along(usize),
+    /// This many stayed, although they need it.
+    LeftAlone(usize),
+}
+
+/// Deletes `paths` and says so, naming `path` as the jar asked about.
+fn delete_mod_files_reporting(
+    app: &App,
+    host: InstalledHost,
+    path: &Path,
+    paths: &[PathBuf],
+    taken: Taken,
+    events: &Sender<Event>,
+    refreshed: &RefreshedHosts,
+) {
+    match app.delete_mod_files(host, paths) {
         Ok(_) => {
             let _ = events.send(Event::CloseModal(ModalScope::DELETE_MOD));
             let file = path
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let counted = |id: &str, count: usize| {
+                lookup_args(
+                    id,
+                    [
+                        ("value", Arg::from(file.as_str())),
+                        ("count", Arg::from(i64::try_from(count).unwrap_or(0))),
+                    ],
+                )
+            };
             let _ = events.send(Event::Toast {
-                message: if taken > 0 {
-                    lookup_args(
-                        "gui-mod-deleted-with-dependents",
-                        [
-                            ("value", Arg::from(file.as_str())),
-                            ("count", Arg::from(i64::try_from(taken).unwrap_or(0))),
-                        ],
-                    )
-                } else {
-                    localized_value("gui-mod-deleted", &file)
+                message: match taken {
+                    Taken::Along(count) if count > 0 => {
+                        counted("gui-mod-deleted-with-dependents", count)
+                    }
+                    Taken::LeftAlone(count) if count > 0 => counted("gui-mod-deleted-alone", count),
+                    Taken::Along(_) | Taken::LeftAlone(_) => {
+                        localized_value("gui-mod-deleted", &file)
+                    }
                 },
                 error: false,
             });
@@ -17076,6 +17222,192 @@ mod tests {
             Event::JavaRuntimes(rows) if rows.is_empty()
         ));
         assert!(slot.lock().expect("slot").is_some());
+    }
+
+    /// An instance holding LibX and UtilitiX, which requires it, under the
+    /// dependency rule the two settings give.
+    fn library_instance(
+        follow: bool,
+        warn: bool,
+    ) -> (tempfile::TempDir, App, InstalledHost, PathBuf) {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let client = ephervex_core::test_support::create_client_with_library_and_dependent(&app)
+            .expect("a client");
+        app.set_follow_mod_dependencies(follow).expect("follow");
+        app.set_warn_on_dependency_impact(warn).expect("warn");
+        let mods = app
+            .client_folder(client.id, ClientFolder::Mods)
+            .expect("folder")
+            .expect("the mods folder exists");
+        (root, app, InstalledHost::Instance(client.id), mods)
+    }
+
+    /// Confirm, Apply and Ignore, as the two settings give them.
+    const EVERY_RULE: [(bool, bool); 3] = [(true, true), (true, false), (false, true)];
+
+    fn toasts(received: &mpsc::Receiver<Event>) -> Vec<String> {
+        received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::Toast { message, .. } => Some(message),
+                Event::ModImpact(_) | Event::ModRequirements(_) => {
+                    Some("a question was asked".to_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn turning_off_only_this_mod_leaves_its_dependent_on_under_every_rule() {
+        for (follow, warn) in EVERY_RULE {
+            let (_root, app, host, mods) = library_instance(follow, warn);
+            let (events, received) = mpsc::channel();
+            let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+
+            set_only_this_mod_enabled(
+                &app,
+                host,
+                Path::new("mods/LibX.jar"),
+                false,
+                &events,
+                &refreshed,
+            );
+
+            assert!(!mods.join("LibX.jar").exists(), "{follow} {warn}");
+            assert!(
+                mods.join("UtilitiX.jar").exists(),
+                "{follow} {warn}: the dependent stays on"
+            );
+            // Diagnostics names the dependent whose requirement is now off.
+            let unmet = app.requirement_problems(host).expect("problems").unmet;
+            assert!(
+                matches!(
+                    unmet.as_slice(),
+                    [requirement] if matches!(
+                        &requirement.dependency,
+                        ephervex_core::UnmetDependency::Disabled(library)
+                            if library.logical_path == Path::new("mods/LibX.jar")
+                    )
+                ),
+                "{follow} {warn}: {unmet:?}"
+            );
+            let expected = lookup_args(
+                "gui-mod-disabled-alone",
+                [
+                    ("value", Arg::from("LibX.jar")),
+                    ("count", Arg::from(1_i64)),
+                ],
+            );
+            assert_eq!(toasts(&received), [expected], "{follow} {warn}");
+        }
+    }
+
+    #[test]
+    fn turning_on_only_this_mod_leaves_what_it_needs_off_under_every_rule() {
+        for (follow, warn) in EVERY_RULE {
+            let (_root, app, host, mods) = library_instance(follow, warn);
+            app.set_mods_enabled(
+                host,
+                &[
+                    (PathBuf::from("mods/UtilitiX.jar"), false),
+                    (PathBuf::from("mods/LibX.jar"), false),
+                ],
+            )
+            .expect("both off");
+            let (events, received) = mpsc::channel();
+            let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+
+            set_only_this_mod_enabled(
+                &app,
+                host,
+                Path::new("mods/UtilitiX.jar"),
+                true,
+                &events,
+                &refreshed,
+            );
+
+            assert!(mods.join("UtilitiX.jar").exists(), "{follow} {warn}");
+            assert!(
+                !mods.join("LibX.jar").exists(),
+                "{follow} {warn}: what it needs stays off"
+            );
+            let expected = lookup_args(
+                "gui-mod-enabled-alone",
+                [
+                    ("value", Arg::from("UtilitiX.jar")),
+                    ("count", Arg::from(1_i64)),
+                ],
+            );
+            assert_eq!(toasts(&received), [expected], "{follow} {warn}");
+        }
+    }
+
+    #[test]
+    fn deleting_only_this_jar_leaves_its_dependent_installed_under_every_rule() {
+        for (follow, warn) in EVERY_RULE {
+            let (_root, app, host, mods) = library_instance(follow, warn);
+            let (events, received) = mpsc::channel();
+            let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+
+            delete_mod(
+                &app,
+                host,
+                Path::new("mods/LibX.jar"),
+                ModDeletion {
+                    name: "LibX".to_owned(),
+                    alone: true,
+                },
+                &events,
+                &refreshed,
+            );
+
+            assert!(!mods.join("LibX.jar").exists(), "{follow} {warn}");
+            assert!(
+                mods.join("UtilitiX.jar").exists(),
+                "{follow} {warn}: the dependent stays"
+            );
+            let expected = lookup_args(
+                "gui-mod-deleted-alone",
+                [
+                    ("value", Arg::from("LibX.jar")),
+                    ("count", Arg::from(1_i64)),
+                ],
+            );
+            assert_eq!(toasts(&received), [expected], "{follow} {warn}");
+        }
+    }
+
+    /// The narrow path is an addition: a plain switch still follows the rule.
+    #[test]
+    fn a_plain_switch_still_takes_the_dependent_along_when_the_rule_says_so() {
+        let (_root, app, host, mods) = library_instance(true, false);
+        let (events, received) = mpsc::channel();
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+
+        set_mod_enabled(
+            &app,
+            host,
+            Path::new("mods/LibX.jar"),
+            false,
+            &events,
+            &refreshed,
+        );
+
+        assert!(!mods.join("LibX.jar").exists());
+        assert!(
+            !mods.join("UtilitiX.jar").exists(),
+            "the dependent goes too"
+        );
+        assert_eq!(
+            toasts(&received),
+            [lookup_args(
+                "gui-mod-disabled-with-dependents",
+                [("count", Arg::from(1_i64))]
+            )]
+        );
     }
 
     #[test]

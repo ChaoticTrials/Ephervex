@@ -5308,7 +5308,7 @@ fn register_mod_state_actions(
     });
 
     let sender = commands.clone();
-    ui.on_set_mod_enabled(move |kind, host, path, enabled| {
+    ui.on_set_mod_enabled(move |kind, host, path, enabled, alone| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
         };
@@ -5318,6 +5318,7 @@ fn register_mod_state_actions(
                 host,
                 path: mod_path_key::decode(path.as_str()),
                 enabled,
+                alone,
             },
         );
     });
@@ -5684,7 +5685,7 @@ fn register_local_mod_actions(
 
     let sender = commands.clone();
     let handle = ui.as_weak();
-    ui.on_delete_hand_placed_mod(move |kind, host, path| {
+    ui.on_delete_hand_placed_mod(move |kind, host, path, alone| {
         let Some(host) = backend::parse_mod_host(&kind, &host) else {
             return;
         };
@@ -5700,6 +5701,7 @@ fn register_local_mod_actions(
                     host,
                     path,
                     name: ui.get_mod_action_name().to_string(),
+                    alone,
                 },
             );
             return;
@@ -14723,7 +14725,7 @@ mod tests {
         );
         let id = SharedString::from(ephervex_model::InstanceId::new().to_string());
 
-        ui.invoke_set_mod_enabled("client".into(), id.clone(), key.clone(), false);
+        ui.invoke_set_mod_enabled("client".into(), id.clone(), key.clone(), false, false);
         ui.invoke_restore_mod_file("client".into(), id, key);
 
         let sent: Vec<_> = commands.try_iter().collect();

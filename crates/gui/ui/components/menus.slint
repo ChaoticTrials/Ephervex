@@ -19,7 +19,13 @@ import { Theme } from "../theme.slint";
 // a press of any button and the area behind it never sees it.
 export component ContextTouchArea inherits TouchArea {
     callback context-requested(x: length, y: length);
+    // Whether Shift was held when the primary button last went down, for a
+    // control whose click means something narrower with Shift.
+    out property <bool> shift-pressed;
     pointer-event(event) => {
+        if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+            root.shift-pressed = event.modifiers.shift;
+        }
         if event.button == PointerEventButton.right && event.kind == PointerEventKind.down {
             root.context-requested(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
         }

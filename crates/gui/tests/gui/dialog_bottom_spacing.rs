@@ -120,6 +120,35 @@ fn the_duplicate_dialog_keeps_the_body_padding_under_cancel_whatever_it_asks() {
 }
 
 #[test]
+fn the_delete_mod_dialog_keeps_the_body_padding_under_cancel_whatever_it_says() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for (hand_placed, alone, error) in [
+            (false, false, ""),
+            (true, false, ""),
+            (false, true, ""),
+            (true, true, LONG_ERROR),
+        ] {
+            ui.set_pending_action_name("A Mod With A Rather Long Name".into());
+            ui.set_mod_action_is_hand_placed(hand_placed);
+            ui.set_mod_delete_alone(alone);
+            ui.set_modal_error(error.into());
+            ui.set_modal("delete-mod".into());
+            settle(&ui);
+
+            let gap = space_under_cancel(&ui);
+            assert!(
+                gap >= BODY_PADDING,
+                "delete-mod at text scale {scale}, hand-placed {hand_placed}, alone {alone}, \
+                 error {}: {gap}px under Cancel",
+                !error.is_empty()
+            );
+        }
+    }
+}
+
+#[test]
 fn the_theme_problems_dialog_keeps_the_body_padding_under_close_whatever_it_lists() {
     let ui = support::test_window();
     for scale in [1.0_f32, 1.25] {

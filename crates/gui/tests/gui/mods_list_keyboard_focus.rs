@@ -351,7 +351,7 @@ fn a_row_the_wheel_scrolls_away_never_leaves_the_focus_on_another_mod() {
     let (ui, _model) = show(&rows(80));
     let toggled: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&toggled);
-    ui.on_set_mod_enabled(move |_kind, _host, path, _enabled| {
+    ui.on_set_mod_enabled(move |_kind, _host, path, _enabled, _alone| {
         record.borrow_mut().push(path.to_string());
     });
     tab_to(&ui, &loads(&title(2)));
@@ -382,7 +382,7 @@ fn a_focused_row_that_comes_to_show_another_mod_gives_up_the_focus() {
     let (ui, model) = show(&rows(10));
     let toggled: Rc<RefCell<Vec<String>>> = Rc::default();
     let record = Rc::clone(&toggled);
-    ui.on_set_mod_enabled(move |_kind, _host, path, _enabled| {
+    ui.on_set_mod_enabled(move |_kind, _host, path, _enabled, _alone| {
         record.borrow_mut().push(path.to_string());
     });
     tab_to(&ui, &loads(&title(2)));

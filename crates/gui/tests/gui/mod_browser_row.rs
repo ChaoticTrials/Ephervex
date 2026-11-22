@@ -265,7 +265,7 @@ fn switch(ui: &AppWindow) -> Option<ElementHandle> {
 fn record_toggles(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String, bool)>>> {
     let flipped: Rc<RefCell<Vec<(String, String, bool)>>> = Rc::default();
     let recorded = Rc::clone(&flipped);
-    ui.on_set_mod_enabled(move |kind, _host, path, enabled| {
+    ui.on_set_mod_enabled(move |kind, _host, path, enabled, _alone| {
         recorded
             .borrow_mut()
             .push((kind.to_string(), path.to_string(), enabled));
