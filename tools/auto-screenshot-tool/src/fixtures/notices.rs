@@ -11,6 +11,7 @@ fn toast(id: i32, message: String, error: bool, repeats: i32) -> ToastRow {
         message: message.into(),
         error,
         repeats,
+        undoable: false,
     }
 }
 

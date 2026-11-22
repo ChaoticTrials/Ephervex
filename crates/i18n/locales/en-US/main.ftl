@@ -3360,6 +3360,10 @@ gui-mod-deleted-alone = { $count ->
     [one] Deleted only { $value }. One mod that requires it is still installed.
    *[other] Deleted only { $value }. { $count } mods that require it are still installed.
 }
+gui-mod-deleted-undo-restores-some = { $count ->
+    [one] Undo puts back one of them. The rest were added by hand and are gone.
+   *[other] Undo puts back { $count } of them. The rest were added by hand and are gone.
+}
 gui-delete-mod-alone-note = Only this JAR is deleted. Mods that need it stay as they are.
 gui-modal-mod-clash = Name Already Taken
 gui-mod-clash-detail = The mods folder already has a file called { $value }.
@@ -3405,7 +3409,7 @@ gui-follow-dependencies = Change the mods that need it too
 gui-follow-dependencies-detail = Turning a mod off takes the mods that require it with it, and turning one on brings back what it needs. Off, every switch changes only the mod it belongs to. Shift+click, or a mod's right-click menu, always changes only that mod. What each mod requires stays recorded either way.
 gui-dependency-warning-unused = Nothing else is being changed, so there is nothing to confirm.
 gui-dependency-warning = Ask before changing other mods
-gui-dependency-warning-detail = Say what else a change affects and wait for an answer. Off, the change is made and reported in a message afterwards.
+gui-dependency-warning-detail = Say what else a change affects and wait for an answer. Off, the change is made and reported in a message afterwards, whose Undo puts the other mods back.
 gui-preferred-mod-catalog = Mod catalog
 gui-preferred-mod-catalog-detail = Which catalog the mod browser opens on, and which one is searched first when a pack is rebuilt from a crash report or log. Individual searches and installs can still name either one.
 gui-preferred-mod-catalog-heading = Preferred catalog
@@ -3533,6 +3537,11 @@ gui-activity-minecraft-running = Minecraft is running
 gui-kill-instance = Kill Instance
 gui-kill-instance-requested = Stopping Minecraft.
 gui-kill-instance-unavailable = Nothing this launcher started is running for that instance.
+gui-undo = Undo
+gui-mods-restored = { $count ->
+    [one] Put one mod back.
+   *[other] Put { $count } mods back.
+}
 gui-dismiss-notification = Dismiss notification
 gui-modal-new-instance = New Instance
 gui-modal-import = Import Modpack

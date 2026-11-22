@@ -25,6 +25,7 @@ fn toast(id: i32, message: &str, error: bool) -> ToastRow {
         message: message.into(),
         error,
         repeats: 1,
+        undoable: false,
     }
 }
 
@@ -83,4 +84,35 @@ fn several_notifications_stack_upward_without_overlapping() {
         first.absolute_position().y + first.size().height <= second.absolute_position().y,
         "the older one sits above the newer"
     );
+}
+
+#[test]
+fn only_a_notification_that_offers_undo_shows_the_button_and_it_names_that_notification() {
+    let ui = window_with(vec![
+        toast(1, "Plain", false),
+        ToastRow {
+            undoable: true,
+            ..toast(2, "Turned off one mod that required it as well.", false)
+        },
+    ]);
+    let undone: std::rc::Rc<std::cell::RefCell<Vec<i32>>> = std::rc::Rc::default();
+    let sink = std::rc::Rc::clone(&undone);
+    ui.on_undo_toast(move |id| sink.borrow_mut().push(id));
+
+    let buttons: Vec<ElementHandle> =
+        ElementHandle::find_by_accessible_label(&ui, &lookup("gui-undo"))
+            .filter(|element| {
+                element.size().width > 0.0
+                    && element.accessible_role()
+                        == Some(i_slint_backend_testing::AccessibleRole::Button)
+            })
+            .collect();
+    assert_eq!(
+        buttons.len(),
+        1,
+        "one Undo, on the notification that offers it"
+    );
+    buttons[0].invoke_accessible_default_action();
+
+    assert_eq!(undone.borrow().as_slice(), [2]);
 }

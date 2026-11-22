@@ -1214,7 +1214,11 @@ export component AppWindow inherits Window {
     callback minecraft-discard-defaults();
     callback cancel-operation(string);
     callback present-toast(string, bool);
+    // A notification that offers to undo what it reports, with the token
+    // Rust gave the change it would reverse.
+    callback present-undoable-toast(string, int);
     callback dismiss-toast(int);
+    callback undo-toast(int);
 
     // Leaving the page that shows the capturing row destroys it without the
     // row ever losing focus, so the capture ends here.
@@ -2894,7 +2898,7 @@ export component AppWindow inherits Window {
         height: parent.height - 2 * Theme.shell-padding - Theme.shadow-room;
         VerticalLayout { alignment: end; spacing: 10px;
             for toast in root.toasts : HorizontalLayout { alignment: center;
-                ToastPanel { message: toast.message; error: toast.error; repeats: toast.repeats; dismiss => { root.dismiss-toast(toast.id); } }
+                ToastPanel { message: toast.message; error: toast.error; repeats: toast.repeats; undoable: toast.undoable; dismiss => { root.dismiss-toast(toast.id); } undo => { root.undo-toast(toast.id); } }
             }
         }
     }

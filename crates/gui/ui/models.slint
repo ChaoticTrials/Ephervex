@@ -22,6 +22,8 @@ export struct ToastRow {
     // How many identical notifications this panel stands for. Only shown
     // once there is more than one.
     repeats: int,
+    // Whether the panel offers to undo what it reports.
+    undoable: bool,
 }
 
 // One reproduction step of an instance.

@@ -60,8 +60,12 @@ pub fn mark_client_row_written_by_newer(app: &App, id: InstanceId) -> CoreResult
 
 /// Creates a client whose mods folder holds `mods/LibX.jar` and
 /// `mods/UtilitiX.jar`, with UtilitiX recorded as requiring LibX, so turning
-/// LibX off or deleting it would take UtilitiX along.
-pub fn create_client_with_library_and_dependent(app: &App) -> CoreResult<ClientRecord> {
+/// LibX off or deleting it would take UtilitiX along. UtilitiX is recorded
+/// with `dependent_origin`, such as a jar the user placed by hand.
+pub fn create_client_with_library_and_dependent(
+    app: &App,
+    dependent_origin: ephervex_model::ModOrigin,
+) -> CoreResult<ClientRecord> {
     use ephervex_model::ModRelationKind;
     use ephervex_model::{Hash, HashAlgorithm, LoaderSelection, ModOrigin, ModProvider};
     use ephervex_pack::{
@@ -75,22 +79,23 @@ pub fn create_client_with_library_and_dependent(app: &App) -> CoreResult<ClientR
         "1.21.1",
         LoaderSelection::vanilla(),
     ))?;
-    // The digest of an empty file, which no fixture check here compares.
+    // The digest of an empty file, which is what each fixture jar holds, so a
+    // jar put aside verifies when it is put back.
     let empty: Vec<Hash> = Hash::new(
         HashAlgorithm::Sha1,
         "da39a3ee5e6b4b0d3255bfef95601890afd80709",
     )
     .into_iter()
     .collect();
-    let recorded = |name: &str, project: &str, requires: Option<&str>| PackFileRecipe {
+    let recorded = |name: &str, project: &str, requires: Option<&str>, origin| PackFileRecipe {
         logical_path: PathBuf::from("mods").join(name),
         hashes: empty.clone(),
         downloads: Vec::new(),
-        size: Some(3),
+        size: Some(0),
         client: SideRequirement::Required,
         server: SideRequirement::Required,
         selected: None,
-        origin: ModOrigin::UserSelected,
+        origin,
         identity: Some(ProviderFileIdentity {
             provider: Some(ModProvider::Modrinth),
             project_id: Some(project.to_owned()),
@@ -115,8 +120,8 @@ pub fn create_client_with_library_and_dependent(app: &App) -> CoreResult<ClientR
     let mut recipe =
         PackRecipe::for_manual_instance("Library Example", "1.21.1", record.loader.clone());
     recipe.files = vec![
-        recorded("LibX.jar", "LIBX", None),
-        recorded("UtilitiX.jar", "UTILITIX", Some("LIBX")),
+        recorded("LibX.jar", "LIBX", None, ModOrigin::UserSelected),
+        recorded("UtilitiX.jar", "UTILITIX", Some("LIBX"), dependent_origin),
     ];
     SourceStore::new(ephervex_storage::metadata::source_dir(&record.root)).write_recipe(&recipe)?;
     let mods = ephervex_storage::metadata::client_game_dir(&record.root).join("mods");
@@ -125,7 +130,7 @@ pub fn create_client_with_library_and_dependent(app: &App) -> CoreResult<ClientR
     std::fs::create_dir_all(&mods).map_err(unwritable(mods.clone()))?;
     for jar in ["LibX.jar", "UtilitiX.jar"] {
         let path = mods.join(jar);
-        std::fs::write(&path, b"jar").map_err(unwritable(path.clone()))?;
+        std::fs::write(&path, b"").map_err(unwritable(path.clone()))?;
     }
     Ok(record)
 }

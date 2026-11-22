@@ -2887,9 +2887,10 @@ pub fn attach(ui: &AppWindow, keys: &BindingCapture) -> Controller {
         server_list: Rc::default(),
         home: Rc::default(),
         importing: Rc::default(),
+        undo_offers: Rc::default(),
     };
     register_i18n(ui);
-    register_toasts(ui);
+    register_toasts(ui, &workspace.commands, &workspace.undo_offers);
     register_callbacks(
         ui,
         &backend.commands,
@@ -3094,51 +3095,97 @@ impl SeasonWatch {
 /// visible, and this way an idle window wakes for nothing.
 const TOAST_SWEEP: Duration = Duration::from_millis(250);
 
-fn register_toasts(ui: &AppWindow) {
+fn register_toasts(ui: &AppWindow, commands: &Sender<Command>, offers: &Rc<RefCell<UndoOffers>>) {
     let stack = Rc::new(RefCell::new(ToastStack::default()));
     let sweep = Rc::new(slint::Timer::default());
+    let toasts = Toasts {
+        stack: Rc::clone(&stack),
+        offers: Rc::clone(offers),
+    };
 
     let weak = ui.as_weak();
-    let shown = Rc::clone(&stack);
+    let shown = toasts.clone();
     let ticking = Rc::clone(&sweep);
     ui.on_present_toast(move |message, error| {
         let Some(ui) = weak.upgrade() else { return };
-        shown.borrow_mut().present(message, error, Instant::now());
-        publish_toasts(&ui, &shown);
+        shown
+            .stack
+            .borrow_mut()
+            .present(message, error, Instant::now());
+        shown.publish(&ui);
         start_toast_sweep(&ui, &shown, &ticking);
     });
 
     let weak = ui.as_weak();
-    let shown = Rc::clone(&stack);
+    let shown = toasts.clone();
+    let ticking = Rc::clone(&sweep);
+    ui.on_present_undoable_toast(move |message, token| {
+        let Some(ui) = weak.upgrade() else { return };
+        shown
+            .stack
+            .borrow_mut()
+            .present_with_action(message, token, Instant::now());
+        shown.publish(&ui);
+        start_toast_sweep(&ui, &shown, &ticking);
+    });
+
+    let weak = ui.as_weak();
+    let shown = toasts.clone();
     ui.on_dismiss_toast(move |id| {
         let Some(ui) = weak.upgrade() else { return };
-        shown.borrow_mut().dismiss(id, Instant::now());
-        publish_toasts(&ui, &shown);
+        shown.stack.borrow_mut().dismiss(id, Instant::now());
+        shown.publish(&ui);
+    });
+
+    let weak = ui.as_weak();
+    let shown = toasts;
+    let sender = commands.clone();
+    ui.on_undo_toast(move |id| {
+        let Some(ui) = weak.upgrade() else { return };
+        let token = shown.stack.borrow_mut().take_action(id, Instant::now());
+        if let Some(undo) = token.and_then(|token| shown.offers.borrow_mut().take(token)) {
+            send(&sender, undo.command());
+        }
+        shown.publish(&ui);
     });
 }
 
-/// Shows what the stack now holds.
-fn publish_toasts(ui: &AppWindow, stack: &Rc<RefCell<ToastStack>>) {
-    ui.set_toasts(model(stack.borrow().rows()));
+/// The notifications and what their Undo buttons reverse.
+#[derive(Clone)]
+struct Toasts {
+    stack: Rc<RefCell<ToastStack>>,
+    offers: Rc<RefCell<UndoOffers>>,
+}
+
+impl Toasts {
+    /// Shows what the stack now holds, and forgets the Undo of every
+    /// notification that has gone.
+    fn publish(&self, ui: &AppWindow) {
+        let stack = self.stack.borrow();
+        self.offers
+            .borrow_mut()
+            .keep_only(&stack.action_tokens().collect());
+        ui.set_toasts(model(stack.rows()));
+    }
 }
 
 /// Starts the sweep if it is not already running, and stops it once the stack
 /// has emptied.
-fn start_toast_sweep(ui: &AppWindow, stack: &Rc<RefCell<ToastStack>>, sweep: &Rc<slint::Timer>) {
+fn start_toast_sweep(ui: &AppWindow, toasts: &Toasts, sweep: &Rc<slint::Timer>) {
     if sweep.running() {
         return;
     }
     let weak = ui.as_weak();
-    let shown = Rc::clone(stack);
+    let shown = toasts.clone();
     let ticking = Rc::clone(sweep);
     sweep.start(slint::TimerMode::Repeated, TOAST_SWEEP, move || {
         let Some(ui) = weak.upgrade() else {
             ticking.stop();
             return;
         };
-        shown.borrow_mut().expire(Instant::now());
-        publish_toasts(&ui, &shown);
-        if shown.borrow().is_empty() {
+        shown.stack.borrow_mut().expire(Instant::now());
+        shown.publish(&ui);
+        if shown.stack.borrow().is_empty() {
             ticking.stop();
         }
     });
@@ -5814,6 +5861,40 @@ struct Workspace {
     home: Rc<RefCell<HomeState>>,
     /// Instances a pack import is still creating, and the changes held for them.
     importing: Rc<RefCell<importing::ImportingInstances>>,
+    /// What each notification's Undo reverses, by the token it carries.
+    undo_offers: Rc<RefCell<UndoOffers>>,
+}
+
+/// What the Undo of each notification on screen reverses.
+///
+/// Kept beside the notifications rather than in them, because a notification
+/// is a plain row the markup draws and the change it would reverse is not.
+#[derive(Debug, Default)]
+struct UndoOffers {
+    next: i32,
+    offers: HashMap<i32, backend::CascadeUndo>,
+}
+
+impl UndoOffers {
+    /// Keeps `undo` and returns the nonzero token a notification carries for it.
+    fn offer(&mut self, undo: backend::CascadeUndo) -> i32 {
+        self.next = self
+            .next
+            .checked_add(1)
+            .filter(|next| *next > 0)
+            .unwrap_or(1);
+        self.offers.insert(self.next, undo);
+        self.next
+    }
+
+    fn take(&mut self, token: i32) -> Option<backend::CascadeUndo> {
+        self.offers.remove(&token)
+    }
+
+    /// Forgets every offer no notification carries any more.
+    fn keep_only(&mut self, tokens: &HashSet<i32>) {
+        self.offers.retain(|token, _| tokens.contains(token));
+    }
 }
 
 impl Workspace {
@@ -9722,6 +9803,10 @@ fn apply_event(
         Event::Toast { message, error } => {
             ui.invoke_present_toast(message.into(), error);
         }
+        Event::UndoableToast { message, undo } => {
+            let token = workspace.undo_offers.borrow_mut().offer(undo);
+            ui.invoke_present_undoable_toast(message.into(), token);
+        }
         Event::ModImpact(impact) => apply_mod_impact(ui, &impact),
         Event::ModRequirements(needs) => apply_mod_requirements(ui, &needs),
         Event::ModalError { scope, message } => apply_modal_error(ui, scope, message),
@@ -12821,6 +12906,41 @@ mod tests {
     }
 
     #[test]
+    fn a_notifications_undo_sends_the_reversal_once_and_takes_the_notification_down() {
+        let ui = test_window();
+        let (sender, commands) = std::sync::mpsc::channel();
+        let offers: Rc<RefCell<UndoOffers>> = Rc::default();
+        register_toasts(&ui, &sender, &offers);
+        let host = InstalledHost::Instance(InstanceId::new());
+        let token = offers.borrow_mut().offer(backend::CascadeUndo {
+            host,
+            reversal: backend::CascadeReversal::TurnOn(vec![PathBuf::from("mods/UtilitiX.jar")]),
+        });
+
+        ui.invoke_present_undoable_toast("Turned off one mod".into(), token);
+        let rows: Vec<crate::ui::ToastRow> = ui.get_toasts().iter().collect();
+        assert!(matches!(rows.as_slice(), [row] if row.undoable));
+
+        ui.invoke_undo_toast(rows[0].id);
+        ui.invoke_undo_toast(rows[0].id);
+
+        let sent: Vec<Command> = commands.try_iter().collect();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [Command::SetModsEnabled { changes, .. }]
+                    if changes == &vec![(PathBuf::from("mods/UtilitiX.jar"), true)]
+            ),
+            "{sent:?}"
+        );
+        assert_eq!(ui.get_toasts().row_count(), 0);
+        assert!(
+            offers.borrow().offers.is_empty(),
+            "nothing is kept for a notification that is gone"
+        );
+    }
+
+    #[test]
     fn a_command_sent_to_a_running_worker_does_not_report_it_stopped() {
         let (commands, received) = std::sync::mpsc::channel();
 
@@ -15493,6 +15613,7 @@ mod tests {
             server_list: Rc::default(),
             home: Rc::default(),
             importing: Rc::default(),
+            undo_offers: Rc::default(),
         };
         register_workspace(ui, &workspace);
         log_views::register(ui, &workspace.logs);

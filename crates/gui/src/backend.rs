@@ -754,6 +754,12 @@ pub enum Command {
         host: InstalledHost,
         path: PathBuf,
     },
+    /// Put several jars back, one after another, as an Undo of a deletion that
+    /// took them along.
+    RestoreModFiles {
+        host: InstalledHost,
+        paths: Vec<PathBuf>,
+    },
     DeleteHandPlacedMod {
         host: InstalledHost,
         path: PathBuf,
@@ -1023,6 +1029,46 @@ pub struct Snapshot {
     pub minecraft_preferences: MinecraftPreferenceSnapshot,
     pub settings: SettingsData,
     pub eula: EulaData,
+}
+
+/// What an Undo on a notification reverses: the other mods one change took
+/// along. The change the user asked for is never part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CascadeUndo {
+    pub host: InstalledHost,
+    pub reversal: CascadeReversal,
+}
+
+/// Which way an Undo puts the mods a change took along back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CascadeReversal {
+    /// They were turned off; turn them back on.
+    TurnOn(Vec<PathBuf>),
+    /// They were turned on; turn them back off.
+    TurnOff(Vec<PathBuf>),
+    /// Their jars were deleted; put them back.
+    Restore(Vec<PathBuf>),
+}
+
+impl CascadeUndo {
+    /// The command that carries the Undo out. It changes exactly these mods
+    /// and follows no relation, because following one could take the mod the
+    /// user changed along too.
+    #[must_use]
+    pub fn command(self) -> Command {
+        let host = self.host;
+        match self.reversal {
+            CascadeReversal::TurnOn(paths) => Command::SetModsEnabled {
+                host,
+                changes: paths.into_iter().map(|path| (path, true)).collect(),
+            },
+            CascadeReversal::TurnOff(paths) => Command::SetModsEnabled {
+                host,
+                changes: paths.into_iter().map(|path| (path, false)).collect(),
+            },
+            CascadeReversal::Restore(paths) => Command::RestoreModFiles { host, paths },
+        }
+    }
 }
 
 /// A host the lists leave out because this build cannot read its index row.
@@ -2256,6 +2302,11 @@ pub enum Event {
     Toast {
         message: String,
         error: bool,
+    },
+    /// A notification that offers to undo the other mods a change took along.
+    UndoableToast {
+        message: String,
+        undo: CascadeUndo,
     },
     /// What turning a mod off, or deleting its jar, would do to the rest.
     ModImpact(Box<ModImpactPresentation>),
@@ -5883,6 +5934,50 @@ fn run_worker(
                             }
                             Err(error) => send_error(&events, &error),
                         }
+                    },
+                );
+            }
+            Command::RestoreModFiles { host, paths } => {
+                let Some(in_flight) = claim_hosts_for_change(
+                    &changing,
+                    &[host],
+                    "gui-mod-change-busy",
+                    ModalScope::NONE,
+                    &events,
+                ) else {
+                    continue;
+                };
+                let refreshed = Arc::clone(&refreshed_mods);
+                spawn_detached(
+                    app.paths().clone(),
+                    events.clone(),
+                    move |app, events, runtime| {
+                        let _in_flight = in_flight;
+                        let reporter = OperationReporter::silent("operation-restoring-mod");
+                        let mut restored = 0_i64;
+                        for path in &paths {
+                            match runtime.block_on(app.restore_mod_file(
+                                host,
+                                path,
+                                &reporter,
+                                &CancellationToken::new(),
+                            )) {
+                                Ok(()) => restored += 1,
+                                // Each jar is reported on its own, and the rest
+                                // are still put back.
+                                Err(error) => send_error(&events, &error),
+                            }
+                        }
+                        if restored > 0 {
+                            let _ = events.send(Event::Toast {
+                                message: lookup_args(
+                                    "gui-mods-restored",
+                                    [("count", Arg::from(restored))],
+                                ),
+                                error: false,
+                            });
+                        }
+                        send_host_mods(&app, host, &events, &refreshed, false);
                     },
                 );
             }
@@ -14567,7 +14662,9 @@ fn set_mod_enabled(
         return;
     }
     let warn = policy.asks();
-    let changes: Vec<(PathBuf, bool)> = if enabled {
+    // The other mods this change takes along, reported once it has happened,
+    // with an Undo that puts back exactly those.
+    let (changes, taken_along): Cascade = if enabled {
         match app.dependencies_of(host, path) {
             Ok(needs) => {
                 let view = ModRequirementPresentation::new(host_kind(host), &host.id(), &needs);
@@ -14575,22 +14672,27 @@ fn set_mod_enabled(
                     let _ = events.send(Event::ModRequirements(Box::new(view)));
                     return;
                 }
-                if view.has_cascade() {
-                    let _ = events.send(Event::Toast {
-                        message: lookup_args(
+                let taken = view.has_cascade().then(|| {
+                    (
+                        lookup_args(
                             "gui-mod-enabled-with-dependencies",
                             [(
                                 "count",
                                 Arg::from(i64::try_from(view.disabled.len()).unwrap_or(0)),
                             )],
                         ),
-                        error: false,
-                    });
-                }
-                view.cascade_paths()
+                        CascadeUndo {
+                            host,
+                            reversal: CascadeReversal::TurnOff(rows_paths(&view.disabled)),
+                        },
+                    )
+                });
+                let changes = view
+                    .cascade_paths()
                     .into_iter()
                     .map(|path| (crate::mod_path_key::decode(&path), true))
-                    .collect()
+                    .collect();
+                (changes, taken)
             }
             Err(error) => {
                 send_error(events, &error);
@@ -14605,22 +14707,27 @@ fn set_mod_enabled(
                     let _ = events.send(Event::ModImpact(Box::new(view)));
                     return;
                 }
-                if view.has_cascade() {
-                    let _ = events.send(Event::Toast {
-                        message: lookup_args(
+                let taken = view.has_cascade().then(|| {
+                    (
+                        lookup_args(
                             "gui-mod-disabled-with-dependents",
                             [(
                                 "count",
                                 Arg::from(i64::try_from(view.breaks.len()).unwrap_or(0)),
                             )],
                         ),
-                        error: false,
-                    });
-                }
-                view.cascade_paths()
+                        CascadeUndo {
+                            host,
+                            reversal: CascadeReversal::TurnOn(rows_paths(&view.breaks)),
+                        },
+                    )
+                });
+                let changes = view
+                    .cascade_paths()
                     .into_iter()
                     .map(|path| (crate::mod_path_key::decode(&path), false))
-                    .collect()
+                    .collect();
+                (changes, taken)
             }
             Err(error) => {
                 send_error(events, &error);
@@ -14630,12 +14737,28 @@ fn set_mod_enabled(
     };
 
     match app.set_mods_enabled(host, &changes) {
-        Ok(_) => send_host_mods(app, host, events, refreshed, false),
+        Ok(_) => {
+            if let Some((message, undo)) = taken_along {
+                let _ = events.send(Event::UndoableToast { message, undo });
+            }
+            send_host_mods(app, host, events, refreshed, false);
+        }
         Err(error) => {
             send_error(events, &error);
             send_host_mods(app, host, events, refreshed, false);
         }
     }
+}
+
+/// A switch's whole change, and the other mods it takes along with the
+/// sentence and Undo that report them.
+type Cascade = (Vec<(PathBuf, bool)>, Option<(String, CascadeUndo)>);
+
+/// The jars a list of impacted rows names.
+fn rows_paths(rows: &[crate::presentation::ImpactRowPresentation]) -> Vec<PathBuf> {
+    rows.iter()
+        .map(|row| crate::mod_path_key::decode(&row.logical_path))
+        .collect()
 }
 
 /// What the delete dialog asked for, beside the jar it names.
@@ -14679,6 +14802,9 @@ fn delete_mod(
         return;
     }
     let policy = app.dependency_policy();
+    // A jar the user placed by hand is gone for good once deleted, so only the
+    // others can be offered back.
+    let mut restorable = Vec::new();
     let view = if policy.cascades() {
         let mut impact = match app.dependents_of(host, path) {
             Ok(impact) => impact,
@@ -14690,6 +14816,12 @@ fn delete_mod(
         // The row's own label, which carries a provider title the durable read
         // does not have.
         impact.target.name = name;
+        restorable = impact
+            .breaks
+            .iter()
+            .filter(|dependent| dependent.origin != ephervex_model::ModOrigin::HandPlaced)
+            .map(|dependent| dependent.logical_path.clone())
+            .collect();
         ModImpactPresentation::new(host_kind(host), &host.id(), true, &impact)
     } else {
         ModImpactPresentation::default()
@@ -14713,17 +14845,22 @@ fn delete_mod(
         host,
         path,
         &paths,
-        Taken::Along(taken),
+        Taken::Along {
+            count: taken,
+            restorable,
+        },
         events,
         refreshed,
     );
 }
 
 /// What a deletion did to the mods that need the jar it names.
-#[derive(Clone, Copy)]
 enum Taken {
-    /// This many went with it.
-    Along(usize),
+    /// This many went with it, of which these jars can be put back.
+    Along {
+        count: usize,
+        restorable: Vec<PathBuf>,
+    },
     /// This many stayed, although they need it.
     LeftAlone(usize),
 }
@@ -14754,17 +14891,44 @@ fn delete_mod_files_reporting(
                     ],
                 )
             };
-            let _ = events.send(Event::Toast {
-                message: match taken {
-                    Taken::Along(count) if count > 0 => {
-                        counted("gui-mod-deleted-with-dependents", count)
+            let _ = events.send(match taken {
+                // The jars that went along and can be put back come back with
+                // an Undo; the one asked about stays deleted.
+                Taken::Along { count, restorable } if count > 0 && !restorable.is_empty() => {
+                    Event::UndoableToast {
+                        message: if restorable.len() == count {
+                            counted("gui-mod-deleted-with-dependents", count)
+                        } else {
+                            format!(
+                                "{} {}",
+                                counted("gui-mod-deleted-with-dependents", count),
+                                lookup_args(
+                                    "gui-mod-deleted-undo-restores-some",
+                                    [(
+                                        "count",
+                                        Arg::from(i64::try_from(restorable.len()).unwrap_or(0)),
+                                    )],
+                                )
+                            )
+                        },
+                        undo: CascadeUndo {
+                            host,
+                            reversal: CascadeReversal::Restore(restorable),
+                        },
                     }
-                    Taken::LeftAlone(count) if count > 0 => counted("gui-mod-deleted-alone", count),
-                    Taken::Along(_) | Taken::LeftAlone(_) => {
-                        localized_value("gui-mod-deleted", &file)
-                    }
+                }
+                Taken::Along { count, .. } if count > 0 => Event::Toast {
+                    message: counted("gui-mod-deleted-with-dependents", count),
+                    error: false,
                 },
-                error: false,
+                Taken::LeftAlone(count) if count > 0 => Event::Toast {
+                    message: counted("gui-mod-deleted-alone", count),
+                    error: false,
+                },
+                Taken::Along { .. } | Taken::LeftAlone(_) => Event::Toast {
+                    message: localized_value("gui-mod-deleted", &file),
+                    error: false,
+                },
             });
             send_host_mods(app, host, events, refreshed, false);
         }
@@ -17233,8 +17397,11 @@ mod tests {
         without_desktop_keyring();
         let root = tempfile::tempdir().expect("root");
         let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
-        let client = ephervex_core::test_support::create_client_with_library_and_dependent(&app)
-            .expect("a client");
+        let client = ephervex_core::test_support::create_client_with_library_and_dependent(
+            &app,
+            ephervex_model::ModOrigin::UserSelected,
+        )
+        .expect("a client");
         app.set_follow_mod_dependencies(follow).expect("follow");
         app.set_warn_on_dependency_impact(warn).expect("warn");
         let mods = app
@@ -17251,7 +17418,9 @@ mod tests {
         received
             .try_iter()
             .filter_map(|event| match event {
-                Event::Toast { message, .. } => Some(message),
+                Event::Toast { message, .. } | Event::UndoableToast { message, .. } => {
+                    Some(message)
+                }
                 Event::ModImpact(_) | Event::ModRequirements(_) => {
                     Some("a question was asked".to_owned())
                 }
@@ -17378,6 +17547,163 @@ mod tests {
             );
             assert_eq!(toasts(&received), [expected], "{follow} {warn}");
         }
+    }
+
+    /// The one undo a cascade's notification offers, and its sentence.
+    fn undo_offered(received: &mpsc::Receiver<Event>) -> (String, CascadeUndo) {
+        let offered: Vec<(String, CascadeUndo)> = received
+            .try_iter()
+            .filter_map(|event| match event {
+                Event::UndoableToast { message, undo } => Some((message, undo)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offered.len(), 1, "one undo was expected: {offered:?}");
+        offered.into_iter().next().expect("the undo")
+    }
+
+    #[test]
+    fn undoing_a_silent_cascade_turns_back_on_only_the_mods_it_took_along() {
+        let (_root, app, host, mods) = library_instance(true, false);
+        let (events, received) = mpsc::channel();
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+        set_mod_enabled(
+            &app,
+            host,
+            Path::new("mods/LibX.jar"),
+            false,
+            &events,
+            &refreshed,
+        );
+
+        let (message, undo) = undo_offered(&received);
+        assert_eq!(
+            message,
+            lookup_args(
+                "gui-mod-disabled-with-dependents",
+                [("count", Arg::from(1_i64))]
+            )
+        );
+        assert_eq!(
+            undo,
+            CascadeUndo {
+                host,
+                reversal: CascadeReversal::TurnOn(vec![PathBuf::from("mods/UtilitiX.jar")]),
+            }
+        );
+        let changes = match undo.command() {
+            Command::SetModsEnabled { changes, .. } => Some(changes),
+            _ => None,
+        }
+        .expect("an undo of a turn-off turns mods on");
+        app.set_mods_enabled(host, &changes).expect("undo");
+
+        assert!(
+            mods.join("UtilitiX.jar").exists(),
+            "the dependent is back on"
+        );
+        assert!(
+            !mods.join("LibX.jar").exists(),
+            "the mod the user turned off stays off"
+        );
+    }
+
+    #[test]
+    fn undoing_a_silent_cascading_delete_puts_back_only_the_jars_it_took_along() {
+        let (_root, app, host, mods) = library_instance(true, false);
+        let (events, received) = mpsc::channel();
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+        delete_mod(
+            &app,
+            host,
+            Path::new("mods/LibX.jar"),
+            ModDeletion {
+                name: "LibX".to_owned(),
+                alone: false,
+            },
+            &events,
+            &refreshed,
+        );
+        assert!(
+            !mods.join("UtilitiX.jar").exists(),
+            "the dependent went along"
+        );
+
+        let (_, undo) = undo_offered(&received);
+        let paths = match undo.command() {
+            Command::RestoreModFiles { paths, .. } => Some(paths),
+            _ => None,
+        }
+        .expect("an undo of a deletion puts jars back");
+        assert_eq!(paths, [PathBuf::from("mods/UtilitiX.jar")]);
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        for path in &paths {
+            runtime
+                .block_on(app.restore_mod_file(
+                    host,
+                    path,
+                    &OperationReporter::silent("restoring"),
+                    &CancellationToken::new(),
+                ))
+                .expect("restore");
+        }
+
+        assert!(mods.join("UtilitiX.jar").exists(), "the dependent is back");
+        assert!(
+            !mods.join("LibX.jar").exists(),
+            "the jar the user deleted stays deleted"
+        );
+    }
+
+    /// A jar the user placed by hand is deleted for good, so a cascade that
+    /// took only such a jar along offers no Undo it could not keep.
+    #[test]
+    fn a_cascading_delete_offers_no_undo_for_a_dependent_placed_by_hand() {
+        without_desktop_keyring();
+        let root = tempfile::tempdir().expect("root");
+        let mut app = App::open_at(Paths::rooted_at(root.path())).expect("app");
+        let client = ephervex_core::test_support::create_client_with_library_and_dependent(
+            &app,
+            ephervex_model::ModOrigin::HandPlaced,
+        )
+        .expect("a client");
+        app.set_warn_on_dependency_impact(false).expect("warn");
+        let host = InstalledHost::Instance(client.id);
+        let (events, received) = mpsc::channel();
+        let refreshed: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
+
+        delete_mod(
+            &app,
+            host,
+            Path::new("mods/LibX.jar"),
+            ModDeletion {
+                name: "LibX".to_owned(),
+                alone: false,
+            },
+            &events,
+            &refreshed,
+        );
+
+        let reported: Vec<Event> = received.try_iter().collect();
+        assert!(
+            !reported
+                .iter()
+                .any(|event| matches!(event, Event::UndoableToast { .. })),
+            "{reported:?}"
+        );
+        let expected = lookup_args(
+            "gui-mod-deleted-with-dependents",
+            [
+                ("value", Arg::from("LibX.jar")),
+                ("count", Arg::from(1_i64)),
+            ],
+        );
+        assert!(
+            reported
+                .iter()
+                .any(|event| matches!(event, Event::Toast { message, .. } if *message == expected)),
+            "{reported:?}"
+        );
     }
 
     /// The narrow path is an addition: a plain switch still follows the rule.

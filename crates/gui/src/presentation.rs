@@ -3582,6 +3582,9 @@ const MAX_WAITING_TOASTS: usize = 12;
 /// one they are most likely to have looked away from.
 const NORMAL_DWELL: Duration = Duration::from_millis(4_500);
 const ERROR_DWELL: Duration = Duration::from_millis(9_000);
+/// How long a notification that offers to undo what it reports stays, so the
+/// offer can be read and taken.
+const ACTION_DWELL: Duration = Duration::from_millis(10_000);
 
 /// One notification on screen or waiting to be.
 #[derive(Debug, Clone)]
@@ -3591,6 +3594,9 @@ struct ToastGroup {
     error: bool,
     /// How many identical notifications this one stands for, counting itself.
     repeats: i32,
+    /// The caller's token for what its Undo reverses, or zero when it offers
+    /// none.
+    action: i32,
     /// When this one stops being shown. Meaningless until it is.
     expires_at: Instant,
 }
@@ -3602,8 +3608,11 @@ impl ToastGroup {
     /// are all identity can be. Two unrelated failures that print the same
     /// sentence are the same notification to somebody reading it, which is the
     /// only point of view this collapse serves.
-    fn same_as(&self, message: &SharedString, error: bool) -> bool {
-        self.error == error && self.message == *message
+    ///
+    /// One that offers an Undo is never the same as another: each reverses its
+    /// own change, and collapsing two would lose one of the offers.
+    fn same_as(&self, message: &SharedString, error: bool, action: i32) -> bool {
+        self.action == 0 && action == 0 && self.error == error && self.message == *message
     }
 }
 
@@ -3637,13 +3646,24 @@ impl ToastStack {
     /// changed, and a count nobody has time to read is worse than not
     /// collapsing at all.
     pub fn present(&mut self, message: SharedString, error: bool, now: Instant) {
+        self.present_with(message, error, 0, now);
+    }
+
+    /// Adds a notification that offers to undo what it reports. `action` is
+    /// the caller's nonzero token for that, handed back by
+    /// [`Self::take_action`].
+    pub fn present_with_action(&mut self, message: SharedString, action: i32, now: Instant) {
+        self.present_with(message, false, action, now);
+    }
+
+    fn present_with(&mut self, message: SharedString, error: bool, action: i32, now: Instant) {
         if let Some(group) = self
             .visible
             .iter_mut()
-            .find(|group| group.same_as(&message, error))
+            .find(|group| group.same_as(&message, error, action))
         {
             group.repeats += 1;
-            group.expires_at = now + dwell(error);
+            group.expires_at = now + group.dwell();
             return;
         }
         // A repeat of one that is still waiting has no dwell to restart; it
@@ -3651,21 +3671,42 @@ impl ToastStack {
         if let Some(group) = self
             .waiting
             .iter_mut()
-            .find(|group| group.same_as(&message, error))
+            .find(|group| group.same_as(&message, error, action))
         {
             group.repeats += 1;
             return;
         }
         if self.visible.len() < VISIBLE_TOASTS {
-            let group = self.group(message, error, now);
+            let group = self.group(message, error, action, now);
             self.visible.push(group);
             return;
         }
         if self.waiting.len() == MAX_WAITING_TOASTS {
             self.waiting.pop_front();
         }
-        let group = self.group(message, error, now);
+        let group = self.group(message, error, action, now);
         self.waiting.push_back(group);
+    }
+
+    /// Takes a notification's Undo: removes the notification and returns the
+    /// token it was presented with, or `None` when it is gone or offers none.
+    pub fn take_action(&mut self, id: i32, now: Instant) -> Option<i32> {
+        let at = self
+            .visible
+            .iter()
+            .position(|group| group.id == id && group.action != 0)?;
+        let taken = self.visible.remove(at);
+        self.promote(now);
+        Some(taken.action)
+    }
+
+    /// Every token a notification here still offers.
+    pub fn action_tokens(&self) -> impl Iterator<Item = i32> + '_ {
+        self.visible
+            .iter()
+            .chain(&self.waiting)
+            .map(|group| group.action)
+            .filter(|action| *action != 0)
     }
 
     /// Takes one notification off the screen, by the id it was given.
@@ -3679,7 +3720,7 @@ impl ToastStack {
         };
         let dropped = self.visible.remove(at);
         self.waiting
-            .retain(|group| !group.same_as(&dropped.message, dropped.error));
+            .retain(|group| !group.same_as(&dropped.message, dropped.error, dropped.action));
         self.promote(now);
     }
 
@@ -3699,6 +3740,7 @@ impl ToastStack {
                 message: group.message.clone(),
                 error: group.error,
                 repeats: group.repeats,
+                undoable: group.action != 0,
             })
             .collect()
     }
@@ -3709,7 +3751,13 @@ impl ToastStack {
         self.visible.is_empty() && self.waiting.is_empty()
     }
 
-    fn group(&mut self, message: SharedString, error: bool, now: Instant) -> ToastGroup {
+    fn group(
+        &mut self,
+        message: SharedString,
+        error: bool,
+        action: i32,
+        now: Instant,
+    ) -> ToastGroup {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         ToastGroup {
@@ -3717,7 +3765,8 @@ impl ToastStack {
             message,
             error,
             repeats: 1,
-            expires_at: now + dwell(error),
+            action,
+            expires_at: now + dwell(error, action),
         }
     }
 
@@ -3728,14 +3777,26 @@ impl ToastStack {
             let Some(mut group) = self.waiting.pop_front() else {
                 break;
             };
-            group.expires_at = now + dwell(group.error);
+            group.expires_at = now + group.dwell();
             self.visible.push(group);
         }
     }
 }
 
-const fn dwell(error: bool) -> Duration {
-    if error { ERROR_DWELL } else { NORMAL_DWELL }
+const fn dwell(error: bool, action: i32) -> Duration {
+    if action != 0 {
+        ACTION_DWELL
+    } else if error {
+        ERROR_DWELL
+    } else {
+        NORMAL_DWELL
+    }
+}
+
+impl ToastGroup {
+    const fn dwell(&self) -> Duration {
+        dwell(self.error, self.action)
+    }
 }
 
 #[cfg(test)]
@@ -3745,6 +3806,51 @@ mod toast_tests {
 
     /// A moment before a deadline, and a moment after one.
     const JUST_SHORT: Duration = Duration::from_millis(1);
+
+    #[test]
+    fn a_notification_offering_undo_hands_back_its_token_once_and_leaves() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present("plain".into(), false, start);
+        stack.present_with_action("turned off".into(), 7, start);
+
+        let rows = stack.rows();
+        assert!(!rows[0].undoable);
+        assert!(rows[1].undoable);
+        assert_eq!(stack.action_tokens().collect::<Vec<_>>(), [7]);
+        assert_eq!(
+            stack.take_action(rows[0].id, start),
+            None,
+            "plain offers nothing"
+        );
+
+        assert_eq!(stack.take_action(rows[1].id, start), Some(7));
+        assert_eq!(shown(&stack), ["plain"]);
+        assert_eq!(stack.take_action(rows[1].id, start), None);
+    }
+
+    #[test]
+    fn two_identical_notifications_offering_undo_stay_apart() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present_with_action("turned off".into(), 1, start);
+        stack.present_with_action("turned off".into(), 2, start);
+
+        assert_eq!(shown(&stack), ["turned off", "turned off"]);
+        assert_eq!(stack.action_tokens().collect::<Vec<_>>(), [1, 2]);
+    }
+
+    #[test]
+    fn a_notification_offering_undo_stays_longer() {
+        let mut stack = ToastStack::default();
+        let start = Instant::now();
+        stack.present_with_action("turned off".into(), 1, start);
+
+        stack.expire(start + ERROR_DWELL + Duration::from_millis(1));
+        assert_eq!(shown(&stack), ["turned off"]);
+        stack.expire(start + ACTION_DWELL + Duration::from_millis(1));
+        assert!(stack.is_empty());
+    }
 
     #[test]
     fn three_notifications_are_shown_and_the_rest_wait_their_turn() {

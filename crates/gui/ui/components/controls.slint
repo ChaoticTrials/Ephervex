@@ -1277,9 +1277,12 @@ export component ToastPanel inherits Plate {
     in property <string> message;
     in property <bool> error;
     in property <int> repeats;
+    // Whether the panel offers to undo what it reports.
+    in property <bool> undoable;
     callback dismiss();
+    callback undo();
     // As wide as its line, up to a limit, and taller as the line wraps.
-    width: min(560px, max(280px, probe.preferred-width + 110px + (root.repeats > 1 ? 44px : 0px)));
+    width: min(560px, max(280px, probe.preferred-width + 110px + (root.repeats > 1 ? 44px : 0px) + (root.undoable ? undo-probe.preferred-width + 64px : 0px)));
     height: max(48px, toast-message.preferred-height + 24px);
     horizontal-stretch: 0;
     radius: Theme.button-radius;
@@ -1288,6 +1291,7 @@ export component ToastPanel inherits Plate {
     accessible-label: (root.error ? GuiI18n.text("gui-notification-error") : GuiI18n.text("gui-notification-complete")) + ": " + root.message;
     // Measures the message on one line; never drawn.
     probe := Text { visible: false; text: root.message; font-size: Theme.body-size; font-weight: 600; }
+    undo-probe := Text { visible: false; text: GuiI18n.text("gui-undo"); font-size: Theme.body-size; font-weight: 600; }
     HorizontalLayout { padding-left: 14px; padding-right: 8px; padding-top: 8px; padding-bottom: 8px; spacing: 10px; cross-axis-alignment: center;
         Image {
             source: root.error ? @image-url("../../../../assets/icons/alert.svg") : @image-url("../../../../assets/icons/check.svg");
@@ -1298,6 +1302,7 @@ export component ToastPanel inherits Plate {
         }
         toast-message := BodyText { horizontal-stretch: 1; text: root.message; color: root.error ? Theme.on-danger : Theme.on-accent; font-weight: 600; wrap: word-wrap; }
         if root.repeats > 1 : Pill { text: GuiI18n.count("gui-notification-repeat", root.repeats); tone-color: Theme.text; fill: Theme.surface; content-height: 18px; }
+        if root.undoable : AppButton { text: GuiI18n.text("gui-undo"); compact: true; clicked => { root.undo(); } }
         IconButton { icon: @image-url("../../../../assets/icons/close.svg"); accessible-name: GuiI18n.text("gui-dismiss-notification"); width: 28px; height: 28px; clicked => { root.dismiss(); } }
     }
 }
