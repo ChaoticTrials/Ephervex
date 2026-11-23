@@ -36,8 +36,20 @@
 //! exclusively, which waits for no operation: a launch, an installation, or a
 //! running game holds a lease and makes it refuse. It then decides again, from
 //! the references as they are at that moment, and removes only entries that are
-//! in the plan and still unused. Whatever it did not remove is reported with the
+//! in the plan and still removable. Whatever it did not remove is reported with the
 //! reason, and bytes are credited only for entries that are really gone.
+//!
+//! # Files supplied by hand are removed only on request
+//!
+//! A provider can refuse to serve a file to the launcher, and the user then
+//! downloads it themselves. Removing such a file costs a manual download, not a
+//! transfer, so it is never part of a default cleanup and never counted as
+//! reclaimable. A plan lists these files as their own kind, which a frontend
+//! offers separately and leaves unselected until the user chooses it
+//! ([`ManagedStorageKind::is_opt_in`], [`CleanupPlan::default_kinds`]). They are
+//! offered only when no host names them and nothing else withholds them, and
+//! removing one also removes its provenance marker. The byte budget of the
+//! download cache still never collects them.
 //!
 //! Nothing here touches instance or server directories, mods, configuration,
 //! worlds, snapshots, or recovery state: no stretch of storage outside the shared
@@ -78,6 +90,9 @@ pub enum ManagedStorageKind {
     DownloadedFiles,
     /// Loader installers.
     InstallerFiles,
+    /// Files the user downloaded by hand because their provider does not let
+    /// Ephervex download them. Removing one means downloading it by hand again.
+    HandSuppliedDownloads,
     /// Mojang asset objects.
     AssetObjects,
     /// The launch view of each asset index.
@@ -90,9 +105,10 @@ pub enum ManagedStorageKind {
 
 impl ManagedStorageKind {
     /// Every kind, in the order a report lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::DownloadedFiles,
         Self::InstallerFiles,
+        Self::HandSuppliedDownloads,
         Self::AssetObjects,
         Self::AssetIndexes,
         Self::Libraries,
@@ -105,6 +121,7 @@ impl ManagedStorageKind {
         match self {
             Self::DownloadedFiles => "downloaded_files",
             Self::InstallerFiles => "installer_files",
+            Self::HandSuppliedDownloads => "hand_supplied_downloads",
             Self::AssetObjects => "asset_objects",
             Self::AssetIndexes => "asset_indexes",
             Self::Libraries => "libraries",
@@ -116,14 +133,26 @@ impl ManagedStorageKind {
     #[must_use]
     pub const fn category(self) -> StorageCategory {
         match self {
-            Self::DownloadedFiles | Self::InstallerFiles => StorageCategory::DownloadCache,
+            Self::DownloadedFiles | Self::InstallerFiles | Self::HandSuppliedDownloads => {
+                StorageCategory::DownloadCache
+            }
             Self::AssetObjects | Self::AssetIndexes | Self::Libraries | Self::UnpackedNatives => {
                 StorageCategory::SharedGameFiles
             }
         }
     }
 
+    /// Whether a cleanup removes this kind only when the user asks for it by
+    /// name, because removing it costs more than downloading it again.
+    #[must_use]
+    pub const fn is_opt_in(self) -> bool {
+        matches!(self, Self::HandSuppliedDownloads)
+    }
+
     fn of(entry: &StoreEntry) -> Self {
+        if entry.supplied_by_hand {
+            return Self::HandSuppliedDownloads;
+        }
         match (entry.store, &entry.address) {
             (ContentStore::InstallerCache, _) => Self::InstallerFiles,
             (ContentStore::Assets, EntryAddress::AssetIndex { .. }) => Self::AssetIndexes,
@@ -148,7 +177,8 @@ pub enum WithheldReason {
     /// store would free no space.
     LinkedIntoHost,
     /// The user supplied the file by hand because its provider does not allow
-    /// downloading it, so it cannot be fetched again once removed.
+    /// downloading it, so removing it costs a manual download. A cleanup
+    /// removes it only when asked to remove that kind.
     SuppliedByHand,
 }
 
@@ -333,6 +363,17 @@ impl CleanupPlan {
     #[must_use]
     pub fn unreadable_hosts(&self) -> &[String] {
         &self.unreadable_hosts
+    }
+
+    /// The kinds of this plan that a cleanup removes unless the user chooses
+    /// otherwise: every listed kind except those that need an explicit choice.
+    #[must_use]
+    pub fn default_kinds(&self) -> Vec<ManagedStorageKind> {
+        self.items
+            .iter()
+            .map(|item| item.kind)
+            .filter(|kind| !kind.is_opt_in())
+            .collect()
     }
 
     /// This plan narrowed to the entries of `kinds`.
@@ -634,21 +675,22 @@ fn judge(entry: &StoreEntry, host: &HostReferences, references: &References) -> 
     if named {
         return Judgement::Required;
     }
-    if entry.supplied_by_hand {
-        return Judgement::Withheld(WithheldReason::SuppliedByHand);
-    }
     if host.unreadable_hosts > 0 {
         return Judgement::Withheld(WithheldReason::HostReferencesUnknown);
     }
     let loader_files = matches!(
-        ManagedStorageKind::of(entry),
-        ManagedStorageKind::Libraries | ManagedStorageKind::InstallerFiles
+        entry.store,
+        ContentStore::Libraries | ContentStore::InstallerCache
     );
     if host.loader_hosts > 0 && loader_files {
         return Judgement::Withheld(WithheldReason::LoaderFilesNotRecorded);
     }
     if entry.linked_outside_store {
         return Judgement::Withheld(WithheldReason::LinkedIntoHost);
+    }
+    // Last, so every other reason to keep a file wins over offering it.
+    if entry.supplied_by_hand {
+        return Judgement::Withheld(WithheldReason::SuppliedByHand);
     }
     Judgement::Unused
 }
@@ -866,7 +908,9 @@ impl App {
         for (entry, judgement) in inventory.entries.iter().zip(&judgements) {
             let kind = ManagedStorageKind::of(entry);
             match judgement {
-                Judgement::Unused if kinds.contains(&kind) => {
+                Judgement::Unused | Judgement::Withheld(WithheldReason::SuppliedByHand)
+                    if kinds.contains(&kind) =>
+                {
                     let (usage, members) = items.entry(kind).or_default();
                     usage.add(entry);
                     members.push(entry);
@@ -927,12 +971,12 @@ impl App {
         })
     }
 
-    /// Removes what a confirmed plan listed, as far as it is still unused.
+    /// Removes what a confirmed plan listed, as far as it is still removable.
     ///
     /// Refuses with the cache-busy error, and removes nothing, while an
     /// operation holds the cache: a launch, an installation, or a running game.
     /// Decides again from the references as they are now, and removes only
-    /// entries that are in the plan and are still unused. A partial result says
+    /// entries that are in the plan and are still removable. A partial result says
     /// what was removed, what was not and why, and counts freed bytes only for
     /// entries that are gone.
     #[instrument(skip(self, plan, cancel))]
@@ -956,21 +1000,31 @@ impl App {
         }
         let host = self.host_references().await?;
         let references = host.references(self.artifact_cache().layout());
-        let unused: HashMap<&PathBuf, &StoreEntry> = inventory
+        let removable: HashMap<&PathBuf, &StoreEntry> = inventory
             .entries
             .iter()
-            .filter(|entry| judge(entry, &host, &references) == Judgement::Unused)
+            .filter(|entry| {
+                matches!(
+                    judge(entry, &host, &references),
+                    Judgement::Unused | Judgement::Withheld(WithheldReason::SuppliedByHand)
+                )
+            })
             .map(|entry| (&entry.paths[0], entry))
             .collect();
 
-        // The plan's entries, kept only where an identical unused entry is
-        // still there: same names, so a path that now holds something else is
+        // The plan's entries, kept only where an identical entry that may still
+        // be removed is there: same names, so a path that now holds something else is
         // not removed on the strength of an old plan. An entry whose names are
         // all gone was removed by someone else.
         let mut to_remove: Vec<StoreEntry> = Vec::new();
         for planned in &plan.entries {
-            match unused.get(&planned.paths[0]) {
-                Some(current) if current.paths == planned.paths => {
+            match removable.get(&planned.paths[0]) {
+                // A file whose standing as supplied by hand changed since the
+                // plan is not what the user confirmed.
+                Some(current)
+                    if current.paths == planned.paths
+                        && current.supplied_by_hand == planned.supplied_by_hand =>
+                {
                     to_remove.push((*current).clone());
                 }
                 _ if planned.paths.iter().all(|path| is_gone(path)) => {
@@ -2079,39 +2133,195 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_file_supplied_by_hand_is_kept_rather_than_judged_unused() {
-        let world = World::new().await;
-        world.client("1.21.1", LoaderSelection::vanilla());
-        let supplied = world.stray_download(b"a restricted mod jar");
-        let ordinary = world.stray_download(b"an ordinary pack file");
-        record_supplied_download(&world.layout, &sha1_of(b"a restricted mod jar"))
+    async fn supplied_by_hand(world: &World, body: &[u8]) -> PathBuf {
+        let path = world.stray_download(body);
+        record_supplied_download(&world.layout, &sha1_of(body))
             .await
             .unwrap();
+        path
+    }
+
+    fn marker_of(world: &World, body: &[u8]) -> PathBuf {
+        world.layout.supplied_marker(&sha1_of(body))
+    }
+
+    #[tokio::test]
+    async fn a_file_supplied_by_hand_is_its_own_kind_and_never_counted_as_reclaimable() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        supplied_by_hand(&world, b"a restricted mod jar").await;
+        world.stray_download(b"an ordinary pack file");
 
         let inspection = world.inspect().await;
+
         let downloads = group(&inspection, ManagedStorageKind::DownloadedFiles);
         assert_eq!(downloads.unused.entries, 1);
+        assert!(downloads.withheld.is_empty());
+        let supplied = group(&inspection, ManagedStorageKind::HandSuppliedDownloads);
+        assert_eq!(supplied.unused, Usage::default());
         assert_eq!(
-            downloads
+            supplied
                 .withheld
                 .first()
                 .map(|(reason, usage)| (*reason, usage.entries)),
             Some((WithheldReason::SuppliedByHand, 1))
         );
+        assert_eq!(
+            inspection.reclaimable_bytes(),
+            b"an ordinary pack file".len() as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn a_default_cleanup_keeps_a_file_supplied_by_hand_and_its_marker() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+        let ordinary = world.stray_download(b"an ordinary pack file");
 
         let plan = world.plan().await;
-        assert!(
-            plan.kept()
-                .iter()
-                .any(|kept| kept.reason == KeptReason::Withheld(WithheldReason::SuppliedByHand))
-        );
-        world.apply(&plan).await.expect("apply");
-        assert!(
-            supplied.is_file(),
-            "the hand-supplied file survives cleanup"
-        );
+
+        let kinds = plan.default_kinds();
+        assert_eq!(kinds, [ManagedStorageKind::DownloadedFiles]);
+        assert!(ManagedStorageKind::HandSuppliedDownloads.is_opt_in());
+        world
+            .apply(&plan.restricted_to(&kinds))
+            .await
+            .expect("apply");
+        assert!(supplied.is_file(), "the hand-supplied file survives");
+        assert!(marker_of(&world, b"a restricted mod jar").is_file());
         assert!(!ordinary.exists(), "an ordinary unused download is removed");
+    }
+
+    #[tokio::test]
+    async fn a_plan_that_does_not_name_the_hand_supplied_kind_lists_it_as_kept() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+
+        let plan = world
+            .app
+            .plan_storage_cleanup(
+                &[ManagedStorageKind::DownloadedFiles],
+                &CancellationToken::new(),
+            )
+            .await
+            .expect("plan");
+
+        assert!(plan.is_empty());
+        assert!(plan.kept().iter().any(|kept| {
+            kept.kind == ManagedStorageKind::HandSuppliedDownloads
+                && kept.reason == KeptReason::Withheld(WithheldReason::SuppliedByHand)
+        }));
+        world.apply(&plan).await.expect("apply");
+        assert!(supplied.is_file());
+    }
+
+    #[tokio::test]
+    async fn choosing_the_hand_supplied_kind_removes_its_files_and_markers_and_nothing_else() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+        let other = supplied_by_hand(&world, b"another restricted jar").await;
+        let ordinary = world.stray_download(b"an ordinary pack file");
+        let plan = world.plan().await;
+        let [first, second] = plan.items() else {
+            panic!("two kinds: {:?}", plan.items());
+        };
+        assert_eq!(first.kind, ManagedStorageKind::DownloadedFiles);
+        assert_eq!(second.kind, ManagedStorageKind::HandSuppliedDownloads);
+        assert_eq!(second.usage.entries, 2);
+
+        let chosen = plan.restricted_to(&[ManagedStorageKind::HandSuppliedDownloads]);
+        let outcome = world.apply(&chosen).await.expect("apply");
+
+        assert!(outcome.is_complete());
+        assert_eq!(outcome.removed.entries, 2);
+        assert!(!supplied.exists() && !other.exists());
+        assert!(!marker_of(&world, b"a restricted mod jar").exists());
+        assert!(!marker_of(&world, b"another restricted jar").exists());
+        assert!(ordinary.is_file(), "a kind that was not chosen stays");
+        let inspection = world.inspect().await;
+        assert!(
+            group(&inspection, ManagedStorageKind::HandSuppliedDownloads)
+                .total()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_downloaded_again_after_its_hand_supplied_copy_was_removed_is_ordinary() {
+        let world = World::new().await;
+        supplied_by_hand(&world, b"a restricted mod jar").await;
+        let plan = world.plan().await;
+        world.apply(&plan).await.expect("apply");
+
+        let again = world.stray_download(b"a restricted mod jar");
+
+        let inspection = world.inspect().await;
+        assert_eq!(
+            group(&inspection, ManagedStorageKind::DownloadedFiles)
+                .unused
+                .entries,
+            1
+        );
+        assert!(again.is_file());
+    }
+
+    #[tokio::test]
+    async fn a_hand_supplied_file_is_skipped_when_the_hosts_became_unreadable_after_the_plan() {
+        let world = World::new().await;
+        let client = world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+        let plan = world.plan().await;
+        world
+            .app
+            .registry()
+            .index()
+            .connection()
+            .execute_batch(&format!(
+                "UPDATE instances SET loader_kind = 'fabric' WHERE id = '{}'",
+                client.id
+            ))
+            .expect("tamper");
+
+        let outcome = world.apply(&plan).await.expect("apply");
+
+        assert!(supplied.is_file());
+        assert!(marker_of(&world, b"a restricted mod jar").is_file());
+        assert_eq!(outcome.no_longer_unused, 1);
+        assert_eq!(outcome.removed, Usage::default());
+    }
+
+    #[tokio::test]
+    async fn a_hand_supplied_file_is_skipped_when_its_marker_disappeared_after_the_plan() {
+        let world = World::new().await;
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+        let plan = world.plan().await;
+        std::fs::remove_file(marker_of(&world, b"a restricted mod jar")).unwrap();
+
+        let outcome = world.apply(&plan).await.expect("apply");
+
+        assert!(supplied.is_file());
+        assert_eq!(outcome.no_longer_unused, 1);
+        assert_eq!(outcome.removed, Usage::default());
+    }
+
+    #[tokio::test]
+    async fn a_hand_supplied_file_that_a_host_links_is_withheld_rather_than_offered() {
+        let world = World::new().await;
+        world.client("1.21.1", LoaderSelection::vanilla());
+        let supplied = supplied_by_hand(&world, b"a restricted mod jar").await;
+        let link = world.base.path().join("linked-into-a-host.jar");
+        std::fs::hard_link(&supplied, &link).unwrap();
+
+        let plan = world.plan().await;
+
+        assert!(plan.is_empty());
+        assert!(plan.kept().iter().any(|kept| {
+            kept.kind == ManagedStorageKind::HandSuppliedDownloads
+                && kept.reason == KeptReason::Withheld(WithheldReason::LinkedIntoHost)
+        }));
     }
 
     #[tokio::test]

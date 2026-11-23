@@ -292,7 +292,8 @@ disk-usage view.
 instance or server needs: downloaded files, loader installers, game assets,
 asset indexes, libraries, and unpacked natives. Each group shows its size, why
 it is safe to remove, and its largest files. A switch on each group is on by
-default. Turn off a group to keep it: the summary line and the **Remove**
+default, except the group of files you downloaded by hand (described below).
+Turn off a group to keep it: the summary line and the **Remove**
 button then count only the groups that are still on, and the button is disabled
 while none is. Only the groups that are on are removed.
 
@@ -302,6 +303,14 @@ claimed since the review. Files kept for a stated reason, and instances,
 servers, mods, worlds, configuration, snapshots, and recovery files, are never
 part of the cleanup. Removed shared files are downloaded or unpacked again the
 next time something needs them.
+
+Files you downloaded by hand into a watched folder, because their provider does
+not let Ephervex download them, are listed as their own **Downloaded by hand**
+group. That group is off by default and is never counted in the size the page
+reports as reclaimable. Turn it on to remove those copies. The next import,
+repair, or install that needs one of them may show the blocked-file dialog again
+so you can download it by hand again. The copy in your watched folder is not
+touched.
 
 ## Launcher log
 

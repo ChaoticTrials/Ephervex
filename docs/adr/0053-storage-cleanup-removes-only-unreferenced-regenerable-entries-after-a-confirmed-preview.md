@@ -39,6 +39,15 @@ plan it showed to some of its kinds. Narrowing only drops entries, so the
 narrowed plan is still one core made, names nothing the review did not show,
 and is applied and re-decided exactly as the whole plan would be.
 
+**Files the user supplied by hand are removed only on request.** A file adopted
+because its provider refuses to serve it costs a manual download to get back,
+so it is never counted as reclaimable and never part of a default cleanup. The
+plan lists the ones no host names as their own kind, which a frontend leaves
+unselected until the user chooses it. Removing one also removes its provenance
+marker. The same withholding reasons still apply first, so such a file is
+offered only when nothing else keeps it. The byte budget of the download stores
+still never collects them.
+
 **Integrity and recovery use evidence only.** Entries named by their digest are
 read and compared with it. Files an installed version's metadata lists are
 compared with the digest it states. Natives and loader libraries are reported

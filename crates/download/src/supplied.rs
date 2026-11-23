@@ -9,8 +9,10 @@
 //! That fact is recorded as a marker at [`CacheLayout::supplied_marker`]. Byte
 //! budget collection and reference-based cleanup both read it and leave a marked
 //! file alone: removing it would cost the user a manual download, not a
-//! transfer. The marker is written before the file is published, so a walk that
-//! sees the file always sees its marker.
+//! transfer. Only a cleanup the user confirmed for these files removes one, and
+//! it removes the marker with the file, so a later automatic download of the
+//! same digest is not protected by a stale marker. The marker is written before
+//! the file is published, so a walk that sees the file always sees its marker.
 
 use std::path::Path;
 
@@ -34,6 +36,24 @@ pub async fn record_supplied_download(layout: &CacheLayout, hash: &Hash) -> std:
         .open(&marker)
         .await?;
     file.sync_all().await
+}
+
+/// Forgets that the file addressed by `hash` was supplied by hand.
+///
+/// A marker that is already gone counts as forgotten. Only a regular file is
+/// removed: anything else at the marker's name never spared a file, and is left
+/// as it is.
+pub(crate) fn forget_supplied_download(layout: &CacheLayout, hash: &Hash) -> std::io::Result<()> {
+    let marker = layout.supplied_marker(hash);
+    match std::fs::symlink_metadata(&marker) {
+        Ok(metadata) if metadata.is_file() => match std::fs::remove_file(&marker) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        },
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Whether the file addressed by `hash` was supplied by hand.
@@ -78,6 +98,20 @@ mod tests {
             .expect("record again");
 
         assert!(is_supplied_download(&layout, &hash()));
+    }
+
+    #[tokio::test]
+    async fn forgetting_a_supplied_digest_removes_its_marker_and_is_harmless_twice() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let layout = CacheLayout::new(root.path());
+        record_supplied_download(&layout, &hash())
+            .await
+            .expect("record");
+
+        forget_supplied_download(&layout, &hash()).expect("forget");
+        forget_supplied_download(&layout, &hash()).expect("forget again");
+
+        assert!(!is_supplied_download(&layout, &hash()));
     }
 
     #[cfg(unix)]

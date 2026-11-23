@@ -18851,7 +18851,7 @@ mod tests {
     }
 
     #[test]
-    fn every_group_of_a_review_starts_selected_and_the_confirmation_covers_all_of_them() {
+    fn every_default_group_of_a_review_starts_selected_and_the_confirmation_covers_all_of_them() {
         let (ui, commands, _state) = two_group_review();
 
         let selected: Vec<bool> = ui
@@ -18884,6 +18884,105 @@ mod tests {
                 ephervex_core::ManagedStorageKind::Libraries
             ]
         );
+    }
+
+    #[test]
+    fn the_hand_supplied_group_of_a_review_stays_unselected_until_it_is_chosen() {
+        use ephervex_core::{CleanupItem, ManagedStorageKind};
+        let (ui, commands, state) = disk_usage_window();
+        let plan = ephervex_core::test_support::cleanup_plan_for_review(
+            vec![
+                CleanupItem {
+                    kind: ManagedStorageKind::DownloadedFiles,
+                    usage: storage_usage(3, 1024),
+                    largest: Vec::new(),
+                },
+                CleanupItem {
+                    kind: ManagedStorageKind::HandSuppliedDownloads,
+                    usage: storage_usage(24, 18_595_011),
+                    largest: Vec::new(),
+                },
+            ],
+            Vec::new(),
+            true,
+        );
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Planned {
+                plan: 4,
+                preview: plan,
+            },
+        );
+
+        let rows: Vec<_> = ui.get_storage_plan_items().iter().collect();
+        assert_eq!(
+            rows.iter().map(|row| row.selected).collect::<Vec<_>>(),
+            [true, false]
+        );
+        assert_eq!(
+            rows[1].detail,
+            lookup("gui-storage-why-hand-supplied").as_str(),
+            "the group says a manual download may be needed again"
+        );
+        assert_eq!(
+            ui.get_storage_plan_confirm(),
+            lookup_args(
+                "gui-storage-cleanup-confirm",
+                [(
+                    "value",
+                    Arg::from(ephervex_model::format_binary_bytes(1024))
+                )]
+            )
+            .as_str(),
+            "the default confirmation does not count the unselected group"
+        );
+        ui.invoke_confirm_storage_cleanup(4);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { plan: 4, kinds })
+                if kinds == [ManagedStorageKind::DownloadedFiles]
+        ));
+    }
+
+    #[test]
+    fn choosing_the_hand_supplied_group_adds_it_to_the_confirmed_kinds() {
+        use ephervex_core::{CleanupItem, ManagedStorageKind};
+        let (ui, commands, state) = disk_usage_window();
+        let plan = ephervex_core::test_support::cleanup_plan_for_review(
+            vec![CleanupItem {
+                kind: ManagedStorageKind::HandSuppliedDownloads,
+                usage: storage_usage(2, 2048),
+                largest: Vec::new(),
+            }],
+            Vec::new(),
+            true,
+        );
+        let (sender, _unused) = std::sync::mpsc::channel();
+        apply_storage(
+            &ui,
+            &state,
+            &sender,
+            backend::StorageMaintenanceEvent::Planned {
+                plan: 5,
+                preview: plan,
+            },
+        );
+        assert!(ui.get_storage_plan_nothing_selected());
+        ui.invoke_confirm_storage_cleanup(5);
+        assert!(commands.try_recv().is_err(), "nothing chosen, nothing sent");
+
+        ui.invoke_toggle_storage_plan_group("hand_supplied_downloads".into(), true);
+
+        assert!(!ui.get_storage_plan_nothing_selected());
+        ui.invoke_confirm_storage_cleanup(5);
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::ApplyStorageCleanup { plan: 5, kinds })
+                if kinds == [ManagedStorageKind::HandSuppliedDownloads]
+        ));
     }
 
     #[test]

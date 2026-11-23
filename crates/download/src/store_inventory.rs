@@ -43,7 +43,7 @@ use crate::artifact_cache::{
     note_entry_failure, note_listing_failure, read_directory,
 };
 use crate::cache::{CacheLayout, ContentAddress, ContentStore, PART_SUFFIX};
-use crate::supplied::is_supplied_download;
+use crate::supplied::{forget_supplied_download, is_supplied_download};
 
 /// How many levels above a removed file an emptied directory is pruned for a
 /// store whose layout is `<root>/<shard>/<file>`-shaped.
@@ -616,6 +616,17 @@ fn remove_entry(layout: &CacheLayout, entry: &StoreEntry) -> EntryRemoval {
         }
         prune_empty_parents(path, &root, levels);
     }
+    // The marker goes with the file, so a later download of the same digest is
+    // not mistaken for one the user supplied. A marker that cannot be removed is
+    // reported rather than left silently: it would protect the wrong file.
+    if entry.supplied_by_hand
+        && let EntryAddress::Content(address) = &entry.address
+        && let Err(error) = forget_supplied_download(layout, &address.hash)
+    {
+        let marker = layout.supplied_marker(&address.hash);
+        warn!(path = %marker.display(), %error, "could not remove a supplied-by-hand marker");
+        return refuse(&marker, error.kind());
+    }
     if removed > 0 || gone == 0 {
         EntryRemoval::Removed
     } else {
@@ -975,6 +986,29 @@ mod tests {
 
         assert!(entry_at(&inventory, &supplied).supplied_by_hand);
         assert!(!entry_at(&inventory, &ordinary).supplied_by_hand);
+    }
+
+    #[tokio::test]
+    async fn removing_an_entry_supplied_by_hand_removes_its_marker_and_only_its_own() {
+        let fixture = Fixture::new();
+        let supplied = fixture.download(0x31, 3);
+        let other = fixture.download(0x32, 3);
+        for seed in [0x31, 0x32] {
+            crate::supplied::record_supplied_download(fixture.layout(), &sha1(seed))
+                .await
+                .expect("record");
+        }
+        let inventory = fixture.inventory().await;
+        let chosen = vec![entry_at(&inventory, &supplied).clone()];
+
+        let exclusive = fixture.cache.exclusive().await.expect("exclusive");
+        let outcomes = exclusive.remove(chosen, &CancellationToken::new()).await;
+
+        assert_eq!(outcomes, vec![EntryRemoval::Removed]);
+        assert!(!supplied.exists());
+        assert!(!is_supplied_download(fixture.layout(), &sha1(0x31)));
+        assert!(other.is_file());
+        assert!(is_supplied_download(fixture.layout(), &sha1(0x32)));
     }
 
     fn entry_for(store: ContentStore, path: &Path) -> StoreEntry {

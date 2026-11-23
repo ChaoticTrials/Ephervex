@@ -3838,6 +3838,8 @@ gui-storage-kind-downloaded-files = Downloaded files
 gui-storage-kind-downloaded-files-detail = Game jars and logging settings, pack files, and runtime archives. Shared by every instance and server.
 gui-storage-kind-installer-files = Loader installers
 gui-storage-kind-installer-files-detail = The installers Forge and NeoForge are set up with. Shared by every instance and server.
+gui-storage-kind-hand-supplied = Downloaded by hand
+gui-storage-kind-hand-supplied-detail = Files you downloaded yourself because their provider does not let Ephervex download them. Shared by every instance and server.
 gui-storage-kind-asset-objects = Game assets
 gui-storage-kind-asset-objects-detail = Sounds, textures, and language files Minecraft loads by hash. Shared by every instance.
 gui-storage-kind-asset-indexes = Asset indexes
@@ -3858,7 +3860,7 @@ gui-storage-unreadable-hosts = { $count ->
    *[other] The records of { $names } could not be read, so nothing is judged unused until they can be read or are deleted.
 }
 gui-storage-withheld-linked = the file is also linked inside an instance or server, so removing it frees no space
-gui-storage-withheld-supplied = the file was downloaded by hand and its provider does not let Ephervex download it again
+gui-storage-withheld-supplied = the file was downloaded by hand, so a cleanup removes it only when you choose that group
 gui-storage-integrity-sound = { $count ->
     [one] 1 file checked, and it is intact.
    *[other] { $count } files checked, and all are intact.
@@ -3916,6 +3918,7 @@ gui-storage-cleanup-item = { $count ->
 }, { $value }
 gui-storage-cleanup-largest = Largest: { $value }
 gui-storage-why-downloaded-files = No instance's game version needs it. It is downloaded again when something asks for it.
+gui-storage-why-hand-supplied = No instance's game version names it, and it is not selected unless you choose it. Removing it frees the space, but a repair, import, or install that needs it may ask you to download it by hand again.
 gui-storage-why-installer-files = No instance or server runs a loader, so no installer is needed. It is downloaded again when one is.
 gui-storage-why-asset-objects = No instance's game version lists it. It is downloaded again when a version that does is launched.
 gui-storage-why-asset-indexes = No instance's game version uses it. It is copied again when needed.

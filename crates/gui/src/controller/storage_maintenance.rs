@@ -86,9 +86,10 @@ struct PlanReview {
 }
 
 impl PlanReview {
-    /// A review with every group of the plan selected.
+    /// A review with the groups a cleanup removes by default selected. A group
+    /// that needs an explicit choice stays unselected.
     fn new(id: u64, preview: CleanupPlan) -> Self {
-        let selected = preview.items().iter().map(|item| item.kind).collect();
+        let selected = preview.default_kinds().into_iter().collect();
         Self {
             id,
             preview,
@@ -132,6 +133,11 @@ const fn kind_messages(kind: ManagedStorageKind) -> (&'static str, &'static str,
             "gui-storage-kind-installer-files",
             "gui-storage-kind-installer-files-detail",
             "gui-storage-why-installer-files",
+        ),
+        ManagedStorageKind::HandSuppliedDownloads => (
+            "gui-storage-kind-hand-supplied",
+            "gui-storage-kind-hand-supplied-detail",
+            "gui-storage-why-hand-supplied",
         ),
         ManagedStorageKind::AssetObjects => (
             "gui-storage-kind-asset-objects",

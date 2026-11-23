@@ -756,7 +756,9 @@ A file the user supplied by hand because its provider refuses to serve it
 one entry that cannot be fetched again. Adopting it records a marker under
 `supplied-downloads/`, keyed by digest and written before the file is published.
 Budget collection and a manual clear neither count nor remove a marked file, and
-storage cleanup lists it as kept, never as unused. Files adopted before the marker
+storage cleanup never counts it as unused: it offers the ones no host names as a
+separate kind that is not selected by default, and removing one also removes its
+marker. Files adopted before the marker
 existed carry none and are treated like any other download.
 
 The budget is soft in both directions that matter. A required artifact is
@@ -836,7 +838,8 @@ every category with its size in words beside its bar, largest first.
 
 Below the measurement, the same page maintains the shared, regenerable stores
 under the cache root (ADR 0053). Inspect lists each kind of entry (downloads,
-installers, asset objects and indexes, libraries, unpacked natives) split into
+installers, files downloaded by hand, asset objects and indexes, libraries,
+unpacked natives) split into
 what an installed client's game version names, what nothing names, and what is
 kept anyway with the reason. Nothing is judged unused from age. A Forge or
 NeoForge host keeps libraries and installers, and an unreadable version record
@@ -847,8 +850,9 @@ installed version's metadata lists, with those digests, and says what it could
 not cover. Fetch Damaged Files Again re-downloads only the damaged or missing
 files an installed version needs, through the ordinary download path, and
 checks again afterwards. Review Cleanup shows the plan: kinds, counts, sizes,
-why each is disposable, and what stays. Each kind can be deselected, and the
-confirmation applies the plan narrowed to the selected kinds
+why each is disposable, and what stays. Each kind can be deselected, except that the
+files downloaded by hand start deselected (`ManagedStorageKind::is_opt_in`), and
+the confirmation applies the plan narrowed to the selected kinds
 (`CleanupPlan::restricted_to`). Only that confirmation applies it, under
 the exclusive cache lock, deciding again from the references at that moment.
 Instances, servers, mods, worlds, configuration, snapshots, and recovery state
