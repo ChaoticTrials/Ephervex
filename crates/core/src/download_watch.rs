@@ -16,7 +16,7 @@
 use std::path::{Path, PathBuf};
 
 use ephervex_download::{
-    CacheLayout, ContentStore, FileExtension, file_matches_hashes, publish_staged,
+    ArtifactCache, ContentStore, FileExtension, file_matches_hashes, publish_staged,
     record_supplied_download, staging_path, stored_file_matches,
 };
 use ephervex_model::Hash;
@@ -60,7 +60,7 @@ impl App {
         DownloadWatcher {
             folders: self.watched_download_folders(),
             targets,
-            cache: self.artifact_cache().layout().clone(),
+            cache: self.artifact_cache(),
         }
     }
 }
@@ -84,7 +84,7 @@ pub const RESCAN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(
 pub struct DownloadWatcher {
     folders: Vec<PathBuf>,
     targets: Vec<WatchTarget>,
-    cache: CacheLayout,
+    cache: ArtifactCache,
 }
 
 impl DownloadWatcher {
@@ -178,8 +178,13 @@ impl DownloadWatcher {
 /// The candidate itself is left exactly where the user put it - this adopts
 /// a copy, never a move, so a folder the user is still watching in a file
 /// manager does not lose the file it just found.
+///
+/// Holds a shared cache lease from recording the marker through publication,
+/// like any operation that writes to the stores, so an exclusive storage
+/// cleanup cannot remove the file or its marker between those steps. Waits
+/// while a cleanup holds the cache.
 async fn adopt_into_cache(
-    cache: &CacheLayout,
+    cache: &ArtifactCache,
     source: &Path,
     target: &WatchTarget,
 ) -> std::io::Result<()> {
@@ -195,11 +200,13 @@ async fn adopt_into_cache(
         .and_then(|name| Path::new(name).extension())
         .and_then(|extension| extension.to_str())
         .and_then(|extension| FileExtension::new(extension).ok());
-    let destination = cache.content(ContentStore::Downloads, hash, extension.as_ref());
+    let _lease = cache.lease().await.map_err(std::io::Error::other)?;
+    let layout = cache.layout();
+    let destination = layout.content(ContentStore::Downloads, hash, extension.as_ref());
     // Recorded before the file is published, and also when an identical copy is
     // already there, so a walk of the store that sees the file sees its
     // provenance too.
-    record_supplied_download(cache, hash).await?;
+    record_supplied_download(layout, hash).await?;
     if stored_file_matches(&destination, None, &target.hashes)
         .await
         .unwrap_or(false)
@@ -282,7 +289,7 @@ mod tests {
         let mut watcher = DownloadWatcher {
             folders: vec![folder.path().to_path_buf()],
             targets: vec![target],
-            cache: app.artifact_cache().layout().clone(),
+            cache: app.artifact_cache(),
         };
 
         let matched = watcher.scan_once().await.expect("the file matches");
@@ -325,7 +332,7 @@ mod tests {
                 file_name: Some("mod.jar".to_owned()),
                 hashes: vec![hash],
             }],
-            cache: app.artifact_cache().layout().clone(),
+            cache: app.artifact_cache(),
         };
 
         assert!(watcher.scan_once().await.is_none());
@@ -351,7 +358,7 @@ mod tests {
                 file_name: Some("mod.jar".to_owned()),
                 hashes: vec![hash],
             }],
-            cache: app.artifact_cache().layout().clone(),
+            cache: app.artifact_cache(),
         };
 
         assert!(watcher.scan_once().await.is_some());
@@ -383,7 +390,7 @@ mod tests {
                 file_name: Some("mod.jar".to_owned()),
                 hashes: vec![hash],
             }],
-            cache: app.artifact_cache().layout().clone(),
+            cache: app.artifact_cache(),
         };
         (base, app, folder, watcher, cache_path)
     }
@@ -444,6 +451,52 @@ mod tests {
             .filter(|name| name != cache_path.file_name().expect("file name"))
             .collect();
         assert!(leftovers.is_empty(), "unexpected files: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn adoption_waits_for_a_storage_cleanup_that_holds_the_cache() {
+        let body = b"a copy the user placed by hand";
+        let (_base, app, _folder, mut watcher, cache_path) = adoption_fixture(body);
+        let hash = Hash::new(HashAlgorithm::Sha1, &sha1_of(body)).expect("sha1");
+        let cleanup = app
+            .artifact_cache()
+            .exclusive()
+            .await
+            .expect("the cache is free");
+
+        let scan = watcher.scan_once();
+        tokio::pin!(scan);
+        let early = tokio::time::timeout(std::time::Duration::from_millis(300), &mut scan).await;
+        assert!(early.is_err(), "adoption does not proceed during a cleanup");
+        assert!(
+            !cache_path.exists(),
+            "nothing is published during a cleanup"
+        );
+        assert!(
+            !is_supplied_download(app.artifact_cache().layout(), &hash),
+            "no marker is recorded during a cleanup"
+        );
+
+        drop(cleanup);
+        let adopted = tokio::time::timeout(std::time::Duration::from_secs(10), &mut scan)
+            .await
+            .expect("adoption proceeds once the cleanup is done");
+        assert!(adopted.is_some());
+        assert_eq!(std::fs::read(&cache_path).expect("adopted copy"), body);
+        assert!(is_supplied_download(app.artifact_cache().layout(), &hash));
+    }
+
+    #[tokio::test]
+    async fn adoption_releases_its_cache_lease_when_it_finishes() {
+        let (_base, app, _folder, mut watcher, _cache_path) =
+            adoption_fixture(b"a copy the user placed by hand");
+
+        assert!(watcher.scan_once().await.is_some());
+
+        assert!(
+            app.artifact_cache().exclusive().await.is_ok(),
+            "a cleanup can take the cache once adoption is done"
+        );
     }
 
     fn sha1_of(bytes: &[u8]) -> String {
