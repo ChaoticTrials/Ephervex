@@ -107,6 +107,36 @@ fn the_loader_change_dialog_keeps_the_body_padding_under_cancel_whatever_mods_it
 }
 
 #[test]
+fn the_loader_change_dialog_keeps_the_body_padding_under_cancel_beside_the_unchecked_mods_note() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for (listed, unchecked, error) in [(0_usize, 3, ""), (0, 3, LONG_ERROR), (3, 40, "")] {
+            let rows: Vec<SharedString> = (0..listed)
+                .map(|index| SharedString::from(format!("Mod {index}: Does not support NeoForge.")))
+                .collect();
+            ui.set_loader_change_loading(false);
+            ui.set_loader_change_versions(ModelRc::new(VecModel::from(vec![
+                SharedString::from("21.1.2"),
+                SharedString::from("21.1.1"),
+            ])));
+            ui.set_loader_change_selected("21.1.2".into());
+            ui.set_loader_change_blocked(ModelRc::new(VecModel::from(rows)));
+            ui.set_loader_change_unverifiable(unchecked);
+            ui.set_modal_error(error.into());
+            ui.set_modal("loader-change".into());
+            settle(&ui);
+
+            let gap = space_under_cancel(&ui);
+            assert!(
+                gap >= BODY_PADDING,
+                "loader-change at text scale {scale} with {listed} mods listed, {unchecked} unchecked and error {error:?}: {gap}px under Cancel"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_new_snapshot_dialog_keeps_the_body_padding_under_cancel() {
     let ui = support::test_window();
     for scale in [1.0_f32, 1.25] {

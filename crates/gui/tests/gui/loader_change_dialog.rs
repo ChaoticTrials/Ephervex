@@ -3,7 +3,8 @@
 //! A refusal that names only a count, and offers nothing to answer it with,
 //! leaves the user unable to install the build they chose. The dialog shows
 //! which mods do not fit and why, and installs anyway only on a second,
-//! explicit action.
+//! explicit action. It also says how many mods could not be checked against the
+//! build that is selected.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -89,6 +90,33 @@ fn choosing_another_build_withdraws_the_acceptance_offered_for_the_first() {
     );
 }
 
+#[test]
+fn the_count_of_unchecked_mods_is_shown_and_withdrawn_when_another_build_is_picked() {
+    let ui = support::test_window();
+    let planned = record_plan_requests(&ui);
+    open_dialog(&ui, "21.1.1", "21.1.2");
+    ui.set_loader_change_versions(lines(&["21.1.3", "21.1.2", "21.1.1"]));
+    ui.set_loader_change_unverifiable(3);
+    settle(&ui);
+    let note = lookup_args("gui-loader-change-unverifiable", [("count", Arg::Count(3))]);
+    assert!(
+        widest(&ui, &note).is_some(),
+        "the count of unchecked mods is stated"
+    );
+
+    pick_up(&ui, &lookup("gui-loader-change-target"), 1);
+
+    assert_eq!(ui.get_loader_change_unverifiable(), 0);
+    assert!(
+        widest(&ui, &note).is_none(),
+        "a count that belonged to the previous build is not kept"
+    );
+    assert_eq!(
+        planned.borrow().as_slice(),
+        [("instance".to_owned(), "21.1.3".to_owned())]
+    );
+}
+
 /// Opens the dropdown and moves its selection up by `steps` entries, the way
 /// the arrow keys do, then confirms.
 fn pick_up(ui: &AppWindow, label: &str, steps: usize) {
@@ -123,6 +151,16 @@ fn record_requests(ui: &AppWindow) -> Rc<RefCell<Vec<Request>>> {
     ui.on_change_loader_version(move |instance, version, accept| {
         sink.borrow_mut()
             .push((instance.to_string(), version.to_string(), accept));
+    });
+    requests
+}
+
+fn record_plan_requests(ui: &AppWindow) -> Rc<RefCell<Vec<(String, String)>>> {
+    let requests: Rc<RefCell<Vec<(String, String)>>> = Rc::default();
+    let sink = Rc::clone(&requests);
+    ui.on_plan_loader_change(move |instance, version| {
+        sink.borrow_mut()
+            .push((instance.to_string(), version.to_string()));
     });
     requests
 }

@@ -5265,6 +5265,7 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
         ui.set_loader_change_loading(true);
         ui.set_loader_change_pending(false);
         ui.set_loader_change_blocked(model(Vec::new()));
+        ui.set_loader_change_unverifiable(0);
         ui.set_modal_error(SharedString::default());
         ui.set_modal("loader-change".into());
         send(
@@ -5276,6 +5277,26 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
                 minecraft: row.minecraft.to_string(),
             },
         );
+    });
+
+    let sender = commands.clone();
+    let handle = ui.as_weak();
+    ui.on_plan_loader_change(move |instance, version| {
+        let Some(ui) = handle.upgrade() else { return };
+        // The build the instance already runs is not a move, so there is
+        // nothing to check it against.
+        if version.is_empty() || version == ui.get_loader_change_current_build() {
+            return;
+        }
+        if let Some(instance) = backend::parse_instance_id(&instance) {
+            send(
+                &sender,
+                Command::PlanLoaderVersionChange {
+                    instance,
+                    version: version.to_string(),
+                },
+            );
+        }
     });
 
     let sender = commands.clone();
@@ -9439,6 +9460,11 @@ fn apply_event(
             version,
             mods,
         } => apply_loader_change_blocked(ui, instance, &version, &mods),
+        Event::LoaderChangePlanned {
+            instance,
+            version,
+            unverifiable,
+        } => apply_loader_change_plan(ui, instance, &version, unverifiable),
         Event::ManagedMods(data) => {
             // Kept with the host it belongs to, checked by kind as well as id,
             // so a server's list never lands in the panel of the instance it
@@ -10185,6 +10211,21 @@ fn apply_loader_change_blocked(
         ui.set_loader_change_blocked(model(
             mods.iter().cloned().map(SharedString::from).collect(),
         ));
+    }
+}
+
+/// Shows how many mods could not be checked against `version` in the dialog
+/// that asked, while it still has that build selected. An answer about another
+/// build, or for a dialog that is gone or open for another instance, has
+/// nothing to say about this one.
+fn apply_loader_change_plan(
+    ui: &AppWindow,
+    instance: ephervex_model::InstanceId,
+    version: &str,
+    unverifiable: usize,
+) {
+    if loader_change_dialog_is_for(ui, instance) && ui.get_loader_change_selected() == version {
+        ui.set_loader_change_unverifiable(i32::try_from(unverifiable).unwrap_or(i32::MAX));
     }
 }
 
@@ -22386,6 +22427,94 @@ mod tests {
                 other => panic!("expected a loader change request, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn the_mods_a_build_could_not_check_reach_the_dialog_that_has_it_selected() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.2".into());
+
+        apply_loader_change_plan(&ui, a, "21.1.2", 3);
+
+        assert_eq!(ui.get_loader_change_unverifiable(), 3);
+    }
+
+    #[test]
+    fn a_plan_for_a_build_no_longer_selected_leaves_the_count_alone() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.3".into());
+
+        apply_loader_change_plan(&ui, a, "21.1.2", 3);
+
+        assert_eq!(ui.get_loader_change_unverifiable(), 0);
+    }
+
+    #[test]
+    fn a_plan_for_another_instance_leaves_the_open_dialog_alone() {
+        let (a, b) = (new_instance(), new_instance());
+        let (ui, _commands) = loader_change_window(&[
+            (&a.to_string(), "NeoForge", "1.21.1"),
+            (&b.to_string(), "NeoForge", "1.21.1"),
+        ]);
+        open_loader_change(&ui, a);
+        open_loader_change(&ui, b);
+        ui.set_loader_change_selected("21.1.2".into());
+
+        apply_loader_change_plan(&ui, a, "21.1.2", 3);
+
+        assert_eq!(ui.get_loader_change_unverifiable(), 0);
+    }
+
+    #[test]
+    fn reopening_the_loader_change_dialog_forgets_an_earlier_count() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.2".into());
+        apply_loader_change_plan(&ui, a, "21.1.2", 3);
+
+        open_loader_change(&ui, a);
+
+        assert_eq!(ui.get_loader_change_unverifiable(), 0);
+    }
+
+    #[test]
+    fn picking_a_build_asks_what_could_not_be_checked_against_it() {
+        let a = new_instance();
+        let (ui, commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        // Opening the dialog asks for the build list.
+        assert!(matches!(
+            commands.try_recv(),
+            Ok(Command::LoadLoaderVersions { .. })
+        ));
+        ui.set_loader_change_current_build("21.1.1".into());
+
+        ui.invoke_plan_loader_change(a.to_string().into(), "21.1.2".into());
+
+        match commands.try_recv() {
+            Ok(Command::PlanLoaderVersionChange { instance, version }) => {
+                assert_eq!(instance, a);
+                assert_eq!(version, "21.1.2");
+            }
+            other => panic!("expected a plan request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_build_an_instance_already_runs_is_not_planned() {
+        let a = new_instance();
+        let (ui, commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        ui.set_loader_change_current_build("21.1.1".into());
+
+        ui.invoke_plan_loader_change(a.to_string().into(), "21.1.1".into());
+        ui.invoke_plan_loader_change(a.to_string().into(), "".into());
+
+        assert!(commands.try_recv().is_err());
     }
 
     #[test]

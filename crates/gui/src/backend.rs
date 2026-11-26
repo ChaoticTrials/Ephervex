@@ -553,6 +553,13 @@ pub enum Command {
         /// ever true after the user has seen which mods those are.
         accept_incompatible_mods: bool,
     },
+    /// Asks what moving the instance to `version` would involve, so the Change
+    /// Loader dialog can say what could not be checked before anything is
+    /// installed.
+    PlanLoaderVersionChange {
+        instance: InstanceId,
+        version: String,
+    },
     SearchMods {
         host: InstalledHost,
         /// Which catalog to search. Explicit rather than an application-wide
@@ -2097,6 +2104,14 @@ pub enum Event {
         instance: InstanceId,
         version: String,
         mods: Vec<String>,
+    },
+    /// How many of the instance's managed mods could not be checked against
+    /// `version`. Shown in the Change Loader dialog only while it is still open
+    /// for that instance and still has that build selected.
+    LoaderChangePlanned {
+        instance: InstanceId,
+        version: String,
+        unverifiable: usize,
     },
     ManagedMods(ManagedModsData),
     /// What a set of dropped files would do, and what has to be asked first.
@@ -4208,6 +4223,22 @@ fn run_worker(
                                 message: logged_failure_message(&error),
                             });
                         }
+                    }
+                });
+            }
+            Command::PlanLoaderVersionChange { instance, version } => {
+                let paths = app.paths().clone();
+                spawn_detached(paths, events.clone(), move |app, events, runtime| {
+                    // A build that cannot be planned says so again, with its
+                    // reason, when the user asks to install it.
+                    if let Ok(plan) =
+                        runtime.block_on(app.plan_loader_version_change(instance, &version))
+                    {
+                        let _ = events.send(Event::LoaderChangePlanned {
+                            instance,
+                            version,
+                            unverifiable: plan.unverifiable,
+                        });
                     }
                 });
             }
