@@ -69,6 +69,7 @@ pub mod catalog;
 pub mod codec;
 pub mod compatibility;
 pub mod dataset;
+pub mod early_window;
 pub mod error;
 pub mod feed;
 pub mod file;
@@ -96,6 +97,9 @@ pub use compatibility::{
 pub use dataset::{
     DATASET_FORMAT_VERSION, DatasetError, OptionsDataset, RegistrySetting, ReleaseMapping,
     Representation, SchemaFamily, StartupPreset,
+};
+pub use early_window::{
+    EARLY_WINDOW_CONFIG_FILE, EarlyWindowOutcome, EarlyWindowRefusal, apply_early_window_size,
 };
 pub use error::OptionsError;
 pub use feed::{DEFAULT_FEED_URL, FeedError, FeedSource, OPTIONS_FEED_CACHE_KEY, OptionsFeed};

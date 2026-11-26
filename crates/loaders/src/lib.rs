@@ -10,7 +10,7 @@ mod provider;
 pub use discovery::{
     FORGE_MAVEN_METADATA_URL, FORGE_PROMOTIONS_URL, LoaderBuild, LoaderCatalog,
     LoaderVersionListing, NEOFORGE_FORGE_ARTIFACT_MAVEN_METADATA_URL, NEOFORGE_MAVEN_METADATA_URL,
-    NEOFORGE_MINIMUM_MINECRAFT, minimum_minecraft, neoforge_minecraft,
+    NEOFORGE_MINIMUM_MINECRAFT, has_early_loading_window, minimum_minecraft, neoforge_minecraft,
     require_supported_installer_format, supports_minecraft,
 };
 pub use error::{LoaderError, LoaderResult};

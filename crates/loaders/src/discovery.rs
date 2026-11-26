@@ -79,6 +79,32 @@ pub fn supports_minecraft(loader: LoaderKind, minecraft: &str) -> bool {
         .unwrap_or(true)
 }
 
+/// The first Minecraft release Forge shows its own loading window for.
+///
+/// Forge publishes `fmlearlydisplay` from 1.20.1 onward; earlier lines start
+/// the game window directly.
+const FORGE_EARLY_WINDOW_MINIMUM_MINECRAFT: &str = "1.20.1";
+
+/// Whether a loader opens its own loading window before Minecraft's.
+///
+/// That window is created at the size the loader's configuration names, and
+/// Minecraft then takes it over, so the game opens at that size whatever its
+/// own `options.txt` says. Every NeoForge release has one; Forge has one from
+/// 1.20.1. A release in a version scheme this build cannot parse is reported as
+/// having none, so nothing is written on the strength of a guess.
+#[must_use]
+pub fn has_early_loading_window(loader: LoaderKind, minecraft: &str) -> bool {
+    match loader {
+        LoaderKind::Vanilla => false,
+        LoaderKind::NeoForge => true,
+        LoaderKind::Forge => MinecraftVersionId::parse(minecraft)
+            .at_least(&MinecraftVersionId::parse(
+                FORGE_EARLY_WINDOW_MINIMUM_MINECRAFT,
+            ))
+            .unwrap_or(false),
+    }
+}
+
 /// The first Forge build for Minecraft 1.12.2 whose installer ships `version.json`
 /// beside a `spec` install profile.
 ///
@@ -519,6 +545,37 @@ mod tests {
 
     fn official_versions(path: &str) -> Vec<String> {
         parse_maven_versions(path, "fixture").expect("official Maven metadata fixture")
+    }
+
+    #[test]
+    fn an_early_loading_window_exists_for_forge_from_1_20_1_and_for_every_neoforge() {
+        for version in ["1.20.1", "1.20.4", "1.21.1", "26.1.2"] {
+            assert!(
+                has_early_loading_window(LoaderKind::Forge, version),
+                "Forge {version}"
+            );
+        }
+        for version in ["1.12.2", "1.16.5", "1.18.2", "1.19.2", "1.19.4", "1.20"] {
+            assert!(
+                !has_early_loading_window(LoaderKind::Forge, version),
+                "Forge {version}"
+            );
+        }
+        for version in ["1.20.1", "1.21.1", "26.1.2"] {
+            assert!(
+                has_early_loading_window(LoaderKind::NeoForge, version),
+                "NeoForge {version}"
+            );
+        }
+        assert!(!has_early_loading_window(LoaderKind::Vanilla, "1.20.1"));
+    }
+
+    #[test]
+    fn a_forge_release_in_an_unparsed_scheme_is_not_assumed_to_have_an_early_window() {
+        assert!(!has_early_loading_window(
+            LoaderKind::Forge,
+            "not-a-release"
+        ));
     }
 
     #[test]

@@ -68,6 +68,8 @@ sha2.workspace = true
 # so no test probes a runtime installed on the machine running it.
 ephervex-core = { path = ".", features = ["test-support"] }
 tempfile.workspace = true
+# The loader configuration tests read the file they were written to back as TOML.
+toml_edit.workspace = true
 # The import tests build `.mrpack` archives to import; nothing in this crate
 # reads an archive itself.
 zip.workspace = true

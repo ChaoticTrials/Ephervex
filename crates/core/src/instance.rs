@@ -340,6 +340,47 @@ impl App {
         catalogs.cached(minecraft_version).await
     }
 
+    /// Gives a loader's early loading window the window size that was just
+    /// written to `options.txt`.
+    ///
+    /// That window is created at the size the loader's own configuration names
+    /// and the game then takes it over, so the size preference would otherwise
+    /// have no effect on the loaders that have one. Only runs when the size
+    /// reached `options.txt`, so the two files never disagree about whether the
+    /// release was proven to support it. A failure is logged and never blocks
+    /// the instance.
+    fn apply_early_window_size(
+        record: &ClientRecord,
+        loaded: &ephervex_options::LoadedConfiguredPreferences,
+        application: &PreferenceApplication,
+    ) {
+        let id = PreferenceKey::WindowSize.id();
+        if !application.applied.contains(&id)
+            || !ephervex_loaders::has_early_loading_window(
+                record.loader.kind,
+                &record.minecraft_version,
+            )
+        {
+            return;
+        }
+        let Some(ephervex_options::MinecraftPreferenceValue::WindowSize(size)) = loaded
+            .preferences
+            .get(&id)
+            .and_then(|configured| configured.applied_value())
+        else {
+            return;
+        };
+        let game_dir = ephervex_storage::metadata::client_game_dir(&record.root);
+        match ephervex_options::apply_early_window_size(&game_dir, *size) {
+            Ok(ephervex_options::EarlyWindowOutcome::Refused { reason, .. }) => warn!(
+                reason = reason.as_str(),
+                "the loader's early window size was not set; its configuration was left as it was"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(%error, "could not set the loader's early window size"),
+        }
+    }
+
     /// Applies the global preferences to one instance's `options.txt`.
     ///
     /// Called once, from [`Self::create_client`]. Public because Modrinth pack import's
@@ -386,6 +427,7 @@ impl App {
                 "some raw Minecraft option lines were not written; they cannot be one options.txt line"
             );
         }
+        Self::apply_early_window_size(record, &loaded, &application);
         Ok(application)
     }
 }
@@ -766,7 +808,7 @@ pub(crate) fn open_folder(path: &Path) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-    use ephervex_model::LoaderSelection;
+    use ephervex_model::{LoaderKind, LoaderSelection};
     use ephervex_options::OPTIONS_FILE_NAME;
     use ephervex_storage::{NewClient, Paths};
 
@@ -1152,6 +1194,127 @@ mod tests {
         let app = app_rooted_at(base.path());
         let record = create(&app, "Untouched", "1.20.1");
         assert!(options_of(&record).is_none());
+    }
+
+    fn create_on_loader(app: &App, version: &str, kind: LoaderKind, build: &str) -> ClientRecord {
+        app.create_client_for_test(NewClient::new(
+            "Loader",
+            version,
+            LoaderSelection {
+                kind,
+                version: Some(build.to_owned()),
+            },
+        ))
+        .expect("create")
+    }
+
+    fn early_window_config(record: &ClientRecord) -> Option<toml_edit::DocumentMut> {
+        std::fs::read_to_string(
+            ephervex_storage::metadata::client_game_dir(&record.root)
+                .join(ephervex_options::EARLY_WINDOW_CONFIG_FILE),
+        )
+        .ok()
+        .map(|text| text.parse().expect("valid TOML"))
+    }
+
+    fn app_with_window_size(base: &Path) -> App {
+        let mut app = app_rooted_at(base);
+        app.set_minecraft_preference(PreferenceKey::WindowSize, "1920x1080")
+            .expect("set");
+        app
+    }
+
+    #[test]
+    fn a_window_size_reaches_the_early_window_of_every_loader_that_has_one() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_with_window_size(base.path());
+        for (version, kind, build) in [
+            ("1.20.1", LoaderKind::Forge, "47.4.10"),
+            ("1.20.1", LoaderKind::NeoForge, "47.1.106"),
+            ("1.21.1", LoaderKind::NeoForge, "21.1.172"),
+            ("26.1.2", LoaderKind::NeoForge, "26.1.2.1"),
+        ] {
+            let record = create_on_loader(&app, version, kind, build);
+            assert!(
+                options_of(&record)
+                    .expect("options")
+                    .contains("overrideWidth:1920"),
+                "{kind} {version} keeps the options.txt size"
+            );
+            let config = early_window_config(&record)
+                .unwrap_or_else(|| panic!("{kind} {version} has an early window configuration"));
+            assert_eq!(
+                config["earlyWindowWidth"].as_integer(),
+                Some(1920),
+                "{kind} {version}"
+            );
+            assert_eq!(
+                config["earlyWindowHeight"].as_integer(),
+                Some(1080),
+                "{kind} {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_loader_without_an_early_window_gets_no_loader_configuration_from_the_size() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_with_window_size(base.path());
+        for (version, kind, build) in [
+            ("1.20.1", LoaderKind::Vanilla, ""),
+            ("1.18.2", LoaderKind::Forge, "40.3.12"),
+            ("1.19.2", LoaderKind::Forge, "43.5.0"),
+        ] {
+            let record = if kind == LoaderKind::Vanilla {
+                create(&app, "Vanilla", version)
+            } else {
+                create_on_loader(&app, version, kind, build)
+            };
+            assert!(
+                options_of(&record)
+                    .expect("options")
+                    .contains("overrideWidth:1920"),
+                "{kind} {version} still gets the options.txt size"
+            );
+            assert!(
+                early_window_config(&record).is_none(),
+                "{kind} {version} has no early window to size"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pack_supplied_loader_configuration_keeps_its_other_content_beside_the_size() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_with_window_size(base.path());
+        let record = app
+            .registry()
+            .create_client(NewClient::new(
+                "Pack",
+                "1.20.1",
+                LoaderSelection {
+                    kind: LoaderKind::Forge,
+                    version: Some("47.4.10".to_owned()),
+                },
+            ))
+            .expect("create");
+        let config_path = ephervex_storage::metadata::client_game_dir(&record.root)
+            .join(ephervex_options::EARLY_WINDOW_CONFIG_FILE);
+        std::fs::create_dir_all(config_path.parent().expect("parent")).expect("config dir");
+        std::fs::write(
+            &config_path,
+            "#Check for updates\nversionCheck = false\nearlyWindowWidth = 854\nearlyWindowHeight = 480\n",
+        )
+        .expect("pack file");
+
+        let context = PreferenceContext::offline();
+        app.apply_global_preferences(&record, &context)
+            .expect("apply");
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read"),
+            "#Check for updates\nversionCheck = false\nearlyWindowWidth = 1920\nearlyWindowHeight = 1080\n"
+        );
     }
 
     #[test]

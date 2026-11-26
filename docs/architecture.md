@@ -1103,6 +1103,15 @@ receiving no managed preference writes. Values outside a release's proven domain
 are skipped and reported rather than clamped, and unknown and mod-added lines
 always survive an edit.
 
+The window size is also written where the loader reads it. Forge from 1.20.1
+and every NeoForge release open their own loading window before Minecraft, at
+the `earlyWindowWidth` and `earlyWindowHeight` named in `config/fml.toml`, and
+the game takes that window over without consulting `options.txt`. When the size
+was written to `options.txt` and the loader has such a window, the same size is
+set in `fml.toml`: a missing file is created with just those two keys, and an
+existing file keeps every other key and comment. A file that is not valid TOML
+is left as it was and reported in the log.
+
 Settings outside the catalog can still be put into a new instance as raw
 `options.txt` lines kept in the configuration beside the preferences. They are
 applied after every managed preference and after the startup preset line, so
