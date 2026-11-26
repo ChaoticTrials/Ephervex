@@ -1189,6 +1189,9 @@ the shared artifact-cache lease until the game is gone. A game counts as the
 recorded one only with the recorded id, start time, and run id, and the socket
 only when its peer is the recorded runner. Kill ends the game's whole process
 group, and a graceful stop terminates it without escalating.
+The runner records how the game ended, and the crash report it left, in the
+instance's history once the lock is released, so a game that outlives its
+starter is still accounted for and the starter never records the same end.
 
 A launcher run that is not hosted can end while its game keeps running. The lock still holds the
 instance while the recorded game is alive and still has its recorded start

@@ -86,7 +86,7 @@ impl Sandbox {
 
     /// Starts the binary as a runner for a game that runs `script`, after
     /// taking the instance's lock the way a starting process does.
-    fn start_runner(&self, root: &Path, script: &str) -> (Child, LaunchLock) {
+    fn start_runner(&self, id: &str, root: &Path, script: &str) -> (Child, LaunchLock) {
         let starter = LaunchLock::acquire(root).expect("the starter's lock");
         let game_directory = root.join("minecraft");
         std::fs::create_dir_all(&game_directory).expect("game directory");
@@ -109,6 +109,9 @@ impl Sandbox {
             "run": uuid::Uuid::new_v4(),
             "capture_directory": root.join("capture"),
             "cache_directory": self.base().join("cache").join(APP_ID),
+            "paths": self.paths(),
+            "instance": id,
+            "started": chrono::Utc::now(),
         });
         let mut command = binary_sandbox::ephervex_command();
         command
@@ -197,7 +200,7 @@ impl Drop for Reaper {
 fn a_game_keeps_running_after_its_starter_is_gone_and_a_later_command_ends_it() {
     let sandbox = Sandbox::new();
     let (id, root) = sandbox.client();
-    let (mut runner, starter) = sandbox.start_runner(&root, "sleep 60");
+    let (mut runner, starter) = sandbox.start_runner(&id, &root, "sleep 60");
     let runner_pid = runner.id();
     let mut cleanup = Reaper(vec![runner_pid]);
 
@@ -239,7 +242,7 @@ fn a_game_keeps_running_after_its_starter_is_gone_and_a_later_command_ends_it() 
 fn running_names_each_launch_and_stop_reaches_it_by_that_name_or_its_process_id() {
     let sandbox = Sandbox::new();
     let (id, root) = sandbox.client();
-    let (mut runner, starter) = sandbox.start_runner(&root, "sleep 60");
+    let (mut runner, starter) = sandbox.start_runner(&id, &root, "sleep 60");
     let runner_pid = runner.id();
     let mut cleanup = Reaper(vec![runner_pid]);
     let game = running_pid(&mut runner);
@@ -295,8 +298,8 @@ fn running_names_each_launch_and_stop_reaches_it_by_that_name_or_its_process_id(
 #[test]
 fn a_game_that_ends_by_itself_is_reported_and_releases_the_instance() {
     let sandbox = Sandbox::new();
-    let (_id, root) = sandbox.client();
-    let (mut runner, _starter) = sandbox.start_runner(&root, "echo up; exit 3");
+    let (id, root) = sandbox.client();
+    let (mut runner, _starter) = sandbox.start_runner(&id, &root, "echo up; exit 3");
     let mut cleanup = Reaper(vec![runner.id()]);
 
     let stdout = runner.stdout.take().expect("reports");
@@ -316,6 +319,16 @@ fn a_game_that_ends_by_itself_is_reported_and_releases_the_instance() {
     );
     assert!(runner.wait().expect("runner").success());
     assert!(ephervex_storage::running_state(&root).is_none());
+    let events = ephervex_storage::read_host_events(
+        &sandbox.paths(),
+        ephervex_storage::EventHost::Client(id.parse().expect("an instance id")),
+    );
+    let exits: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == ephervex_storage::HostEventKind::Exited)
+        .map(|event| event.subject.as_str())
+        .collect();
+    assert_eq!(exits, ["3"], "the runner records the end of its game once");
 }
 
 /// A lock whose runner record points at processes that are not a runner.

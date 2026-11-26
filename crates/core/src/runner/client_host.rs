@@ -96,6 +96,7 @@ where
     };
     let Channels { mut control, .. } = channels;
 
+    let exited = outcome.as_ref().ok().map(|(exit, _)| *exit);
     let result = match outcome {
         Ok((exit, early_output)) => Ok(GameEnd {
             code: exit.code,
@@ -127,9 +128,27 @@ where
     while let Ok(request) = control.try_recv() {
         request.respond(ControlResponse::Refused("the game has ended".to_owned()));
     }
+    if let Some(exit) = exited {
+        record_exit(&spec, exit).await;
+    }
     relay.send(&ClientRunnerMessage::Finished { result }).await;
     tokio::time::sleep(super::CONTROL_ANSWER_GRACE).await;
     u8::from(!succeeded)
+}
+
+/// Adds how the game ended, and the crash report it left, to the instance's
+/// history. The runner does this itself because the process that started it
+/// may have exited while the game kept running.
+async fn record_exit(spec: &ClientRunnerSpec, exit: ephervex_minecraft::GameExit) {
+    let paths = spec.paths.clone();
+    let instance = spec.instance;
+    let launch = spec.additional.clone();
+    let started = spec.started;
+    let _ = crate::blocking::off_worker(move || match crate::App::open_at(paths) {
+        Ok(app) => app.record_client_exit(instance, launch.as_deref(), started, &exit),
+        Err(error) => tracing::warn!(%error, "could not record how the game ended"),
+    })
+    .await;
 }
 
 /// What a hosted game is listening to while it runs.
@@ -386,6 +405,9 @@ mod tests {
                 run: uuid::Uuid::new_v4(),
                 capture_directory: capture.clone(),
                 cache_directory: root.path().join("cache"),
+                paths: ephervex_storage::Paths::rooted_at(root.path().join("launcher")),
+                instance: ephervex_model::InstanceId::new(),
+                started: chrono::Utc::now(),
             };
             let (reader, writer) = tokio::io::duplex(64 * 1024);
             let (requests, request_receiver) = mpsc::unbounded_channel();
@@ -682,6 +704,59 @@ mod tests {
         hosted.terminations.send(()).expect("second request");
 
         assert_eq!(game_end(&hosted.rest().await).signal, Some(9));
+    }
+
+    #[tokio::test]
+    async fn a_runner_records_how_its_game_ended_and_the_crash_it_left_exactly_once() {
+        use ephervex_storage::HostEventKind::{Exited, LogError};
+
+        let base = tempfile::tempdir().expect("temp dir");
+        let app =
+            crate::App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+        let client = app
+            .create_client_for_test(ephervex_storage::NewClient::new(
+                "hosted crash",
+                "1.21.1",
+                ephervex_model::LoaderSelection::vanilla(),
+            ))
+            .expect("client");
+        let game_directory = ephervex_storage::metadata::client_game_dir(&client.root);
+        std::fs::create_dir_all(&game_directory).expect("game directory");
+        let starter = LaunchLock::acquire(&client.root).expect("the starter's lock");
+        let script = "mkdir -p crash-reports; printf '%s\\n' '---- Minecraft Crash Report ----' \
+            'Description: hosted crash' '' 'java.lang.IllegalStateException: from the game' \
+            > crash-reports/crash-2026-11-26_10.00.00-client.txt; exit 1";
+        let spec = ClientRunnerSpec {
+            command: shell_game(script, &game_directory),
+            instance_root: client.root.clone(),
+            additional: None,
+            previous: starter.state().clone(),
+            run: uuid::Uuid::new_v4(),
+            capture_directory: app.paths().client_capture_dir(client.id, None),
+            cache_directory: app.paths().cache_dir().to_path_buf(),
+            paths: app.paths().clone(),
+            instance: client.id,
+            started: chrono::Utc::now() - chrono::TimeDelta::minutes(1),
+        };
+        let (reader, writer) = tokio::io::duplex(64 * 1024);
+        let (_requests, request_receiver) = mpsc::unbounded_channel();
+        let host = tokio::spawn(host_client(spec, writer, request_receiver, None));
+
+        // The starter has gone: nothing but the runner can record the end.
+        drop(reader);
+        assert_eq!(host.await.expect("host task"), 0);
+        std::mem::forget(starter);
+
+        let events = app.host_events(crate::InstalledHost::Instance(client.id));
+        let told: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind != ephervex_storage::HostEventKind::Created)
+            .map(|event| (event.kind, event.launch.as_deref(), event.subject.as_str()))
+            .collect();
+        assert_eq!(
+            told,
+            [(Exited, None, "1"), (LogError, None, "hosted crash")]
+        );
     }
 
     #[tokio::test]

@@ -89,7 +89,7 @@ pub const LAUNCHER_METADATA_DIR: &str = ".launcher";
 /// Cheap to clone and carried by [`crate::Registry`] rather than re-resolved,
 /// so a process cannot end up reading configuration from one place and writing
 /// instances to another.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Paths {
     config: PathBuf,
     data: PathBuf,

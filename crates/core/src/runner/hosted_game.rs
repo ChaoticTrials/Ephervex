@@ -267,6 +267,9 @@ mod tests {
             run: uuid::Uuid::new_v4(),
             capture_directory: root.join("capture"),
             cache_directory: root.join("cache"),
+            paths: ephervex_storage::Paths::rooted_at(root.join("launcher")),
+            instance: ephervex_model::InstanceId::new(),
+            started: chrono::Utc::now(),
         }
     }
 

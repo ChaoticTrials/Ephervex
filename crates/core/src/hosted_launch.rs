@@ -374,6 +374,9 @@ mod tests {
             run: uuid::Uuid::new_v4(),
             capture_directory: client.root.join("capture"),
             cache_directory: client.root.join("cache"),
+            paths: app.paths().clone(),
+            instance: client.id,
+            started: chrono::Utc::now(),
         };
         let (_reports, writer) = tokio::io::duplex(64 * 1024);
         let (_requests, request_receiver) = mpsc::unbounded_channel();

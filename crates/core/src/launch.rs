@@ -367,7 +367,11 @@ impl App {
                 .await?
         };
         outcome.exit = Some(exit);
-        self.record_client_exit(instance, options.additional.as_deref(), started, &exit);
+        // A runner records the end of the game it hosts itself, because the
+        // process that started it may be gone by then.
+        if options.hosting != Hosting::Detached {
+            self.record_client_exit(instance, options.additional.as_deref(), started, &exit);
+        }
         if !exit.is_success() {
             outcome.java_failure = self
                 .java_runtime_failure(
@@ -513,6 +517,10 @@ impl App {
                 .paths()
                 .client_capture_dir(record.id, options.additional.as_deref()),
             cache_directory: self.paths().cache_dir().to_path_buf(),
+            paths: self.paths().clone(),
+            instance: record.id,
+            // Before the runner exists, so before anything the game writes.
+            started: chrono::Utc::now(),
         };
         let executable =
             crate::runner::runner_executable().map_err(|error| LaunchError::HostedRun {

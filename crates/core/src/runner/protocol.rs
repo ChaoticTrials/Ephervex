@@ -51,6 +51,13 @@ pub(crate) struct ClientRunnerSpec {
     /// The shared artifact cache the game's classpath names. The runner holds
     /// the cache's lease for as long as the game runs.
     pub cache_directory: PathBuf,
+    /// The launcher's directories, which the runner records the game's end in.
+    pub paths: ephervex_storage::Paths,
+    /// The instance the game belongs to.
+    pub instance: ephervex_model::InstanceId,
+    /// When the launch began, before the game existed. A crash report older
+    /// than this belongs to an earlier run.
+    pub started: chrono::DateTime<chrono::Utc>,
 }
 
 /// A request the starter makes of a runner after handing it its command.
