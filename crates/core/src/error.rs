@@ -297,8 +297,13 @@ pub enum CoreError {
     /// loader precisely to see what breaks. Never resolved by updating the
     /// mods: that would move two things at once in an instance whose purpose is
     /// to isolate one.
-    #[error("{incompatible} installed mods do not fit the selected loader build")]
-    LoaderChangeBlockedByMods { incompatible: usize },
+    ///
+    /// Carries each mod with its reasons, so a frontend can show what the
+    /// user is being asked to accept instead of a bare count.
+    #[error("{} installed mods do not fit the selected loader build", .incompatible.len())]
+    LoaderChangeBlockedByMods {
+        incompatible: Vec<crate::loader::IncompatibleMod>,
+    },
 
     /// The recorded default mod catalog is a name this build cannot resolve.
     ///
@@ -773,7 +778,7 @@ impl CoreError {
                 vec![("name", Arg::from(name.clone()))]
             }
             Self::LoaderChangeBlockedByMods { incompatible } => {
-                vec![("count", Arg::from(*incompatible))]
+                vec![("count", Arg::from(incompatible.len()))]
             }
             Self::ModCatalogPreferenceUnrecognized { configured } => {
                 vec![("catalog", Arg::from(configured.clone()))]
@@ -1742,8 +1747,19 @@ mod tests {
 
     #[test]
     fn a_single_incompatible_mod_selects_the_singular_message() {
-        let one = rendered(&CoreError::LoaderChangeBlockedByMods { incompatible: 1 });
-        let many = rendered(&CoreError::LoaderChangeBlockedByMods { incompatible: 3 });
+        let blocked = |count: usize| {
+            rendered(&CoreError::LoaderChangeBlockedByMods {
+                incompatible: (0..count)
+                    .map(|index| crate::loader::IncompatibleMod {
+                        logical_path: std::path::PathBuf::from(format!("mods/{index}.jar")),
+                        name: format!("Mod {index}"),
+                        reasons: Vec::new(),
+                    })
+                    .collect(),
+            })
+        };
+        let one = blocked(1);
+        let many = blocked(3);
 
         assert!(one.contains("1 installed mod does"), "{one}");
         assert!(many.contains("3 installed mods "), "{many}");

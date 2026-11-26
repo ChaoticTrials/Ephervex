@@ -74,6 +74,39 @@ fn the_rename_dialog_keeps_the_body_padding_under_cancel() {
 }
 
 #[test]
+fn the_loader_change_dialog_keeps_the_body_padding_under_cancel_whatever_mods_it_lists() {
+    let ui = support::test_window();
+    for scale in [1.0_f32, 1.25] {
+        ui.global::<Theme>().set_text_scale(scale);
+        for listed in [0_usize, 1, 3, 40] {
+            let rows: Vec<SharedString> = (0..listed)
+                .map(|index| {
+                    SharedString::from(format!(
+                        "A mod with a rather long display name number {index}: Does not support NeoForge."
+                    ))
+                })
+                .collect();
+            ui.set_loader_change_loading(false);
+            ui.set_loader_change_versions(ModelRc::new(VecModel::from(vec![
+                SharedString::from("21.1.2"),
+                SharedString::from("21.1.1"),
+            ])));
+            ui.set_loader_change_selected("21.1.2".into());
+            ui.set_loader_change_blocked(ModelRc::new(VecModel::from(rows)));
+            ui.set_modal_error(if listed == 3 { LONG_ERROR } else { "" }.into());
+            ui.set_modal("loader-change".into());
+            settle(&ui);
+
+            let gap = space_under_cancel(&ui);
+            assert!(
+                gap >= BODY_PADDING,
+                "loader-change at text scale {scale} with {listed} mods listed: {gap}px under Cancel"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_new_snapshot_dialog_keeps_the_body_padding_under_cancel() {
     let ui = support::test_window();
     for scale in [1.0_f32, 1.25] {

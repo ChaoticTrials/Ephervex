@@ -1123,7 +1123,7 @@ error-loader-change-blocked-by-mods = { $count ->
     [one] 1 installed mod does not fit the selected loader build.
    *[other] { $count } installed mods do not fit the selected loader build.
 }
-.action = Change those mods first, or confirm that you want to run the new build anyway.
+.action = Change those mods first, or choose to install the build with them left as they are.
 
 error-mod-not-managed = That mod is no longer part of this instance.
 .action = Reopen the instance to see its current mods.
@@ -2691,7 +2691,14 @@ gui-loader-change-unverifiable = { $count ->
    *[other] { $count } installed mods could not be checked against the new build.
 }
 gui-loader-change-mods-untouched = Installed mods are left exactly as they are.
+gui-loader-change-blocked = { $count ->
+    [one] 1 installed mod does not fit the selected build:
+   *[other] { $count } installed mods do not fit the selected build:
+}
+gui-loader-change-blocked-mod = { $name }: { $reasons }
+gui-loader-change-blocked-explanation = Their catalog does not list these mods for this instance's loader and Minecraft release, which a different build of the same loader does not change. Installing anyway leaves them as they are.
 gui-loader-change-action = Install and Switch
+gui-loader-change-action-anyway = Install Anyway
 gui-loader-changed = This instance now runs { $value }.
 gui-modal-manage-mod = Manage Mod
 gui-modal-remove-mod = Remove Mod

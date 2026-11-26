@@ -70,8 +70,13 @@ pub struct LoaderVersionPlan {
     /// Managed mods that could not be checked, because nothing proves which
     /// release they are. Reported rather than counted as clear.
     pub unverifiable: usize,
-    /// Mods known not to fit. Empty under a provider that describes loader
-    /// support by family, which is every provider this build talks to.
+    /// Mods whose catalog does not list their recorded release for this
+    /// instance's loader family and Minecraft release.
+    ///
+    /// A catalog states support by family, not by build, so the candidate build
+    /// never changes this list: a mod appears here exactly when it already did
+    /// not fit the instance before the change, and no other build of the same
+    /// loader would make it fit.
     pub incompatible: Vec<IncompatibleMod>,
 }
 
@@ -86,6 +91,17 @@ impl LoaderVersionPlan {
     #[must_use]
     pub fn needs_confirmation(&self) -> bool {
         !self.incompatible.is_empty()
+    }
+
+    /// Refuses, naming every mod that does not fit, unless the caller accepted
+    /// installing the build with those mods left as they are.
+    fn require_confirmation_when_needed(&self, accepted: bool) -> CoreResult<()> {
+        if self.needs_confirmation() && !accepted {
+            return Err(CoreError::LoaderChangeBlockedByMods {
+                incompatible: self.incompatible.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -217,11 +233,7 @@ impl App {
         let plan = self.plan_loader_version_change(instance, exact).await?;
         let record = self.current_client(instance)?;
 
-        if plan.needs_confirmation() && !accept_incompatible_mods {
-            return Err(CoreError::LoaderChangeBlockedByMods {
-                incompatible: plan.incompatible.len(),
-            });
-        }
+        plan.require_confirmation_when_needed(accept_incompatible_mods)?;
         let selection = LoaderSelection::exact(plan.loader, plan.candidate_version.clone());
         if !plan.changes_anything() {
             let gate = self
@@ -688,6 +700,53 @@ mod tests {
             new,
             "the recipe follows the record"
         );
+    }
+
+    fn incompatible_mod(name: &str) -> IncompatibleMod {
+        IncompatibleMod {
+            logical_path: std::path::PathBuf::from(format!("mods/{name}.jar")),
+            name: name.to_owned(),
+            reasons: vec![IncompatibilityReason::Loader {
+                required: LoaderKind::NeoForge,
+                supported: vec!["forge".to_owned()],
+            }],
+        }
+    }
+
+    #[test]
+    fn a_refused_loader_change_names_every_mod_that_does_not_fit() {
+        let mut blocked = plan(LoaderKind::NeoForge, Some("26.1.2.126"), "26.1.2.130");
+        blocked.incompatible = vec![incompatible_mod("Alpha"), incompatible_mod("Beta")];
+
+        let error = blocked
+            .require_confirmation_when_needed(false)
+            .expect_err("a mod that does not fit refuses by default");
+
+        match error {
+            CoreError::LoaderChangeBlockedByMods { incompatible } => {
+                assert_eq!(incompatible, blocked.incompatible);
+            }
+            other => panic!("expected the mods that do not fit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn accepting_the_known_incompatibility_lets_the_loader_change_proceed() {
+        let mut blocked = plan(LoaderKind::NeoForge, Some("26.1.2.126"), "26.1.2.130");
+        blocked.incompatible = vec![incompatible_mod("Alpha")];
+
+        blocked
+            .require_confirmation_when_needed(true)
+            .expect("an accepted incompatibility does not refuse");
+    }
+
+    #[test]
+    fn a_loader_change_with_no_incompatible_mods_needs_no_confirmation() {
+        let clear = plan(LoaderKind::NeoForge, Some("26.1.2.126"), "26.1.2.130");
+
+        clear
+            .require_confirmation_when_needed(false)
+            .expect("nothing to accept");
     }
 
     #[test]

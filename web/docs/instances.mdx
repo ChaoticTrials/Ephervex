@@ -442,6 +442,13 @@ mods are left in place, so check their compatibility with the new build. Stop
 the game first: the button stays available, but the change is refused while the
 instance is running.
 
+If a mod's catalog does not list it for the instance's loader or Minecraft
+release, the dialog does not install the build. It lists each of those mods
+with the reason, and the button becomes **Install Anyway**. Selecting it
+installs the exact build you chose and leaves those mods as they are, which is
+what you want when reproducing a bug on a specific build. Choosing a different
+build, or reopening the dialog, withdraws that offer.
+
 <ThemeScreenshot state="instance-change-loader-dialog" alt="Change Loader Build dialog with the current build, the build to move to, and a note that installed mods are left as they are" />
 
 Changing a loader build is currently available in the desktop app. It does

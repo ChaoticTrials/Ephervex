@@ -5264,6 +5264,7 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
         ui.set_loader_change_versions(model(Vec::new()));
         ui.set_loader_change_loading(true);
         ui.set_loader_change_pending(false);
+        ui.set_loader_change_blocked(model(Vec::new()));
         ui.set_modal_error(SharedString::default());
         ui.set_modal("loader-change".into());
         send(
@@ -5278,13 +5279,14 @@ fn register_loader_change(ui: &AppWindow, commands: &Sender<Command>) {
     });
 
     let sender = commands.clone();
-    ui.on_change_loader_version(move |instance, version| {
+    ui.on_change_loader_version(move |instance, version, accept_incompatible_mods| {
         if let Some(instance) = backend::parse_instance_id(&instance) {
             send(
                 &sender,
                 Command::ChangeLoaderVersion {
                     instance,
                     version: version.to_string(),
+                    accept_incompatible_mods,
                 },
             );
         }
@@ -9432,6 +9434,11 @@ fn apply_event(
         Event::LoaderChangeFailed { instance, message } => {
             apply_loader_change_failure(ui, instance, message);
         }
+        Event::LoaderChangeBlocked {
+            instance,
+            version,
+            mods,
+        } => apply_loader_change_blocked(ui, instance, &version, &mods),
         Event::ManagedMods(data) => {
             // Kept with the host it belongs to, checked by kind as well as id,
             // so a server's list never lands in the panel of the instance it
@@ -10153,6 +10160,31 @@ fn apply_loader_change_failure(
         apply_modal_error(ui, backend::ModalScope::LOADER_CHANGE, message);
     } else {
         ui.invoke_present_toast(message.into(), true);
+    }
+}
+
+/// Lists the mods a refused loader change named, in the dialog it was started
+/// from, so the user can see what installing anyway would leave in place.
+///
+/// The request is answered either way, so the dialog's action is usable again.
+/// The list is kept only while the dialog still has `version` selected: a
+/// refusal of another build says nothing about this one. A dialog that is gone
+/// or open for another instance has nothing to show it in, and the next
+/// refusal asks again.
+fn apply_loader_change_blocked(
+    ui: &AppWindow,
+    instance: ephervex_model::InstanceId,
+    version: &str,
+    mods: &[String],
+) {
+    if !loader_change_dialog_is_for(ui, instance) {
+        return;
+    }
+    ui.set_loader_change_pending(false);
+    if ui.get_loader_change_selected() == version {
+        ui.set_loader_change_blocked(model(
+            mods.iter().cloned().map(SharedString::from).collect(),
+        ));
     }
 }
 
@@ -22267,6 +22299,93 @@ mod tests {
         assert_eq!(ui.get_modal_error(), "Not compatible");
         assert!(!ui.get_loader_change_pending());
         assert!(toasts.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_loader_change_lists_its_mods_and_frees_the_action() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.2".into());
+        ui.set_loader_change_pending(true);
+
+        apply_loader_change_blocked(
+            &ui,
+            a,
+            "21.1.2",
+            &["Alpha: Does not support NeoForge.".to_owned()],
+        );
+
+        assert_eq!(ui.get_loader_change_blocked().row_count(), 1);
+        assert!(!ui.get_loader_change_pending());
+        assert_eq!(ui.get_modal_error(), "");
+    }
+
+    #[test]
+    fn a_refusal_of_a_build_no_longer_selected_frees_the_action_without_listing() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.3".into());
+        ui.set_loader_change_pending(true);
+
+        apply_loader_change_blocked(&ui, a, "21.1.2", &["Alpha: Not listed.".to_owned()]);
+
+        assert_eq!(ui.get_loader_change_blocked().row_count(), 0);
+        assert!(!ui.get_loader_change_pending());
+    }
+
+    #[test]
+    fn a_refusal_for_another_instance_leaves_the_open_dialog_alone() {
+        let (a, b) = (new_instance(), new_instance());
+        let (ui, _commands) = loader_change_window(&[
+            (&a.to_string(), "NeoForge", "1.21.1"),
+            (&b.to_string(), "NeoForge", "1.21.1"),
+        ]);
+        open_loader_change(&ui, a);
+        open_loader_change(&ui, b);
+        ui.set_loader_change_selected("21.1.2".into());
+        ui.set_loader_change_pending(true);
+
+        apply_loader_change_blocked(&ui, a, "21.1.2", &["Alpha: Not listed.".to_owned()]);
+
+        assert_eq!(ui.get_loader_change_blocked().row_count(), 0);
+        assert!(ui.get_loader_change_pending());
+    }
+
+    #[test]
+    fn reopening_the_loader_change_dialog_forgets_an_earlier_refusal() {
+        let a = new_instance();
+        let (ui, _commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+        open_loader_change(&ui, a);
+        ui.set_loader_change_selected("21.1.2".into());
+        apply_loader_change_blocked(&ui, a, "21.1.2", &["Alpha: Not listed.".to_owned()]);
+
+        open_loader_change(&ui, a);
+
+        assert_eq!(ui.get_loader_change_blocked().row_count(), 0);
+    }
+
+    #[test]
+    fn the_loader_change_action_carries_the_acceptance_it_was_given() {
+        let a = new_instance();
+        let (ui, commands) = loader_change_window(&[(&a.to_string(), "NeoForge", "1.21.1")]);
+
+        for accept in [false, true] {
+            ui.invoke_change_loader_version(a.to_string().into(), "21.1.2".into(), accept);
+            match commands.try_recv() {
+                Ok(Command::ChangeLoaderVersion {
+                    instance,
+                    version,
+                    accept_incompatible_mods,
+                }) => {
+                    assert_eq!(instance, a);
+                    assert_eq!(version, "21.1.2");
+                    assert_eq!(accept_incompatible_mods, accept);
+                }
+                other => panic!("expected a loader change request, got {other:?}"),
+            }
+        }
     }
 
     #[test]

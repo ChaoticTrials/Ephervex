@@ -23,20 +23,21 @@ use ephervex_core::{
     ClientModPlan, ConnectionTarget, CoreError, CoreResult, CrashReview, CredentialOutcome,
     CredentialPresence, DataPackOwner, DeclaredProject, DiagnosisRequest, DiagnosticFix,
     DiagnosticKind, DiagnosticRequest, DiagnosticScope, ErrorChain, EulaStatus, ImportRequest,
-    IncompatibilityReason, InstalledHost, IsolationError, IsolationPlan, IsolationReconciliation,
-    IsolationReport, IsolationRequest, IsolationSession, LaunchAndConnectEvent,
-    LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent, LaunchFeatures, LaunchObserver,
-    LaunchOptions, LinkedModOutcome, LinkedModPlan, LinkedModRequest, LinkedStart,
-    LinkedTargetPlan, LinkedTargetResult, LinkedTargetState, LocalModOffer, LocalModPlan,
-    LocalModReport, LoginFlow, LoginOptions, LoginRequest, ManagedModEntry, ManagedModSnapshot,
-    MetadataAvailability, ModInstallPlan, ModInstallRequest, ModMutability, ModMutation,
-    ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery, ModVersionChoice,
-    MutationRestriction, NewClient, NewServer, OperationReporter, OptionalSelection, PackAnalysis,
-    PackContentOrigin, PackContentPresence, Paths, PlannedOutcome, ProcessMonitor, ProgressSink,
-    ProviderFileIdentity, RoundAnswer, SearchOptions, ServerArchiveEvidence, ServerCommit,
-    ServerContentSource, ServerCreateOptions, ServerEvent, ServerEvents, ServerFolder,
-    ServerNetworkSettings, ServerObserver, ServerRecord, SideRequirement, SideSupport,
-    SnapshotOrigin, SnapshotRestoreOptions, SuspectReason, WatchTarget,
+    IncompatibilityReason, IncompatibleMod, InstalledHost, IsolationError, IsolationPlan,
+    IsolationReconciliation, IsolationReport, IsolationRequest, IsolationSession,
+    LaunchAndConnectEvent, LaunchAndConnectObserver, LaunchAndConnectOptions, LaunchEvent,
+    LaunchFeatures, LaunchObserver, LaunchOptions, LinkedModOutcome, LinkedModPlan,
+    LinkedModRequest, LinkedStart, LinkedTargetPlan, LinkedTargetResult, LinkedTargetState,
+    LocalModOffer, LocalModPlan, LocalModReport, LoginFlow, LoginOptions, LoginRequest,
+    ManagedModEntry, ManagedModSnapshot, MetadataAvailability, ModInstallPlan, ModInstallRequest,
+    ModMutability, ModMutation, ModMutationPlan, ModPresence, ModSearchHit, ModSearchQuery,
+    ModVersionChoice, MutationRestriction, NewClient, NewServer, OperationReporter,
+    OptionalSelection, PackAnalysis, PackContentOrigin, PackContentPresence, Paths, PlannedOutcome,
+    ProcessMonitor, ProgressSink, ProviderFileIdentity, RoundAnswer, SearchOptions,
+    ServerArchiveEvidence, ServerCommit, ServerContentSource, ServerCreateOptions, ServerEvent,
+    ServerEvents, ServerFolder, ServerNetworkSettings, ServerObserver, ServerRecord,
+    SideRequirement, SideSupport, SnapshotOrigin, SnapshotRestoreOptions, SuspectReason,
+    WatchTarget,
 };
 use ephervex_core::{
     ConfiguredPreferences, LanguageAvailability, LanguageEntry, MinecraftPreferencePreview,
@@ -548,6 +549,9 @@ pub enum Command {
     ChangeLoaderVersion {
         instance: InstanceId,
         version: String,
+        /// Install the build although some mods are known not to fit it. Only
+        /// ever true after the user has seen which mods those are.
+        accept_incompatible_mods: bool,
     },
     SearchMods {
         host: InstalledHost,
@@ -2085,6 +2089,14 @@ pub enum Event {
     LoaderChangeFailed {
         instance: InstanceId,
         message: String,
+    },
+    /// A loader change to `version` was refused because these mods do not fit
+    /// it, one line per mod. Shown in the Change Loader dialog only while it
+    /// is still open for that instance and still has that build selected.
+    LoaderChangeBlocked {
+        instance: InstanceId,
+        version: String,
+        mods: Vec<String>,
     },
     ManagedMods(ManagedModsData),
     /// What a set of dropped files would do, and what has to be asked first.
@@ -4139,7 +4151,11 @@ fn run_worker(
                     Err(error) => send_modal_error(&events, &error),
                 }
             }
-            Command::ChangeLoaderVersion { instance, version } => {
+            Command::ChangeLoaderVersion {
+                instance,
+                version,
+                accept_incompatible_mods,
+            } => {
                 let in_flight = match HostChangeInFlight::try_mark(
                     &changing,
                     &[InstalledHost::Instance(instance)],
@@ -4160,9 +4176,9 @@ fn run_worker(
                     let result = runtime.block_on(app.change_loader_version(
                         instance,
                         &version,
-                        // Never assumed. A known incompatibility comes back as a
-                        // refusal the user reads before deciding again.
-                        false,
+                        // Never assumed: a known incompatibility is refused and
+                        // listed, and only the user's second request accepts it.
+                        accept_incompatible_mods,
                         &OperationReporter::silent("changing-loader-version"),
                         &CancellationToken::new(),
                     ));
@@ -4178,6 +4194,13 @@ fn run_worker(
                             });
                             send_client_commit_warnings(&events, &change.warnings);
                             send_snapshot(&mut app, &events);
+                        }
+                        Err(CoreError::LoaderChangeBlockedByMods { incompatible }) => {
+                            let _ = events.send(Event::LoaderChangeBlocked {
+                                instance,
+                                version,
+                                mods: incompatible.iter().map(blocking_mod_line).collect(),
+                            });
                         }
                         Err(error) => {
                             let _ = events.send(Event::LoaderChangeFailed {
@@ -12820,6 +12843,18 @@ fn server_result_notes(hit: &ModSearchHit) -> (String, String) {
             .unwrap_or_default()
     };
     (support.to_owned(), blocked)
+}
+
+/// One mod that does not fit a loader build, with why, as a dialog line.
+fn blocking_mod_line(entry: &IncompatibleMod) -> String {
+    let reasons: Vec<String> = entry.reasons.iter().map(incompatibility_text).collect();
+    lookup_args(
+        "gui-loader-change-blocked-mod",
+        [
+            ("name", Arg::from(entry.name.as_str())),
+            ("reasons", Arg::from(reasons.join(" "))),
+        ],
+    )
 }
 
 fn incompatibility_text(reason: &IncompatibilityReason) -> String {

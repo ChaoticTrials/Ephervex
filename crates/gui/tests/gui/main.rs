@@ -46,6 +46,7 @@ mod launcher_log_files;
 mod left_column;
 mod linked_server_creation_row;
 mod linked_target_selection;
+mod loader_change_dialog;
 mod log_views;
 mod long_names_stay_in_their_row;
 mod microsoft_sign_in_dialog;
