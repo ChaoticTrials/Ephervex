@@ -70,7 +70,7 @@ fn additional_lock_file(id: &str) -> Option<String> {
     is_valid_launch_id(id).then(|| format!("{LAUNCH_LOCK_PREFIX}{id}.lock"))
 }
 
-fn is_valid_launch_id(id: &str) -> bool {
+pub(crate) fn is_valid_launch_id(id: &str) -> bool {
     !id.is_empty()
         && id
             .bytes()

@@ -557,6 +557,7 @@ mod tests {
             "error-config-secret-rejected",
             "error-paths-no-home-directory",
             "error-paths-directory-creation",
+            "error-paths-launch-directory-refused",
             "error-index-unopenable",
             "error-index-query-failed",
             "error-index-migration-failed",

@@ -65,3 +65,4 @@ trail survives. Number 0056 is unused.
 | [0057](0057-workbench-is-the-built-in-look-in-a-light-and-a-dark-palette.md) | Workbench is the built-in look, in a light and a dark palette | Accepted (amends ADR 0041, ADR 0042 and ADR 0049) |
 | [0058](0058-a-host-keeps-a-bounded-history-under-the-state-root.md) | A host keeps a bounded history under the state root | Accepted |
 | [0059](0059-a-hashed-mod-list-is-an-import-source.md) | A hashed mod list is an import source | Accepted |
+| [0060](0060-an-additional-launch-runs-in-a-linked-game-directory-with-its-own-logs.md) | An additional launch runs in a linked game directory with its own logs | Accepted |

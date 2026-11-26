@@ -15,7 +15,10 @@
 //! * **Nothing outside the owned directory is opened.** An entry is resolved by
 //!   *name* against an [`OwnedDirectory`], and a name that is not a single path
 //!   component, an entry that is a symlink, or a directory that resolves outside
-//!   the instance root is refused rather than followed.
+//!   the instance root is refused rather than followed. The one exception is a
+//!   log of a launch run alongside another, named `launch-<handle>/<file>`: a
+//!   real folder (never a link) in `logs/` named for a valid launch handle, and
+//!   one regular file inside it.
 //! * **Nothing is interpreted.** Text is returned as text. No line is executed,
 //!   no path inside a log is opened, and no content is rewritten - a crash
 //!   report that has been "cleaned up" is a crash report that lost the detail
@@ -422,9 +425,34 @@ impl OwnedDirectory {
             return Ok(Vec::new());
         };
 
-        let listing = std::fs::read_dir(&directory).map_err(|source| {
+        let mut entries = self.file_entries(&directory, None)?;
+        if self.kind == DiagnosticKind::Log {
+            for launch in Self::launch_directories(&directory)? {
+                // A launch's folder that cannot be read costs that launch's
+                // files, not the listing of the instance's own.
+                if let Ok(files) = self.file_entries(&directory.join(&launch), Some(&launch)) {
+                    entries.extend(files);
+                }
+            }
+        }
+
+        entries.sort_by(newest_first);
+        Ok(entries)
+    }
+
+    /// The diagnostic files directly inside `directory`, named with `prefix/`
+    /// when they belong to one launch's folder.
+    ///
+    /// Entries that are not regular files, and entries that are symlinks, are
+    /// skipped.
+    fn file_entries(
+        &self,
+        directory: &Path,
+        prefix: Option<&str>,
+    ) -> Result<Vec<DiagnosticEntry>, DiagnosticError> {
+        let listing = std::fs::read_dir(directory).map_err(|source| {
             DiagnosticError::DirectoryUnreadable {
-                path: directory.clone(),
+                path: directory.to_path_buf(),
                 source,
             }
         })?;
@@ -432,7 +460,7 @@ impl OwnedDirectory {
         let mut entries = Vec::new();
         for entry in listing {
             let entry = entry.map_err(|source| DiagnosticError::DirectoryUnreadable {
-                path: directory.clone(),
+                path: directory.to_path_buf(),
                 source,
             })?;
             // `file_type` on the directory entry does not follow links, so a
@@ -454,7 +482,7 @@ impl OwnedDirectory {
 
             let metadata = entry.metadata().ok();
             entries.push(DiagnosticEntry {
-                name: name.to_owned(),
+                name: prefix.map_or_else(|| name.to_owned(), |launch| format!("{launch}/{name}")),
                 summary: match self.kind {
                     DiagnosticKind::Log => None,
                     DiagnosticKind::CrashReport => Some(summarize_crash_file(&path)),
@@ -468,9 +496,32 @@ impl OwnedDirectory {
                 path,
             });
         }
-
-        entries.sort_by(newest_first);
         Ok(entries)
+    }
+
+    /// The names of the launch folders directly inside the logs `directory`.
+    ///
+    /// Only real directories count: a link named like a launch folder is not
+    /// followed.
+    fn launch_directories(directory: &Path) -> Result<Vec<String>, DiagnosticError> {
+        let listing = std::fs::read_dir(directory).map_err(|source| {
+            DiagnosticError::DirectoryUnreadable {
+                path: directory.to_path_buf(),
+                source,
+            }
+        })?;
+        let mut launches = Vec::new();
+        for entry in listing.flatten() {
+            if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                continue;
+            }
+            if let Some(name) = entry.file_name().to_str()
+                && launch_handle_of_directory(name).is_some()
+            {
+                launches.push(name.to_owned());
+            }
+        }
+        Ok(launches)
     }
 
     /// Turns one entry name back into a path that is safe to open.
@@ -485,12 +536,47 @@ impl OwnedDirectory {
                 path: self.directory.join(name),
             });
         };
-        if !is_single_component(name) {
-            return Err(DiagnosticError::Refused {
-                path: self.directory.join(name),
-                reason: Refusal::NotOneComponent,
-            });
-        }
+        let (directory, name) = match name.split_once('/') {
+            Some((launch, file))
+                if self.kind == DiagnosticKind::Log
+                    && launch_handle_of_directory(launch).is_some()
+                    && is_single_component(file) =>
+            {
+                let folder = directory.join(launch);
+                match std::fs::symlink_metadata(&folder) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(metadata) => {
+                        return Err(DiagnosticError::Refused {
+                            path: folder,
+                            reason: if metadata.is_symlink() {
+                                Refusal::Symlink
+                            } else {
+                                Refusal::NotARegularFile
+                            },
+                        });
+                    }
+                    Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+                        return Err(DiagnosticError::Missing {
+                            path: folder.join(file),
+                        });
+                    }
+                    Err(source) => {
+                        return Err(DiagnosticError::Unreadable {
+                            path: folder,
+                            source,
+                        });
+                    }
+                }
+                (folder, file)
+            }
+            _ if is_single_component(name) => (directory, name),
+            _ => {
+                return Err(DiagnosticError::Refused {
+                    path: self.directory.join(name),
+                    reason: Refusal::NotOneComponent,
+                });
+            }
+        };
 
         let path = directory.join(name);
         let metadata = std::fs::symlink_metadata(&path).map_err(|source| {
@@ -757,6 +843,28 @@ fn newest_first(left: &DiagnosticEntry, right: &DiagnosticEntry) -> std::cmp::Or
 fn has_extension(path: &Path, extension: &str) -> bool {
     path.extension()
         .is_some_and(|found| found.eq_ignore_ascii_case(extension))
+}
+
+/// The prefix of the folder inside a client's `logs/` that holds the game logs
+/// of one launch run alongside another.
+///
+/// An additional launch keeps its `latest.log`, `debug.log` and rotated files
+/// here so that it never rolls away a file another launch is writing. A log
+/// listing names these files `launch-<handle>/<file>`.
+pub(crate) const LAUNCH_LOG_FOLDER_PREFIX: &str = "launch-";
+
+/// The folder name inside `logs/` that holds the game logs of the additional
+/// launch named `handle`.
+#[must_use]
+pub(crate) fn launch_log_folder_name(handle: &str) -> String {
+    format!("{LAUNCH_LOG_FOLDER_PREFIX}{handle}")
+}
+
+/// The launch handle a `logs/` folder name stands for, or `None` when the name
+/// is not one a launch folder can have.
+fn launch_handle_of_directory(name: &str) -> Option<&str> {
+    let handle = name.strip_prefix(LAUNCH_LOG_FOLDER_PREFIX)?;
+    crate::lock::is_valid_launch_id(handle).then_some(handle)
 }
 
 /// Whether a name refers to one entry of a directory and nothing else.

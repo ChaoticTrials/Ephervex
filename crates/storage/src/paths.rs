@@ -34,6 +34,10 @@ pub enum PathError {
         #[source]
         source: std::io::Error,
     },
+    /// A folder an additional launch needs is not what it must be, for example
+    /// the instance's `logs` is a link.
+    #[error("{path} cannot be used for a launch: {reason}")]
+    LaunchDirectoryRefused { path: PathBuf, reason: &'static str },
     /// The temporary root exists but cannot safely hold private instances.
     #[error("the temporary directory {path} is unsafe: {reason}")]
     UnsafeTemporaryDirectory { path: PathBuf, reason: &'static str },
@@ -56,6 +60,7 @@ impl PathError {
             Self::DirectoryCreation { .. } | Self::UnsafeTemporaryDirectory { .. } => {
                 "error-paths-directory-creation"
             }
+            Self::LaunchDirectoryRefused { .. } => "error-paths-launch-directory-refused",
             Self::NotUtf8 { .. } => "error-paths-not-utf8",
         }
     }
@@ -425,6 +430,16 @@ impl Paths {
     pub fn client_capture_dir(&self, id: InstanceId, launch: Option<&str>) -> PathBuf {
         self.client_captures_dir(id)
             .join(launch.map_or_else(|| "first".to_owned(), |handle| format!("launch-{handle}")))
+    }
+
+    /// The game directory an additional launch runs in:
+    /// `logs/clients/<id>/game-<handle>`.
+    ///
+    /// Holds links into the instance and nothing the launch needs to keep, so
+    /// it is removed with the client's other launch captures.
+    #[must_use]
+    pub fn client_launch_game_dir(&self, id: InstanceId, handle: &str) -> PathBuf {
+        self.client_captures_dir(id).join(format!("game-{handle}"))
     }
 
     /// Every launch capture of one client: `logs/clients/<id>`.

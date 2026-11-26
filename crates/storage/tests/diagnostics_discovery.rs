@@ -364,3 +364,67 @@ fn a_directory_entry_is_never_offered_as_a_file() {
         }
     ));
 }
+
+#[test]
+fn a_launchs_log_folder_is_listed_and_read_under_the_launch_it_belongs_to() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let logs = root.path().join("minecraft").join("logs");
+    write(&logs.join("latest.log"), "first\n");
+    write(&logs.join("launch-second").join("latest.log"), "second\n");
+    write(&logs.join("launch-second").join("debug.log"), "debug\n");
+    write(
+        &logs.join("launch-second").join("2026-01-01-1.log.gz"),
+        "gz",
+    );
+    write(&logs.join("other").join("latest.log"), "not a launch\n");
+
+    let directory = client_logs(root.path());
+    let mut names: Vec<String> = directory
+        .entries()
+        .expect("entries")
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "latest.log",
+            "launch-second/debug.log",
+            "launch-second/latest.log"
+        ]
+    );
+
+    let path = directory
+        .resolve("launch-second/latest.log")
+        .expect("resolved");
+    assert_eq!(std::fs::read_to_string(path).expect("read"), "second\n");
+    for name in [
+        "other/latest.log",
+        "launch-second/../latest.log",
+        "launch-second/a/b.log",
+    ] {
+        assert!(directory.resolve(name).is_err(), "{name}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_launch_folder_that_is_a_link_is_neither_listed_nor_opened() {
+    let root = tempfile::tempdir().expect("temp dir");
+    let logs = root.path().join("minecraft").join("logs");
+    let outside = root.path().join("outside");
+    write(&outside.join("latest.log"), "secret\n");
+    write(&logs.join("latest.log"), "first\n");
+    std::os::unix::fs::symlink(&outside, logs.join("launch-evil")).expect("link");
+
+    let directory = client_logs(root.path());
+    let names: Vec<String> = directory
+        .entries()
+        .expect("entries")
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(names, ["latest.log"]);
+    assert!(directory.resolve("launch-evil/latest.log").is_err());
+}

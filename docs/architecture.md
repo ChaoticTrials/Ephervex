@@ -1822,6 +1822,14 @@ the desktop (starting with the newest launcher log chosen) and with
 `ephervex logs bundle --launcher` on the command line.
 
 
+A client launched alongside another (`--alongside`) runs in a launcher-owned
+game directory of links into the instance (ADR 0060), with `logs` linked to its
+own `logs/launch-<handle>/` folder in the instance. Its `latest.log`,
+`debug.log` and rotated files therefore never replace another launch's, and a
+log listing names them `launch-<handle>/<file>`. Crash reports stay shared.
+Crash analysis and history entries that read `latest.log` read the first
+launch's file.
+
 ## Security boundaries
 
 ### Untrusted paths and archives

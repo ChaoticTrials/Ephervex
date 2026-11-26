@@ -272,10 +272,12 @@ struct LaunchArgs {
     /// stop <ID> --launch HANDLE` stops this one.
     ///
     /// The new launch is a second client, usually under a second account,
-    /// sharing the instance's game directory: its saves, its options and its
-    /// logs. Fine when both clients join a server. Two clients opening the
-    /// same singleplayer world is decided by Minecraft's own world lock, not by
-    /// Ephervex.
+    /// sharing the instance's saves, options and configs. It keeps its own game
+    /// logs, in the instance's logs folder under `launch-HANDLE`, so it never
+    /// rolls away the log of a client already running; `ephervex logs list`
+    /// shows them as `launch-HANDLE/latest.log`. Fine when both clients join a
+    /// server. Two clients opening the same singleplayer world is decided by
+    /// Minecraft's own world lock, not by Ephervex.
     #[arg(long, value_name = "HANDLE")]
     alongside: Option<String>,
     /// Play as this account instead of the default one.

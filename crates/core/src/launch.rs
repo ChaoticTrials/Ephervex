@@ -319,7 +319,7 @@ impl App {
             &installed.installation.plan,
             &LaunchSettings {
                 java: java.runtime.executable.clone(),
-                game_directory: game_directory(record),
+                game_directory: self.launch_game_directory(record, options)?,
                 identity: identity.clone(),
                 features: options.features.clone(),
                 jvm: JvmOptions {
@@ -391,6 +391,29 @@ impl App {
                 .map(Box::new);
         }
         Ok(outcome)
+    }
+
+    /// The directory the game runs in.
+    ///
+    /// The instance's own game directory for its first launch. A launch run
+    /// alongside another gets a directory of links into the instance with its
+    /// own `logs`, so the two never roll each other's `latest.log` away; see
+    /// [`ephervex_storage::prepare_launch_game_directory`].
+    fn launch_game_directory(
+        &self,
+        record: &ClientRecord,
+        options: &LaunchOptions,
+    ) -> CoreResult<PathBuf> {
+        let Some(handle) = options.additional.as_deref() else {
+            return Ok(game_directory(record));
+        };
+        let directory = self.paths().client_launch_game_dir(record.id, handle);
+        ephervex_storage::prepare_launch_game_directory(
+            &game_directory(record),
+            &directory,
+            handle,
+        )?;
+        Ok(directory)
     }
 
     /// Recorded before the wait, so a launch that never returns - a game that
@@ -1020,5 +1043,49 @@ mod tests {
             game.file_name().and_then(std::ffi::OsStr::to_str),
             Some("minecraft")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_launch_run_alongside_another_keeps_its_own_game_log() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = vanilla(&app, "1.20.1");
+        let game = game_directory(&record);
+        std::fs::create_dir_all(game.join("logs")).expect("logs");
+        std::fs::write(game.join("logs").join("latest.log"), "first").expect("first log");
+
+        let first = app
+            .launch_game_directory(&record, &LaunchOptions::default())
+            .expect("first launch directory");
+        assert_eq!(first, game, "the first launch runs in the game directory");
+
+        let alongside = LaunchOptions {
+            additional: Some("second".to_owned()),
+            ..LaunchOptions::default()
+        };
+        let second = app
+            .launch_game_directory(&record, &alongside)
+            .expect("alongside launch directory");
+        assert_ne!(second, game);
+        assert!(!second.starts_with(&record.root));
+        std::fs::write(second.join("logs").join("latest.log"), "second").expect("second log");
+
+        assert_eq!(
+            std::fs::read_to_string(game.join("logs").join("latest.log")).expect("first"),
+            "first"
+        );
+        let catalog = app
+            .diagnostics(crate::DiagnosticScope::Client(record.id))
+            .expect("catalog");
+        let names: Vec<&str> = catalog
+            .section(ephervex_storage::DiagnosticKind::Log)
+            .expect("log section")
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert!(names.contains(&"latest.log"), "{names:?}");
+        assert!(names.contains(&"launch-second/latest.log"), "{names:?}");
     }
 }

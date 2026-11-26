@@ -36,6 +36,7 @@ pub mod diagnostics;
 pub mod folders;
 pub mod host_events;
 pub mod index;
+pub mod launch_directory;
 pub mod lock;
 pub mod metadata;
 pub mod organization;
@@ -73,6 +74,7 @@ pub use host_events::{
     remove_host_events,
 };
 pub use index::{Index, IndexError, MIGRATIONS, Migration, MigrationOutcome, apply_migrations};
+pub use launch_directory::prepare_launch_game_directory;
 pub use lock::{
     FIRST_LAUNCH_HANDLE, ForcedStop, LAUNCH_LOCK_FILE, LAUNCH_RUN_VARIABLE, LaunchLock,
     LaunchState, LockDisposition, LockError, RunnerHost, RunningLaunch, force_release,

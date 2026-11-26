@@ -1331,6 +1331,7 @@ fn path_failing_path(error: &ephervex_storage::PathError) -> Option<PathBuf> {
     match error {
         PathError::DirectoryCreation { path, .. }
         | PathError::UnsafeTemporaryDirectory { path, .. }
+        | PathError::LaunchDirectoryRefused { path, .. }
         | PathError::NotUtf8 { path } => Some(path.clone()),
         PathError::NoHomeDirectory => None,
     }
