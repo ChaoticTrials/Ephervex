@@ -9544,6 +9544,10 @@ fn apply_event(
         Event::ServerWorkspace(data) => apply_server_workspace(workspace, data),
         Event::ServerStatistics(data) => apply_server_statistics(workspace, &data),
         Event::LiveLog(_) => {}
+        Event::ClientLaunches { instance, launches } => workspace
+            .logs
+            .borrow_mut()
+            .set_client_launches(instance, launches),
         Event::Diagnostics {
             rows,
             scope,
@@ -24222,7 +24226,7 @@ mod tests {
 
     #[test]
     fn a_sources_whole_content_is_drawn_even_when_the_view_is_not_following() {
-        let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
+        let source = LiveLogSource::client(ephervex_model::InstanceId::new());
         let mut state = LiveViewerState::default();
         state.activate(source.clone());
         let line = |text: &str| {
@@ -24261,7 +24265,7 @@ mod tests {
         // An update for a source this view is not on changes nothing at all.
         assert_eq!(
             state.apply(LiveLogUpdate {
-                source: LiveLogSource::Client(ephervex_model::InstanceId::new()),
+                source: LiveLogSource::client(ephervex_model::InstanceId::new()),
                 generation: None,
                 reset: true,
                 missing: false,
@@ -24275,7 +24279,7 @@ mod tests {
 
     #[test]
     fn large_live_history_uses_bounded_production_filter_and_chunk_updates() {
-        let source = LiveLogSource::Client(ephervex_model::InstanceId::new());
+        let source = LiveLogSource::client(ephervex_model::InstanceId::new());
         let mut state = LiveViewerState::default();
         state.activate(source.clone());
 

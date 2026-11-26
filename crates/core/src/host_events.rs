@@ -44,17 +44,27 @@ impl App {
         read_host_events(self.paths(), event_host(host))
     }
 
-    /// Adds how a client's game ended to its history, with the crash report
-    /// that came with it when it did not end cleanly.
+    /// Adds how one launch of a client ended to its history, with the crash
+    /// report that came with it when it did not end cleanly. `launch` is the
+    /// handle of a launch run alongside the first, or `None` for the first,
+    /// and `started` when that launch's run began.
     pub(crate) fn record_client_exit(
         &self,
         instance: ephervex_model::InstanceId,
+        launch: Option<&str>,
+        started: chrono::DateTime<chrono::Utc>,
         exit: &ephervex_minecraft::GameExit,
     ) {
         let host = InstalledHost::Instance(instance);
-        self.record_host_event(host, HostEventKind::Exited, &exit_event_subject(exit), "");
+        self.record_launch_event(
+            host,
+            launch,
+            HostEventKind::Exited,
+            &exit_event_subject(exit),
+            "",
+        );
         if !exit.is_success() {
-            self.record_crash_event(host);
+            self.record_crash_event(instance, launch, started);
         }
     }
 
@@ -66,10 +76,24 @@ impl App {
         subject: &str,
         detail: &str,
     ) {
+        self.record_launch_event(host, None, kind, subject, detail);
+    }
+
+    /// Adds one event about one launch of a client to its history, now.
+    /// `launch` is the handle of a launch run alongside the first, or `None`
+    /// for the first launch and every event that is not about a launch.
+    pub(crate) fn record_launch_event(
+        &self,
+        host: InstalledHost,
+        launch: Option<&str>,
+        kind: HostEventKind,
+        subject: &str,
+        detail: &str,
+    ) {
         if let Err(error) = append_host_event(
             self.paths(),
             event_host(host),
-            &HostEvent::now(kind, subject, detail),
+            &HostEvent::now(kind, subject, detail).of_launch(launch),
         ) {
             tracing::warn!(%error, ?kind, "could not record a host event");
         }

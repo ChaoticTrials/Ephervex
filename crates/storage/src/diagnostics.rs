@@ -860,6 +860,20 @@ pub(crate) fn launch_log_folder_name(handle: &str) -> String {
     format!("{LAUNCH_LOG_FOLDER_PREFIX}{handle}")
 }
 
+/// The name a log listing gives the `latest.log` of one launch of a client:
+/// `latest.log` for its first launch (`None`), and `launch-<handle>/latest.log`
+/// for one run alongside it.
+#[must_use]
+pub fn launch_latest_log_name(launch: Option<&str>) -> String {
+    launch.map_or_else(
+        || LATEST_LOG_FILE.to_owned(),
+        |handle| format!("{}/{LATEST_LOG_FILE}", launch_log_folder_name(handle)),
+    )
+}
+
+/// The log a client is writing while it runs.
+const LATEST_LOG_FILE: &str = "latest.log";
+
 /// The launch handle a `logs/` folder name stands for, or `None` when the name
 /// is not one a launch folder can have.
 fn launch_handle_of_directory(name: &str) -> Option<&str> {
@@ -996,6 +1010,15 @@ mod tests {
             std::fs::create_dir_all(parent).expect("mkdir");
         }
         std::fs::write(path, body).expect("write");
+    }
+
+    #[test]
+    fn each_launch_s_latest_log_is_named_as_the_log_listing_names_it() {
+        assert_eq!(launch_latest_log_name(None), "latest.log");
+        assert_eq!(
+            launch_latest_log_name(Some("second")),
+            "launch-second/latest.log"
+        );
     }
 
     #[test]

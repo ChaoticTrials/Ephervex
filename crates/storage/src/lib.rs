@@ -66,7 +66,7 @@ pub use config::{
 pub use diagnostics::{
     CrashSummary, DEFAULT_VIEW_BYTES, DiagnosticEntry, DiagnosticError, DiagnosticKind,
     MAX_SEARCH_MATCHES, MAX_VIEW_BYTES, OwnedDirectory, Refusal, SearchMatch, SearchOptions,
-    SearchOutcome, TextAnchor, TextView,
+    SearchOutcome, TextAnchor, TextView, launch_latest_log_name,
 };
 pub use folders::{ClientFolder, MissingFolder, ServerFolder};
 pub use host_events::{

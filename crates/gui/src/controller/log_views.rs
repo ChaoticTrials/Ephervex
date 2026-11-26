@@ -11,7 +11,8 @@ use std::sync::mpsc::Sender;
 
 use ephervex_core::live_diagnostics::LogLevel;
 use ephervex_core::{DiagnosticScope, InstalledHost};
-use ephervex_i18n::{Arg, lookup_args};
+use ephervex_i18n::{Arg, lookup, lookup_args};
+use ephervex_model::InstanceId;
 use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 
 use super::{
@@ -22,13 +23,14 @@ use crate::backend::{
     self, Command, DiagnosticContent, DiagnosticData, LiveLogGeneration, LiveLogSource,
     LiveLogUpdate,
 };
-use crate::ui::{AppWindow, LogView};
+use crate::ui::{AppWindow, LogLaunchChoice, LogView};
 use crate::workspace_layout::{PaneId, Surface};
 
 /// What a viewer reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LogMode {
-    /// The log being written: a client's `latest.log`, or a server's output.
+    /// The log being written: the `latest.log` of the client launch the
+    /// viewer follows, or a server's output.
     Live,
     /// The host's saved log files, one opened at a time.
     Files,
@@ -71,6 +73,9 @@ struct Viewer {
     files: ModelRc<crate::ui::DiagnosticRow>,
     /// The crash report open in [`LogMode::Crashes`], read as a plain document.
     report: String,
+    /// The client launch whose live log [`LogMode::Live`] follows: `None` for
+    /// the first launch, or the handle of one run alongside it.
+    launch: Option<String>,
     live: LiveViewerState,
     wrap: bool,
     follow: bool,
@@ -86,6 +91,7 @@ impl Viewer {
             file: String::new(),
             files: ModelRc::default(),
             report: String::new(),
+            launch: None,
             live: LiveViewerState::default(),
             wrap: false,
             follow: true,
@@ -94,9 +100,34 @@ impl Viewer {
 
     fn live_source(&self) -> LiveLogSource {
         match self.host {
-            InstalledHost::Instance(instance) => LiveLogSource::Client(instance),
+            InstalledHost::Instance(instance) => LiveLogSource::Client {
+                instance,
+                launch: self.launch.clone(),
+            },
             InstalledHost::Server(server) => LiveLogSource::Server(server),
         }
+    }
+
+    /// The client launches this viewer's live log can follow, first launch
+    /// first: the ones `running` names, and the one it follows even after
+    /// that launch has ended. Empty for a server.
+    fn launch_choices(&self, running: &HashMap<InstanceId, Vec<String>>) -> Vec<Option<String>> {
+        let InstalledHost::Instance(instance) = self.host else {
+            return Vec::new();
+        };
+        let mut choices: Vec<Option<String>> = std::iter::once(None)
+            .chain(
+                running
+                    .get(&instance)
+                    .into_iter()
+                    .flatten()
+                    .map(|handle| Some(handle.clone())),
+            )
+            .collect();
+        if !choices.contains(&self.launch) {
+            choices.push(self.launch.clone());
+        }
+        choices
     }
 
     fn scope(&self) -> DiagnosticScope {
@@ -126,6 +157,9 @@ pub(super) struct LogViews {
     readers: HashMap<LiveLogSource, LiveLogGeneration>,
     /// The generation the next requested reader is given.
     next_generation: u64,
+    /// The launches each client was last seen running alongside its first,
+    /// which the viewers on it offer to follow.
+    client_launches: HashMap<InstanceId, Vec<String>>,
 }
 
 impl LogViews {
@@ -138,6 +172,7 @@ impl LogViews {
             deferred: HashSet::new(),
             readers: HashMap::new(),
             next_generation: 0,
+            client_launches: HashMap::new(),
         }
     }
 
@@ -191,6 +226,7 @@ impl LogViews {
                 self.slots.len() - 1
             };
             self.open_live(slot);
+            self.write_launches(slot);
         }
         self.close_unread(&before);
     }
@@ -479,6 +515,56 @@ impl LogViews {
         self.update_row(slot, |row| write_selection(&viewer.live, row));
     }
 
+    /// Records which launches a client is running alongside its first, and
+    /// offers them in every viewer on that client.
+    pub(super) fn set_client_launches(&mut self, instance: InstanceId, launches: Vec<String>) {
+        if self.client_launches.get(&instance) == Some(&launches) {
+            return;
+        }
+        self.client_launches.insert(instance, launches);
+        for slot in 0..self.slots.len() {
+            let on_instance = self.slots[slot]
+                .as_ref()
+                .is_some_and(|viewer| viewer.host == InstalledHost::Instance(instance));
+            if on_instance {
+                self.write_launches(slot);
+            }
+        }
+    }
+
+    /// Points a pane's live log at one launch of its client: `""` is the
+    /// first launch, anything else the handle of one run alongside it.
+    pub(super) fn follow_launch(&mut self, pane: PaneId, handle: &str) {
+        let launch = (!handle.is_empty()).then(|| handle.to_owned());
+        let Some((slot, viewer)) = self.viewer_mut(pane) else {
+            return;
+        };
+        if !matches!(viewer.host, InstalledHost::Instance(_)) || viewer.launch == launch {
+            return;
+        }
+        viewer.launch = launch;
+        let live = viewer.mode == LogMode::Live;
+        let before = self.sources();
+        if live {
+            self.open_live(slot);
+        }
+        self.write_launches(slot);
+        self.close_unread(&before);
+    }
+
+    /// Writes the launches a viewer can follow, and the one it follows, into
+    /// its row.
+    fn write_launches(&self, slot: usize) {
+        let Some(viewer) = self.slots.get(slot).and_then(Option::as_ref) else {
+            return;
+        };
+        let (choices, chosen) = launch_rows(viewer, &self.client_launches);
+        self.update_row(slot, |row| {
+            row.launches = choices;
+            row.launch = chosen;
+        });
+    }
+
     /// Switches a pane's viewer between the live log, saved logs, and crash reports.
     pub(super) fn show(&mut self, pane: PaneId, mode: LogMode) {
         let Some(slot) = self.slot(pane) else {
@@ -725,6 +811,37 @@ impl LogViews {
     }
 }
 
+/// The launch choices a viewer's row offers, and the handle of the one it
+/// follows (`""` for the first launch). A client running one launch offers
+/// none, since there is nothing to choose between.
+fn launch_rows(
+    viewer: &Viewer,
+    running: &HashMap<InstanceId, Vec<String>>,
+) -> (ModelRc<LogLaunchChoice>, SharedString) {
+    let choices = viewer.launch_choices(running);
+    let rows: Vec<LogLaunchChoice> = if choices.len() > 1 {
+        choices
+            .iter()
+            .map(|launch| LogLaunchChoice {
+                handle: launch.as_deref().unwrap_or_default().into(),
+                label: launch
+                    .as_deref()
+                    .map_or_else(
+                        || lookup("gui-log-first-launch"),
+                        |handle| lookup_args("gui-log-launch", [("launch", Arg::from(handle))]),
+                    )
+                    .into(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    (
+        ModelRc::new(VecModel::from(rows)),
+        viewer.launch.as_deref().unwrap_or_default().into(),
+    )
+}
+
 /// Writes a selection in reading order, bumping the revision rows react to:
 /// a selection is a call on a text item rather than a binding.
 fn write_selection(state: &LiveViewerState, row: &mut LogView) {
@@ -767,6 +884,12 @@ pub(super) fn register(ui: &AppWindow, views: &Rc<std::cell::RefCell<LogViews>>)
     ui.on_log_show(move |id, mode| {
         if let (Some(id), Some(mode)) = (pane(id), LogMode::parse(&mode)) {
             state.borrow_mut().show(id, mode);
+        }
+    });
+    let state = Rc::clone(views);
+    ui.on_log_follow_launch(move |id, handle| {
+        if let Some(id) = pane(id) {
+            state.borrow_mut().follow_launch(id, &handle);
         }
     });
     let state = Rc::clone(views);
@@ -883,7 +1006,7 @@ mod tests {
 
     fn client_update(instance: InstanceId, text: &str) -> LiveLogUpdate {
         LiveLogUpdate {
-            source: LiveLogSource::Client(instance),
+            source: LiveLogSource::client(instance),
             generation: None,
             reset: false,
             missing: false,
@@ -1096,6 +1219,115 @@ mod tests {
         assert_eq!(sent(&commands), ["close client"]);
     }
 
+    fn launch_update(instance: InstanceId, launch: &str, text: &str) -> LiveLogUpdate {
+        LiveLogUpdate {
+            source: LiveLogSource::Client {
+                instance,
+                launch: Some(launch.to_owned()),
+            },
+            ..client_update(instance, text)
+        }
+    }
+
+    fn opened(commands: &Receiver<Command>) -> Vec<String> {
+        commands
+            .try_iter()
+            .filter_map(|command| match command {
+                Command::OpenLiveLog { source, .. } => Some(format!("open {}", source.id())),
+                Command::CloseLiveLog(source) => Some(format!("close {}", source.id())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn offered(views: &LogViews, pane: PaneId) -> Vec<(String, String)> {
+        row(views, pane)
+            .launches
+            .iter()
+            .map(|choice| (choice.handle.to_string(), choice.label.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn a_client_running_one_launch_offers_no_launch_to_choose() {
+        let (mut views, _) = views();
+        let instance = InstanceId::new();
+        views.sync(&[(A, InstalledHost::Instance(instance), Surface::Logs)]);
+
+        views.set_client_launches(instance, Vec::new());
+
+        assert!(offered(&views, A).is_empty());
+        assert_eq!(row(&views, A).launch, "");
+    }
+
+    #[test]
+    fn a_launch_run_alongside_is_offered_and_its_own_log_is_followed() {
+        let (mut views, commands) = views();
+        let instance = InstanceId::new();
+        views.sync(&[
+            (A, InstalledHost::Instance(instance), Surface::Logs),
+            (B, InstalledHost::Instance(instance), Surface::Logs),
+        ]);
+        assert_eq!(opened(&commands), [format!("open {instance}")]);
+
+        views.set_client_launches(instance, vec!["second".to_owned()]);
+        assert_eq!(
+            offered(&views, A),
+            [
+                (String::new(), lookup("gui-log-first-launch")),
+                (
+                    "second".to_owned(),
+                    lookup_args("gui-log-launch", [("launch", Arg::from("second"))])
+                ),
+            ]
+        );
+
+        views.follow_launch(A, "second");
+        assert_eq!(row(&views, A).launch, "second");
+        assert_eq!(
+            opened(&commands),
+            [format!("open {instance}#second")],
+            "B still reads the first launch's log"
+        );
+
+        deliver(&mut views, &client_update(instance, "first client"));
+        deliver(
+            &mut views,
+            &launch_update(instance, "second", "second client"),
+        );
+        assert_eq!(lines(&views, A), ["second client"]);
+        assert_eq!(lines(&views, B), ["first client"]);
+
+        views.follow_launch(B, "second");
+        assert_eq!(
+            opened(&commands),
+            [format!("close {instance}")],
+            "B joins the reader A has, and nobody reads the first launch now"
+        );
+        assert_eq!(lines(&views, B), ["second client"]);
+    }
+
+    #[test]
+    fn a_followed_launch_stays_offered_after_it_ends() {
+        let (mut views, _) = views();
+        let instance = InstanceId::new();
+        views.sync(&[(A, InstalledHost::Instance(instance), Surface::Logs)]);
+        views.set_client_launches(instance, vec!["second".to_owned()]);
+        views.follow_launch(A, "second");
+
+        views.set_client_launches(instance, Vec::new());
+
+        let handles: Vec<String> = offered(&views, A)
+            .into_iter()
+            .map(|(handle, _)| handle)
+            .collect();
+        assert_eq!(
+            handles,
+            ["", "second"],
+            "the log it shows can still be left"
+        );
+    }
+
     fn log_line(level: &str, text: &str) -> String {
         format!("[12:00:00] [main/{level}]: {text}")
     }
@@ -1125,7 +1357,7 @@ mod tests {
     fn a_pane_opened_on_a_log_that_is_already_read_shows_it_whole_without_a_new_reader() {
         let (mut views, commands) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         let mut snapshot = from_reader(
             &views,
@@ -1157,7 +1389,7 @@ mod tests {
     fn a_pane_that_joins_before_the_first_snapshot_arrives_receives_it() {
         let (mut views, commands) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         views.sync(&[
             (A, InstalledHost::Instance(host), Surface::Logs),
@@ -1178,7 +1410,7 @@ mod tests {
         let (mut views, commands) = views();
         let instance = InstanceId::new();
         let host = InstalledHost::Instance(instance);
-        let source = LiveLogSource::Client(instance);
+        let source = LiveLogSource::client(instance);
         views.sync(&[(A, host, Surface::Logs), (B, host, Surface::Logs)]);
         sent(&commands);
 
@@ -1195,7 +1427,7 @@ mod tests {
     fn an_update_from_a_reader_that_was_closed_never_reaches_the_one_that_replaced_it() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         let pane = [(A, InstalledHost::Instance(host), Surface::Logs)];
         views.sync(&pane);
         let retired = from_reader(&views, &source, &[log_line("INFO", "from the old reader")]);
@@ -1219,7 +1451,7 @@ mod tests {
     fn an_update_from_a_reader_that_was_closed_is_dropped_while_nothing_reads_the_source() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         let retired = from_reader(&views, &source, &[log_line("INFO", "late")]);
         views.sync(&[]);
@@ -1234,7 +1466,7 @@ mod tests {
     fn new_records_are_drawn_at_once_when_a_pane_is_not_following() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         let mut snapshot = from_reader(&views, &source, &[log_line("INFO", "before")]);
         snapshot.reset = true;
@@ -1276,7 +1508,7 @@ mod tests {
     fn each_level_is_counted_whatever_the_filters_show() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         views.set_level(A, "info", false);
 
@@ -1305,7 +1537,7 @@ mod tests {
     fn only_records_the_pane_shows_count_as_new_lines() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         views.set_level(A, "info", false);
         views.set_follow(A, false);
@@ -1325,7 +1557,7 @@ mod tests {
     fn one_pane_following_does_not_change_what_another_pane_counts_as_new() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[
             (A, InstalledHost::Instance(host), Surface::Logs),
             (B, InstalledHost::Instance(host), Surface::Logs),
@@ -1345,7 +1577,7 @@ mod tests {
     fn a_selection_above_new_records_survives_their_arrival() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         let mut snapshot = from_reader(
             &views,
@@ -1373,7 +1605,7 @@ mod tests {
     fn a_selection_survives_new_records_pushing_old_ones_out_of_a_full_log() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         let slot = views.slot(A).expect("viewer");
         // A log at its retention cap drops its oldest record with every new one.
@@ -1420,7 +1652,7 @@ mod tests {
     fn the_new_line_count_follows_the_rows_a_filtered_stack_trace_adds() {
         let (mut views, _) = views();
         let host = InstanceId::new();
-        let source = LiveLogSource::Client(host);
+        let source = LiveLogSource::client(host);
         views.sync(&[(A, InstalledHost::Instance(host), Surface::Logs)]);
         views.set_level(A, "all", false);
         views.set_level(A, "error", true);

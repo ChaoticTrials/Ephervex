@@ -950,7 +950,12 @@ pub enum Command {
 /// view that has since been pointed at another.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LiveLogSource {
-    Client(InstanceId),
+    /// The `latest.log` of one launch of a client: its first launch for
+    /// `None`, or the launch run alongside it under that handle.
+    Client {
+        instance: InstanceId,
+        launch: Option<String>,
+    },
     Server(ServerId),
     /// One log file, opened from a diagnostics list.
     ///
@@ -966,10 +971,19 @@ pub enum LiveLogSource {
 }
 
 impl LiveLogSource {
+    /// The live log of a client's first launch.
+    #[must_use]
+    pub const fn client(instance: InstanceId) -> Self {
+        Self::Client {
+            instance,
+            launch: None,
+        }
+    }
+
     #[must_use]
     pub const fn kind(&self) -> &'static str {
         match self {
-            Self::Client(_) => "client",
+            Self::Client { .. } => "client",
             Self::Server(_) => "server",
             Self::File { .. } => "file",
         }
@@ -978,7 +992,14 @@ impl LiveLogSource {
     #[must_use]
     pub fn id(&self) -> String {
         match self {
-            Self::Client(id) => id.to_string(),
+            Self::Client {
+                instance,
+                launch: None,
+            } => instance.to_string(),
+            Self::Client {
+                instance,
+                launch: Some(launch),
+            } => format!("{instance}#{launch}"),
             Self::Server(id) => id.to_string(),
             Self::File { name, .. } => name.clone(),
         }
@@ -2178,6 +2199,12 @@ pub enum Event {
     ServerWorkspace(ServerWorkspaceData),
     ServerStatistics(ServerStatisticsData),
     LiveLog(LiveLogUpdate),
+    /// The launches a client is running alongside its first, by handle, as
+    /// a tail of one of its live logs last saw them.
+    ClientLaunches {
+        instance: InstanceId,
+        launches: Vec<String>,
+    },
     Diagnostics {
         rows: Vec<DiagnosticData>,
         scope: String,
@@ -3223,7 +3250,7 @@ fn run_worker(
     send_snapshot(&mut app, &events);
     // One tail per client log being read, each stopped on its own, so two
     // views can follow two clients at once.
-    let mut client_tails: HashMap<InstanceId, Arc<AtomicBool>> = HashMap::new();
+    let mut client_tails: HashMap<ClientLogKey, Arc<AtomicBool>> = HashMap::new();
     // The same for the servers whose console is open.
     let mut server_tails: HashMap<ServerId, Arc<AtomicBool>> = HashMap::new();
     let refreshed_mods: RefreshedHosts = Arc::new(Mutex::new(HashSet::new()));
@@ -6421,7 +6448,9 @@ fn run_worker(
             }
             Command::CloseLiveLog(source) => {
                 let stop = match source {
-                    LiveLogSource::Client(instance) => client_tails.remove(&instance),
+                    LiveLogSource::Client { instance, launch } => {
+                        client_tails.remove(&(instance, launch))
+                    }
                     LiveLogSource::Server(server) => server_tails.remove(&server),
                     LiveLogSource::File { .. } => None,
                 };
@@ -9204,7 +9233,7 @@ fn open_live_log(
     generation: LiveLogGeneration,
     events: &Sender<Event>,
     supervised: &SupervisedServers,
-    client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
+    client_tails: &mut HashMap<ClientLogKey, Arc<AtomicBool>>,
     server_tails: &mut HashMap<ServerId, Arc<AtomicBool>>,
 ) {
     match source.clone() {
@@ -9234,22 +9263,35 @@ fn open_live_log(
         LiveLogSource::Server(server) => {
             follow_server_capture(app, supervised, server, generation, events, server_tails);
         }
-        LiveLogSource::Client(instance) => {
-            follow_client_log(app, instance, generation, events, client_tails);
+        LiveLogSource::Client { instance, launch } => {
+            follow_client_log(app, instance, launch, generation, events, client_tails);
         }
     }
 }
 
-/// Tails one client's `latest.log` on a thread of its own until its stop flag
-/// is raised.
+/// Which launch's live log of which client a tail follows: `None` is the
+/// client's first launch.
+type ClientLogKey = (InstanceId, Option<String>);
+
+/// How many polls of a client's live log pass between two looks at which
+/// launches the client is running.
+const CLIENT_LAUNCHES_POLLS: u32 = 8;
+
+/// Tails the `latest.log` of one launch of a client on a thread of its own
+/// until its stop flag is raised.
+///
+/// While it runs it also reports which launches the client is running
+/// alongside its first, whenever that changes, so a view of the log can offer
+/// each of them.
 fn follow_client_log(
     app: &App,
     instance: InstanceId,
+    launch: Option<String>,
     generation: LiveLogGeneration,
     events: &Sender<Event>,
-    client_tails: &mut HashMap<InstanceId, Arc<AtomicBool>>,
+    client_tails: &mut HashMap<ClientLogKey, Arc<AtomicBool>>,
 ) {
-    let mut tail = match app.client_log_tail(instance) {
+    let mut tail = match app.client_log_tail(instance, launch.as_deref()) {
         Ok(tail) => tail,
         Err(error) => {
             send_error(events, &error);
@@ -9260,9 +9302,10 @@ fn follow_client_log(
     // it receives the whole log again. The views ask only when none of them
     // holds the log already.
     let stop = Arc::new(AtomicBool::new(false));
-    if let Some(previous) = client_tails.insert(instance, Arc::clone(&stop)) {
+    if let Some(previous) = client_tails.insert((instance, launch.clone()), Arc::clone(&stop)) {
         previous.store(true, Ordering::Relaxed);
     }
+    let source = LiveLogSource::Client { instance, launch };
     let paths = app.paths().clone();
     let events = events.clone();
     if let Err(error) = thread::Builder::new()
@@ -9276,12 +9319,25 @@ fn follow_client_log(
                 }
             };
             let mut first = true;
+            let mut launches: Option<Vec<String>> = None;
+            let mut polls_since_launches = CLIENT_LAUNCHES_POLLS;
             while !stop.load(Ordering::Relaxed) {
+                if polls_since_launches >= CLIENT_LAUNCHES_POLLS {
+                    polls_since_launches = 0;
+                    if let Ok(running) = additional_launches(&app, instance)
+                        && launches.as_ref() != Some(&running)
+                    {
+                        let _ = events.send(Event::ClientLaunches {
+                            instance,
+                            launches: running.clone(),
+                        });
+                        launches = Some(running);
+                    }
+                }
+                polls_since_launches += 1;
                 match app.poll_client_log(&mut tail) {
                     Ok(mut update) => {
-                        if app
-                            .launch_state(instance)
-                            .is_ok_and(|state| state.is_none())
+                        if tail_launch_ended(&app, &source)
                             && let Some(line) = tail.finish_partial_line()
                         {
                             update.lines.push(line);
@@ -9294,7 +9350,7 @@ fn follow_client_log(
                         // read the log from the start.
                         if has_update && !stop.load(Ordering::Relaxed) {
                             let _ = events.send(Event::LiveLog(LiveLogUpdate {
-                                source: LiveLogSource::Client(instance),
+                                source: source.clone(),
                                 generation: Some(generation),
                                 reset: first || update.reset,
                                 missing: update.missing,
@@ -9314,6 +9370,29 @@ fn follow_client_log(
     {
         tracing::error!(%error, "could not start the client latest.log tail");
     }
+}
+
+/// The handles of the launches a client is running alongside its first, in
+/// the order the instance lists them.
+fn additional_launches(app: &App, instance: InstanceId) -> ephervex_core::CoreResult<Vec<String>> {
+    Ok(app
+        .running_launches(instance)?
+        .into_iter()
+        .filter_map(|launch| launch.id)
+        .collect())
+}
+
+/// Whether the launch whose live log `source` is has ended, so a last line
+/// it left unterminated is complete.
+fn tail_launch_ended(app: &App, source: &LiveLogSource) -> bool {
+    let LiveLogSource::Client { instance, launch } = source else {
+        return false;
+    };
+    app.running_launches(*instance).is_ok_and(|running| {
+        !running
+            .iter()
+            .any(|running| running.id.as_deref() == launch.as_deref())
+    })
 }
 
 /// The most lines a server Console is opened with.

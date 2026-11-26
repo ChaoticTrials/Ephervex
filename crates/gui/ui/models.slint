@@ -610,10 +610,22 @@ export struct LogChunk {
     level: string,
 }
 
+// One client launch a log viewer's live log can follow.
+export struct LogLaunchChoice {
+    // "" for the client's first launch, or the handle of one run alongside it.
+    handle: string,
+    label: string,
+}
+
 // What one pane's log viewer shows. Each Logs or Console pane has its own.
 export struct LogView {
     // "live", "files", or "crashes".
     mode: string,
+    // The client launches the live log can follow. Empty while the client
+    // runs only one, since there is nothing to choose between.
+    launches: [LogLaunchChoice],
+    // The handle of the launch the live log follows; "" for the first.
+    launch: string,
     // The saved log or crash report open, by its listed name.
     file: string,
     files: [DiagnosticRow],

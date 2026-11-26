@@ -55,8 +55,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use ephervex_storage::DiagnosticKind;
+use ephervex_model::InstanceId;
 use ephervex_storage::diagnostics::MAX_VIEW_BYTES;
+use ephervex_storage::{DiagnosticEntry, DiagnosticKind};
 
 use crate::app::App;
 use crate::diagnostics::{DiagnosticRequest, DiagnosticScope};
@@ -97,6 +98,19 @@ const GAME_AND_LOADER_IDS: &[&str] = &[
 /// explain it. Below it are the environment tables and thread dumps, whose
 /// frames belong to threads that were merely running at the time.
 const SYSTEM_DETAILS_HEADER: &str = "-- System Details --";
+
+/// What the game prints on its standard output once it has written a crash
+/// report, followed by the report's path.
+///
+/// Crash reports of every launch of a client land in its one `crash-reports/`
+/// folder, and nothing inside a report says which launch wrote it. This line,
+/// in the output the launcher captured for one launch, does.
+const CRASH_REPORT_SAVED_MARKER: &str = "#@!@# Game crashed! Crash report saved to: #@!@#";
+
+/// How many of a launch's last captured lines are searched for
+/// [`CRASH_REPORT_SAVED_MARKER`]. The game prints the line after the report
+/// itself and exits right after.
+const CRASH_REPORT_CLAIM_LINES: usize = 200;
 
 /// How much a suspect is worth acting on, and the order they are shown in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -663,6 +677,10 @@ pub struct CrashReview {
     /// what lets a frontend decide whether a crash belongs to the run the user
     /// just watched or to an older one.
     pub reported_at: Option<DateTime<Utc>>,
+    /// The handle of the launch that wrote the report, when the output captured
+    /// for a launch run alongside the client's first one names it. `None` is
+    /// the first launch, or a report no launch's output names.
+    pub launch: Option<String>,
     pub analysis: CrashAnalysis,
     /// Every suspect, most confident first, matched against the host's mods.
     pub mods: Vec<SuspectedMod>,
@@ -722,7 +740,16 @@ impl App {
                     .with_budget(MAX_VIEW_BYTES),
             )?
             .text;
-        let mut analysis = analyze_crash_report(&text, &self.recent_log_text(scope));
+        let launch = match host {
+            InstalledHost::Instance(id) => self
+                .crash_report_claims(id)
+                .into_iter()
+                .find(|(_, claimed)| *claimed == report.name)
+                .and_then(|(launch, _)| launch),
+            InstalledHost::Server(_) => None,
+        };
+        let mut analysis =
+            analyze_crash_report(&text, &self.recent_log_text(scope, launch.as_deref()));
 
         let known = self.host_mod_snapshot(host)?;
         // A module the mod list gives a jar for that is no file in this host's
@@ -749,61 +776,128 @@ impl App {
         Ok(Some(CrashReview {
             report_name: report.name,
             reported_at: report.modified,
+            launch,
             analysis,
             mods,
         }))
     }
 
-    /// Adds the crash report of a host's last run to its history, when the
-    /// last run left one: what the report says failed, and its first lines.
-    pub(crate) fn record_crash_event(&self, host: InstalledHost) {
-        let Ok(Some(report)) = self
-            .diagnostic_entries(diagnostic_scope(host), DiagnosticKind::CrashReport)
-            .map(|entries| entries.into_iter().next())
+    /// Adds the crash report of one client launch's run to its history, when
+    /// that run left one: what the report says failed, and its first lines.
+    ///
+    /// `launch` is the launch that ended (`None` for the first) and `started`
+    /// when its run began; a report written before then is another run's. The
+    /// report that launch's captured output names is preferred; without one,
+    /// the newest report no other launch's output names is taken.
+    pub(crate) fn record_crash_event(
+        &self,
+        instance: InstanceId,
+        launch: Option<&str>,
+        started: DateTime<Utc>,
+    ) {
+        let host = InstalledHost::Instance(instance);
+        let Ok(entries) =
+            self.diagnostic_entries(diagnostic_scope(host), DiagnosticKind::CrashReport)
         else {
             return;
         };
-        let started = match host {
-            InstalledHost::Instance(id) => self
-                .current_client(id)
-                .ok()
-                .and_then(|client| client.last_launched_at),
-            InstalledHost::Server(id) => self
-                .server(id)
-                .ok()
-                .and_then(|server| server.last_started_at),
+        let from_run =
+            |report: &DiagnosticEntry| report.modified.is_some_and(|reported| reported >= started);
+        let Some(report) = launch_crash_report(
+            &entries,
+            &self.crash_report_claims(instance),
+            launch,
+            from_run,
+        ) else {
+            return;
         };
-        let from_last_run = match (report.modified, started) {
-            (Some(reported), Some(started)) => reported >= started,
-            (_, None) => true,
-            (None, Some(_)) => false,
-        };
-        let Some(summary) = report.summary.filter(|_| from_last_run) else {
+        let Some(summary) = &report.summary else {
             return;
         };
         let subject = summary.headline().unwrap_or(&report.name);
         let detail = summary.excerpt.join("\n");
-        self.record_host_event(
+        self.record_launch_event(
             host,
+            launch,
             ephervex_storage::HostEventKind::LogError,
             subject,
             &detail,
         );
     }
 
-    /// The tail of the run's own log, for the attribution a report can omit.
+    /// The crash report each launch of a client says, in the output captured
+    /// for its latest run, that it saved: the launch (`None` for the first)
+    /// and the report's name as the diagnostics list names it.
+    fn crash_report_claims(&self, instance: InstanceId) -> Vec<(Option<String>, String)> {
+        self.paths()
+            .client_captured_launches(instance)
+            .into_iter()
+            .filter_map(|launch| {
+                let capture = crate::server::read_latest_run_capture(
+                    &self.paths().client_capture_dir(instance, launch.as_deref()),
+                    CRASH_REPORT_CLAIM_LINES,
+                )
+                .ok()?;
+                let report =
+                    saved_crash_report_name(capture.lines.iter().map(|line| line.text.as_str()))?;
+                Some((launch, report))
+            })
+            .collect()
+    }
+
+    /// The tail of the run's own log, for the attribution a report can omit:
+    /// the `latest.log` of the client launch `launch` (`None` for the first
+    /// launch and every server).
     ///
     /// Best-effort by design: the log is a second opinion, and a host whose
     /// log has already rotated away still has a readable crash report.
-    fn recent_log_text(&self, scope: DiagnosticScope) -> String {
-        self.read_diagnostic(&DiagnosticRequest::new(
-            scope,
-            DiagnosticKind::Log,
-            "latest.log",
-        ))
-        .map(|view| view.text)
-        .unwrap_or_default()
+    fn recent_log_text(&self, scope: DiagnosticScope, launch: Option<&str>) -> String {
+        let name = ephervex_storage::launch_latest_log_name(launch);
+        self.read_diagnostic(&DiagnosticRequest::new(scope, DiagnosticKind::Log, &name))
+            .map(|view| view.text)
+            .unwrap_or_default()
     }
+}
+
+/// The crash report of one launch's run among a client's reports, newest
+/// first: the one its own output names, or else the newest one no launch's
+/// output names. Either must be `from_run`.
+///
+/// A name the launch's output gives can belong to an earlier run, when its
+/// last run was not captured, so a report from before the run falls through
+/// to the next choice.
+fn launch_crash_report<'a>(
+    reports: &'a [DiagnosticEntry],
+    claims: &[(Option<String>, String)],
+    launch: Option<&str>,
+    from_run: impl Fn(&DiagnosticEntry) -> bool,
+) -> Option<&'a DiagnosticEntry> {
+    claims
+        .iter()
+        .find(|(owner, _)| owner.as_deref() == launch)
+        .and_then(|(_, own)| reports.iter().find(|report| report.name == *own))
+        .filter(|report| from_run(report))
+        .or_else(|| {
+            reports
+                .iter()
+                .find(|report| !claims.iter().any(|(_, claimed)| *claimed == report.name))
+                .filter(|report| from_run(report))
+        })
+}
+
+/// The file name of the crash report a game's output says it saved, from the
+/// last line that says so.
+///
+/// Only the name is kept: the path is the game directory the launch ran in,
+/// which for a launch run alongside another is a directory of links, and the
+/// name is matched against the client's own `crash-reports/` listing rather
+/// than opened.
+fn saved_crash_report_name<'a>(lines: impl DoubleEndedIterator<Item = &'a str>) -> Option<String> {
+    lines.rev().find_map(|line| {
+        let (_, path) = line.split_once(CRASH_REPORT_SAVED_MARKER)?;
+        let name = path.trim().rsplit(['/', '\\']).next()?.trim();
+        (!name.is_empty() && name != "." && name != "..").then(|| name.to_owned())
+    })
 }
 
 /// The row of the host's own mods a suspect's jar names.
@@ -884,6 +978,266 @@ mod tests {
         assert!(
             review.is_none(),
             "the report predates the launch the metadata records"
+        );
+    }
+
+    /// A report whose loading section names no mod, so only the run's log
+    /// can name one.
+    const UNNAMED_SECTION_REPORT: &str = "---- Minecraft Crash Report ----
+Description: Mod loading error has occurred
+
+java.lang.Exception: Mod Loading has failed
+
+-- Mod loading issue --
+Details:
+\tMod file: <No mod information provided>
+";
+
+    fn log_naming(mod_id: &str) -> String {
+        format!(
+            "[18:09:07] [Thread-1/ERROR] [ne.ne.fm.ModLoader/LOADING]: \
+Mod '{mod_id}' encountered an error in a deferred task\n"
+        )
+    }
+
+    fn saved_line(report: &str) -> String {
+        format!("{CRASH_REPORT_SAVED_MARKER} /home/u/game-second/crash-reports/{report}")
+    }
+
+    struct TwoLaunches {
+        _base: tempfile::TempDir,
+        app: App,
+        id: ephervex_model::InstanceId,
+        game: std::path::PathBuf,
+    }
+
+    impl TwoLaunches {
+        fn new() -> Self {
+            let base = tempfile::tempdir().expect("temp dir");
+            let app = App::open_at(ephervex_storage::Paths::rooted_at(base.path())).expect("app");
+            let client = app
+                .create_client_for_test(ephervex_storage::NewClient::new(
+                    "two launches",
+                    "1.21.1",
+                    ephervex_model::LoaderSelection::vanilla(),
+                ))
+                .expect("client");
+            let game = ephervex_storage::metadata::client_game_dir(&client.root);
+            Self {
+                _base: base,
+                app,
+                id: client.id,
+                game,
+            }
+        }
+
+        fn write(&self, relative: &str, text: &str) {
+            let path = self.game.join(relative);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("directory");
+            std::fs::write(path, text).expect("write");
+        }
+
+        fn capture(&self, launch: Option<&str>, lines: &[&str]) {
+            let mut capture = ephervex_server::OutputCapture::new(
+                &self.app.paths().client_capture_dir(self.id, launch),
+            );
+            for line in lines {
+                capture.push(ephervex_server::CaptureStream::Stdout, line.as_bytes());
+            }
+        }
+
+        fn host(&self) -> InstalledHost {
+            InstalledHost::Instance(self.id)
+        }
+    }
+
+    #[test]
+    fn the_crash_report_a_game_saved_is_read_from_its_output() {
+        assert_eq!(
+            saved_crash_report_name(
+                [
+                    "[main/INFO]: Stopping!",
+                    &saved_line("crash-2026-11-26_10.00.00-client.txt"),
+                    &saved_line("crash-2026-11-26_10.00.05-client.txt"),
+                    "AL lib: exiting",
+                ]
+                .into_iter()
+            )
+            .as_deref(),
+            Some("crash-2026-11-26_10.00.05-client.txt"),
+            "the last report the output names is the one its run ended with"
+        );
+        assert_eq!(
+            saved_crash_report_name(["[main/INFO]: hello"].into_iter()),
+            None
+        );
+        assert_eq!(
+            saved_crash_report_name(
+                [format!("{CRASH_REPORT_SAVED_MARKER} /x/..").as_str()].into_iter()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_launch_s_crash_report_is_the_one_its_output_names_or_else_one_no_launch_names() {
+        let entry = |name: &str| DiagnosticEntry {
+            name: name.to_owned(),
+            path: std::path::PathBuf::from(name),
+            kind: DiagnosticKind::CrashReport,
+            size_bytes: 0,
+            modified: None,
+            summary: None,
+        };
+        let reports = [entry("newest"), entry("middle"), entry("oldest")];
+        let claims = [
+            (None, "newest".to_owned()),
+            (Some("second".to_owned()), "middle".to_owned()),
+        ];
+        let name = |launch| {
+            launch_crash_report(&reports, &claims, launch, |_| true)
+                .map(|report| report.name.as_str())
+        };
+
+        assert_eq!(name(None), Some("newest"));
+        assert_eq!(name(Some("second")), Some("middle"));
+        assert_eq!(name(Some("third")), Some("oldest"));
+        assert_eq!(
+            launch_crash_report(&reports, &claims, Some("second"), |report| report.name
+                != "middle")
+            .map(|report| report.name.as_str()),
+            Some("oldest"),
+            "a named report from before the run falls through to the unclaimed one"
+        );
+    }
+
+    #[test]
+    fn a_crash_report_from_before_the_launch_started_is_not_recorded_as_its_crash() {
+        let launches = TwoLaunches::new();
+        launches.write(
+            "crash-reports/crash-2026-11-26_10.00.00-client.txt",
+            "---- Minecraft Crash Report ----\nDescription: old\n",
+        );
+        let crashed = ephervex_minecraft::GameExit {
+            code: Some(1),
+            signal: None,
+        };
+
+        launches.app.record_client_exit(
+            launches.id,
+            None,
+            chrono::Utc::now() + chrono::TimeDelta::minutes(1),
+            &crashed,
+        );
+
+        assert!(
+            launches
+                .app
+                .host_events(launches.host())
+                .iter()
+                .all(|event| event.kind != ephervex_storage::HostEventKind::LogError)
+        );
+    }
+
+    #[test]
+    fn a_crash_of_a_launch_run_alongside_is_reviewed_with_that_launch_s_log() {
+        let launches = TwoLaunches::new();
+        let report = "crash-2026-11-26_10.00.00-client.txt";
+        launches.write(&format!("crash-reports/{report}"), UNNAMED_SECTION_REPORT);
+        launches.write("logs/latest.log", &log_naming("firstmod"));
+        launches.write("logs/launch-second/latest.log", &log_naming("secondmod"));
+        launches.capture(None, &["[main/INFO]: still running"]);
+        launches.capture(Some("second"), &[&saved_line(report)]);
+
+        let review = launches
+            .app
+            .crash_review(launches.host())
+            .expect("review")
+            .expect("a crash");
+
+        assert_eq!(review.launch.as_deref(), Some("second"));
+        let named: Vec<&str> = review
+            .analysis
+            .suspects
+            .iter()
+            .map(|suspect| suspect.mod_id.as_str())
+            .collect();
+        assert_eq!(named, ["secondmod"]);
+    }
+
+    #[test]
+    fn a_crash_no_launch_s_output_names_is_reviewed_with_the_first_launch_s_log() {
+        let launches = TwoLaunches::new();
+        launches.write(
+            "crash-reports/crash-2026-11-26_10.00.00-client.txt",
+            UNNAMED_SECTION_REPORT,
+        );
+        launches.write("logs/latest.log", &log_naming("firstmod"));
+        launches.write("logs/launch-second/latest.log", &log_naming("secondmod"));
+
+        let review = launches
+            .app
+            .crash_review(launches.host())
+            .expect("review")
+            .expect("a crash");
+
+        assert_eq!(review.launch, None);
+        assert_eq!(review.analysis.suspects[0].mod_id, "firstmod");
+    }
+
+    #[test]
+    fn each_launch_s_crash_is_recorded_in_the_history_as_that_launch_s() {
+        use ephervex_storage::HostEventKind::{Exited, LogError};
+
+        let launches = TwoLaunches::new();
+        let started = chrono::Utc::now() - chrono::TimeDelta::minutes(1);
+        let first = "crash-2026-11-26_10.00.00-client.txt";
+        let second = "crash-2026-11-26_10.00.05-client.txt";
+        launches.write(
+            &format!("crash-reports/{first}"),
+            "---- Minecraft Crash Report ----\nDescription: first\n\njava.lang.IllegalStateException: from the first\n",
+        );
+        launches.write(
+            &format!("crash-reports/{second}"),
+            "---- Minecraft Crash Report ----\nDescription: second\n\njava.lang.IllegalStateException: from the second\n",
+        );
+        launches.capture(None, &[&saved_line(first)]);
+        launches.capture(Some("second"), &[&saved_line(second)]);
+        let crashed = ephervex_minecraft::GameExit {
+            code: Some(1),
+            signal: None,
+        };
+
+        // A launch that started after both runs does not make their reports
+        // older than the runs that wrote them.
+        launches
+            .app
+            .commit_client_without_index_for_test(launches.id, |committed| {
+                committed.last_launched_at = Some(chrono::Utc::now() + chrono::TimeDelta::hours(1));
+            })
+            .expect("commit");
+
+        launches
+            .app
+            .record_client_exit(launches.id, None, started, &crashed);
+        launches
+            .app
+            .record_client_exit(launches.id, Some("second"), started, &crashed);
+
+        let events = launches.app.host_events(launches.host());
+        let told: Vec<(ephervex_storage::HostEventKind, Option<&str>, &str)> = events
+            .iter()
+            .filter(|event| event.kind != ephervex_storage::HostEventKind::Created)
+            .map(|event| (event.kind, event.launch.as_deref(), event.subject.as_str()))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                (Exited, None, "1"),
+                (LogError, None, "first"),
+                (Exited, Some("second"), "1"),
+                (LogError, Some("second"), "second"),
+            ]
         );
     }
 

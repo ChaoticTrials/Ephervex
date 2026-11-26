@@ -120,13 +120,15 @@ pub struct DiagnosticSearch {
     pub outcome: SearchOutcome,
 }
 
-/// Incremental state for one client's `latest.log`.
+/// Incremental state for the `latest.log` of one launch of a client.
 ///
 /// The path remains private so frontends keep using the name-addressed core
 /// boundary. Every poll revalidates the file before the tailer opens it.
 #[derive(Debug)]
 pub struct ClientLogTail {
     instance: InstanceId,
+    /// The log's name as a listing gives it.
+    name: String,
     tail: IncrementalLogTail,
 }
 
@@ -190,13 +192,27 @@ impl<'a> DiagnosticRequest<'a> {
 }
 
 impl App {
-    /// Creates incremental state for one client's current `latest.log`.
-    pub fn client_log_tail(&self, instance: InstanceId) -> CoreResult<ClientLogTail> {
+    /// Creates incremental state for the current `latest.log` of one launch of
+    /// a client: its first launch for `None`, or the launch run alongside it
+    /// under the handle `launch`, which writes `launch-<handle>/latest.log`.
+    pub fn client_log_tail(
+        &self,
+        instance: InstanceId,
+        launch: Option<&str>,
+    ) -> CoreResult<ClientLogTail> {
         let directory =
             self.diagnostic_directory(DiagnosticScope::Client(instance), DiagnosticKind::Log)?;
+        let name = ephervex_storage::launch_latest_log_name(launch);
+        // A log that is not there yet is followed once it appears; a name the
+        // directory refuses is refused now.
+        match directory.resolve(&name) {
+            Ok(_) | Err(ephervex_storage::DiagnosticError::Missing { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
         Ok(ClientLogTail {
             instance,
-            tail: IncrementalLogTail::with_default_limits(directory.path().join("latest.log")),
+            tail: IncrementalLogTail::with_default_limits(directory.path().join(&name)),
+            name,
         })
     }
 
@@ -207,7 +223,7 @@ impl App {
     pub fn poll_client_log(&self, state: &mut ClientLogTail) -> CoreResult<TailUpdate> {
         let directory = self
             .diagnostic_directory(DiagnosticScope::Client(state.instance), DiagnosticKind::Log)?;
-        match directory.resolve("latest.log") {
+        match directory.resolve(&state.name) {
             Ok(_) => state.tail.poll().map_err(|source| {
                 ephervex_storage::DiagnosticError::Unreadable {
                     path: state.tail.path().to_path_buf(),
@@ -496,6 +512,37 @@ mod tests {
         let report = crashes.entries.first().expect("a crash report");
         let summary = report.summary.as_ref().expect("a summary");
         assert_eq!(summary.description.as_deref(), Some("Ticking entity"));
+    }
+
+    #[test]
+    fn each_launch_s_live_log_is_followed_apart_from_the_other() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = client(&app);
+        let logs = ephervex_storage::metadata::client_game_dir(&record.root).join("logs");
+        write(&logs.join("latest.log"), "[main] first\n");
+        let lines = |tail: &mut ClientLogTail| -> Vec<String> {
+            app.poll_client_log(tail)
+                .expect("poll")
+                .lines
+                .into_iter()
+                .map(|line| line.text)
+                .collect()
+        };
+
+        let mut first = app.client_log_tail(record.id, None).expect("first");
+        let mut second = app
+            .client_log_tail(record.id, Some("second"))
+            .expect("a log that is not there yet");
+        assert!(app.poll_client_log(&mut second).expect("poll").missing);
+        write(
+            &logs.join("launch-second").join("latest.log"),
+            "[main] second\n",
+        );
+
+        assert_eq!(lines(&mut first), ["[main] first"]);
+        assert_eq!(lines(&mut second), ["[main] second"]);
+        assert!(app.client_log_tail(record.id, Some("../escape")).is_err());
     }
 
     #[test]

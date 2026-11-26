@@ -1052,6 +1052,8 @@ export component AppWindow inherits Window {
     // A pane's log viewer, every callback naming the pane first.
     // (pane, "live" | "files" | "crashes")
     callback log-show(int, string);
+    // Points the live log at one client launch: "" for the first, or a handle.
+    callback log-follow-launch(int, string);
     // Opens a saved log or crash report by its listed name.
     callback log-open-file(int, string);
     callback log-search-report(int, string);
@@ -2670,6 +2672,11 @@ export component AppWindow inherits Window {
                                         if log-view.mode == "files" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; property <string> query: log-view.query; changed query => { log-search.text = self.query; } log-search := TextField { placeholder: GuiI18n.text("gui-search-open-log"); accessible-label: GuiI18n.text("gui-search-open-log"); input-type: InputType.search; width: 250px; init => { self.text = log-view.query; } accepted => { root.log-search(pane.id, self.text); } } AppButton { text: GuiI18n.text("gui-find"); enabled: log-view.file != ""; hint: GuiI18n.text("gui-hint-choose-log-file"); clicked => { root.log-search(pane.id, log-search.text); } } }
                                         if log-view.mode == "crashes" : HorizontalLayout { spacing: 8px; horizontal-stretch: 0; report-search := TextField { placeholder: GuiI18n.text("gui-search-open-report"); input-type: InputType.search; width: 250px; accepted => { root.log-search-report(pane.id, self.text); } } AppButton { text: GuiI18n.text("gui-find"); enabled: log-view.file != ""; hint: GuiI18n.text("gui-hint-choose-log-file"); clicked => { root.log-search-report(pane.id, report-search.text); } } }
                                         AppButton { text: GuiI18n.text("gui-folder"); clicked => { if !is-client && log-view.mode == "live" { root.open-server-location(host.id, "capture"); } else { root.log-open-folder(pane.id); } } }
+                                    }
+                                    // Which launch's log is followed, while the client runs
+                                    // more than one.
+                                    if log-view.mode == "live" && log-view.launches.length > 0 : HorizontalLayout { spacing: 8px; alignment: start;
+                                        for choice in log-view.launches : FilterChip { text: choice.label; accessible-name: choice.label; selected: choice.handle == log-view.launch; clicked => { root.log-follow-launch(pane.id, choice.handle); } }
                                     }
                                     // The log being written to, followed as it grows.
                                     if log-view.mode == "live" : LiveLogViewer {

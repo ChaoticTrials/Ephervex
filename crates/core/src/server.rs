@@ -2348,6 +2348,15 @@ enum CaptureScope {
     LatestRun,
 }
 
+/// The newest `limit` lines of the latest run a capture directory holds,
+/// whichever host wrote it.
+pub(crate) fn read_latest_run_capture(
+    directory: &Path,
+    limit: usize,
+) -> CoreResult<CaptureSnapshot> {
+    read_capture_snapshot(directory, limit, CaptureScope::LatestRun)
+}
+
 fn read_capture_snapshot(
     directory: &Path,
     limit: usize,

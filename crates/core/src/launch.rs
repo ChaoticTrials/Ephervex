@@ -352,6 +352,8 @@ impl App {
             return Err(LaunchError::Canceled.into());
         }
 
+        // Before the game exists, so anything its run writes comes after it.
+        let started = chrono::Utc::now();
         let (exit, early_output) = if options.hosting == Hosting::Detached {
             let Some(ended) = self
                 .run_hosted_launch(record, options, &mut outcome, lock, observer, cancel)
@@ -361,25 +363,11 @@ impl App {
             };
             ended
         } else {
-            let process = GameProcess::start(&outcome.command, observer)?;
-            // A lock this run no longer holds is refused here, and dropping the
-            // process on the way out ends the game rather than leaving it
-            // running beside the launch that holds the instance now.
-            lock.record_game_pid(process.pid()).await?;
-            outcome.game_pid = Some(process.pid());
-            observer.emit(LaunchEvent::Running { pid: process.pid() });
-            self.record_launch_time(instance, &outcome.account);
-            info!(
-                instance = %instance,
-                version = %outcome.minecraft_version,
-                pid = process.pid(),
-                authenticated = outcome.authenticated,
-                "launched minecraft"
-            );
-            process.wait_with_early_output(observer, cancel).await?
+            self.run_attached_launch(record, options, &mut outcome, lock, observer, cancel)
+                .await?
         };
         outcome.exit = Some(exit);
-        self.record_client_exit(instance, &exit);
+        self.record_client_exit(instance, options.additional.as_deref(), started, &exit);
         if !exit.is_success() {
             outcome.java_failure = self
                 .java_runtime_failure(
@@ -418,9 +406,10 @@ impl App {
 
     /// Recorded before the wait, so a launch that never returns - a game that
     /// hangs, a machine that loses power - still shows as having been launched.
-    fn record_launch_time(&self, instance: InstanceId, account: &str) {
-        self.record_host_event(
+    fn record_launch_time(&self, instance: InstanceId, account: &str, launch: Option<&str>) {
+        self.record_launch_event(
             InstalledHost::Instance(instance),
+            launch,
             ephervex_storage::HostEventKind::Launched,
             account,
             "",
@@ -434,6 +423,35 @@ impl App {
         {
             tracing::warn!(%error, "could not record the launch time");
         }
+    }
+
+    /// Runs the game as a child of this process and follows it to its end.
+    /// Returns how it ended and the output it printed first.
+    async fn run_attached_launch(
+        &self,
+        record: &ClientRecord,
+        options: &LaunchOptions,
+        outcome: &mut LaunchOutcome,
+        lock: &mut HeldLaunch,
+        observer: &LaunchObserver,
+        cancel: &CancellationToken,
+    ) -> CoreResult<(GameExit, Vec<String>)> {
+        let process = GameProcess::start(&outcome.command, observer)?;
+        // A lock this run no longer holds is refused here, and dropping the
+        // process on the way out ends the game rather than leaving it
+        // running beside the launch that holds the instance now.
+        lock.record_game_pid(process.pid()).await?;
+        outcome.game_pid = Some(process.pid());
+        observer.emit(LaunchEvent::Running { pid: process.pid() });
+        self.record_launch_time(record.id, &outcome.account, options.additional.as_deref());
+        info!(
+            instance = %record.id,
+            version = %outcome.minecraft_version,
+            pid = process.pid(),
+            authenticated = outcome.authenticated,
+            "launched minecraft"
+        );
+        Ok(process.wait_with_early_output(observer, cancel).await?)
     }
 
     /// Runs the launch under a runner. Returns how the game ended, or `None`
@@ -451,7 +469,7 @@ impl App {
             .start_hosted_game(record, options, outcome, lock, observer, cancel)
             .await?;
         outcome.game_pid = Some(game.pid());
-        self.record_launch_time(record.id, &outcome.account);
+        self.record_launch_time(record.id, &outcome.account, options.additional.as_deref());
         info!(
             instance = %record.id,
             version = %outcome.minecraft_version,

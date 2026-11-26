@@ -44,8 +44,24 @@ fn ending(subject: &str) -> Ending<'_> {
     }
 }
 
-/// What one event says, and in what tone.
+/// What one event says, and in what tone, naming the launch it happened to
+/// when that was one run alongside the client's first.
 fn describe(event: &HostEvent) -> (String, &'static str) {
+    let (text, tone) = describe_kind(event);
+    match event.launch.as_deref() {
+        Some(launch) => (
+            lookup_args(
+                "gui-event-of-launch",
+                [("event", Arg::from(text)), ("launch", Arg::from(launch))],
+            ),
+            tone,
+        ),
+        None => (text, tone),
+    }
+}
+
+/// What one event's kind and subject say, and in what tone.
+fn describe_kind(event: &HostEvent) -> (String, &'static str) {
     let subject = event.subject.as_str();
     match event.kind {
         HostEventKind::Created => {
@@ -190,6 +206,26 @@ mod tests {
             told(HostEventKind::Launched, "QuietBlock"),
             (with("gui-event-launched", "QuietBlock"), "good")
         );
+    }
+
+    #[test]
+    fn an_event_of_a_launch_run_alongside_names_that_launch() {
+        let exited = event(HostEventKind::Exited, "1", "").of_launch(Some("second"));
+
+        assert_eq!(
+            describe(&exited),
+            (
+                lookup_args(
+                    "gui-event-of-launch",
+                    [
+                        ("event", Arg::from(with("gui-event-exited-code", "1"))),
+                        ("launch", Arg::from("second")),
+                    ],
+                ),
+                "bad"
+            )
+        );
+        assert!(describe(&exited).0.contains("second"));
     }
 
     #[test]

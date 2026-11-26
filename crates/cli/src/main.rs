@@ -2901,6 +2901,7 @@ fn print_instance_history(app: &App, id: InstanceId, json: bool) {
                     "kind": event.kind,
                     "subject": event.subject,
                     "detail": event.detail,
+                    "launch": event.launch,
                 }))
                 .collect::<Vec<_>>(),
         }));
@@ -2914,8 +2915,13 @@ fn print_instance_history(app: &App, id: InstanceId, json: bool) {
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_default();
+        let launch = event
+            .launch
+            .as_deref()
+            .map(|handle| format!("  [launch {handle}]"))
+            .unwrap_or_default();
         outln!(
-            "{}  {kind}  {}",
+            "{}  {kind}{launch}  {}",
             event.at.format("%Y-%m-%d %H:%M:%S UTC"),
             terminal_safe(&event.subject)
         );

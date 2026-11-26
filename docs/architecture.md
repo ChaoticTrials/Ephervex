@@ -1826,9 +1826,12 @@ A client launched alongside another (`--alongside`) runs in a launcher-owned
 game directory of links into the instance (ADR 0060), with `logs` linked to its
 own `logs/launch-<handle>/` folder in the instance. Its `latest.log`,
 `debug.log` and rotated files therefore never replace another launch's, and a
-log listing names them `launch-<handle>/<file>`. Crash reports stay shared.
-Crash analysis and history entries that read `latest.log` read the first
-launch's file.
+log listing names them `launch-<handle>/<file>`. The live log view, the running
+list and crash analysis read the `latest.log` of the launch they are about, and
+history events of an additional launch carry its handle. Crash reports stay
+shared: a report belongs to the launch whose captured output says it saved it,
+and one no launch's output names falls back to the newest report written since
+the launch started.
 
 ## Security boundaries
 

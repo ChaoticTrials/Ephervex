@@ -432,6 +432,28 @@ impl Paths {
             .join(launch.map_or_else(|| "first".to_owned(), |handle| format!("launch-{handle}")))
     }
 
+    /// The launches of one client that have a capture directory: `None` for
+    /// its first launch and the handle of each additional one, in no
+    /// particular order. A client with no captures has none.
+    #[must_use]
+    pub fn client_captured_launches(&self, id: InstanceId) -> Vec<Option<String>> {
+        let Ok(listing) = std::fs::read_dir(self.client_captures_dir(id)) else {
+            return Vec::new();
+        };
+        listing
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                if name == "first" {
+                    return Some(None);
+                }
+                let handle = name.strip_prefix("launch-")?;
+                crate::lock::is_valid_launch_id(handle).then(|| Some(handle.to_owned()))
+            })
+            .collect()
+    }
+
     /// The game directory an additional launch runs in:
     /// `logs/clients/<id>/game-<handle>`.
     ///
@@ -630,6 +652,28 @@ mod tests {
             DATABASE_FILE_NAME
         );
         assert_eq!(paths.database_file().parent().unwrap(), paths.state_dir());
+    }
+
+    #[test]
+    fn only_launch_captures_are_listed_as_captured_launches() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let paths = Paths::rooted_at(base.path());
+        let id = InstanceId::new();
+        assert!(paths.client_captured_launches(id).is_empty());
+        for directory in [
+            paths.client_capture_dir(id, None),
+            paths.client_capture_dir(id, Some("second")),
+            paths.client_launch_game_dir(id, "second"),
+            paths.client_captures_dir(id).join("launch-.."),
+        ] {
+            std::fs::create_dir_all(directory).expect("directory");
+        }
+        std::fs::write(paths.client_captures_dir(id).join("launch-file"), b"").expect("file");
+
+        let mut launches = paths.client_captured_launches(id);
+        launches.sort();
+
+        assert_eq!(launches, [None, Some("second".to_owned())]);
     }
 
     #[test]

@@ -69,6 +69,11 @@ pub struct HostEvent {
     /// More text for a reader who wants it, such as a log excerpt.
     #[serde(default)]
     pub detail: String,
+    /// The handle of the launch it happened to, when that was a launch run
+    /// alongside a client's first one. `None` is the first launch, and every
+    /// event that is not about one launch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<String>,
 }
 
 impl HostEvent {
@@ -87,9 +92,27 @@ impl HostEvent {
             kind,
             subject: clean(subject, MAX_EVENT_SUBJECT_CHARS, false),
             detail: clean(detail, MAX_EVENT_DETAIL_CHARS, true),
+            launch: None,
         }
     }
+
+    /// The same event, said of the additional launch `launch`. A handle no
+    /// launch can have is dropped rather than recorded.
+    #[must_use]
+    pub fn of_launch(mut self, launch: Option<&str>) -> Self {
+        self.launch = launch
+            .filter(|handle| {
+                handle.len() <= MAX_EVENT_LAUNCH_BYTES && crate::lock::is_valid_launch_id(handle)
+            })
+            .map(str::to_owned);
+        self
+    }
 }
+
+/// The longest launch handle an event keeps, in bytes. A handle names its
+/// launch's lock file, so no launch that ran has a longer one than a file name
+/// holds.
+const MAX_EVENT_LAUNCH_BYTES: usize = 255;
 
 /// Characters that change how surrounding text is laid out or ordered, which a
 /// line of untrusted text has no business doing.
@@ -228,12 +251,10 @@ fn read_events(paths: &Paths, host: EventHost) -> io::Result<Vec<HostEvent>> {
             break;
         }
         if let Ok(event) = serde_json::from_slice::<HostEvent>(&line) {
-            events.push(HostEvent::at(
-                event.at,
-                event.kind,
-                &event.subject,
-                &event.detail,
-            ));
+            events.push(
+                HostEvent::at(event.at, event.kind, &event.subject, &event.detail)
+                    .of_launch(event.launch.as_deref()),
+            );
         }
     }
     Ok(events)
@@ -299,6 +320,72 @@ mod tests {
             [HostEventKind::Created, HostEventKind::Launched]
         );
         assert_eq!(events[1].subject, "QuietBlock");
+    }
+
+    #[test]
+    fn the_launch_an_event_happened_to_is_read_back_with_it() {
+        let (_directory, paths) = paths();
+        let host = EventHost::Client(InstanceId::new());
+        append_host_event(
+            &paths,
+            host,
+            &HostEvent::now(HostEventKind::Launched, "QuietBlock", ""),
+        )
+        .expect("append");
+        append_host_event(
+            &paths,
+            host,
+            &HostEvent::now(HostEventKind::Exited, "1", "").of_launch(Some("second")),
+        )
+        .expect("append");
+
+        let events = read_host_events(&paths, host);
+
+        assert_eq!(events[0].launch, None);
+        assert_eq!(events[1].launch.as_deref(), Some("second"));
+        let first_line = std::fs::read_to_string(paths.host_events_file(host)).expect("read");
+        assert!(
+            !first_line
+                .lines()
+                .next()
+                .expect("a line")
+                .contains("\"launch\""),
+            "an event of the first launch is written as it always was"
+        );
+    }
+
+    #[test]
+    fn a_launch_no_handle_can_name_is_not_kept() {
+        let (_directory, paths) = paths();
+        let host = EventHost::Client(InstanceId::new());
+        std::fs::create_dir_all(paths.host_events_dir()).expect("dir");
+        std::fs::write(
+            paths.host_events_file(host),
+            concat!(
+                "{\"at\":\"2026-10-25T10:00:00Z\",\"kind\":\"exited\",\"launch\":\"../x\"}\n",
+                "{\"at\":\"2026-10-25T10:01:00Z\",\"kind\":\"exited\",\"launch\":\"b\\u202ec\"}\n",
+            ),
+        )
+        .expect("write");
+
+        let events = read_host_events(&paths, host);
+
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.launch.is_none()));
+        assert!(
+            HostEvent::now(HostEventKind::Exited, "0", "")
+                .of_launch(Some(&"a".repeat(MAX_EVENT_LAUNCH_BYTES + 1)))
+                .launch
+                .is_none()
+        );
+        let long = "a".repeat(200);
+        assert_eq!(
+            HostEvent::now(HostEventKind::Exited, "0", "")
+                .of_launch(Some(&long))
+                .launch,
+            Some(long),
+            "any handle a launch lock can be named for is kept"
+        );
     }
 
     #[test]

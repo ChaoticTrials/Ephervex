@@ -50,7 +50,14 @@ instance's entry wins.
 - A file a game replaces by renaming over a linked top-level file (rather than
   writing it in place), such as `servers.dat`, becomes that launch's own copy
   for the rest of that run.
-- Reports built from `latest.log` after a launch (crash analysis, history
-  entries) read the instance's `logs/latest.log`, which belongs to the first
-  launch. Crash reports are shared and unaffected.
+- Everything that reads a client's current log names the launch it reads:
+  crash analysis, the live log view and the running list read
+  `launch-<handle>/latest.log` for an additional launch, and the history
+  records which launch an event came from.
+- Crash reports stay in the instance's one `crash-reports/` folder, and nothing
+  inside a report says which launch wrote it. A report is attributed to the
+  launch whose captured output names it ("Crash report saved to:"). Output is
+  captured only for launches a runner hosts, so a report no launch's output
+  names is reviewed with the first launch's log, and a launch whose output
+  names no report is given the newest unnamed one written since it started.
 - Linking requires a Unix platform.

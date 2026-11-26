@@ -3052,6 +3052,10 @@ gui-live-log-search-matches = { $count ->
    *[other] { $count } matches in retained output
 }
 gui-live-latest-log = Live / Latest Log
+# The live log choice for a client's first launch, shown while it runs more than one.
+gui-log-first-launch = First launch
+# The live log choice for a client launch run alongside the first; $launch is its handle.
+gui-log-launch = Launch "{ $launch }"
 gui-crash-reports = Crash Reports
 gui-log-files = Log Files
 gui-no-recent-activity-detail = Creation, imports, installations, launches, and server work will appear here.
@@ -4292,5 +4296,7 @@ gui-event-reproduced = { $count ->
    *[other] Seen again, now { $count } times
 }
 gui-event-other = Something else happened
+# An event of a client launch run alongside its first one; $launch is that launch's handle.
+gui-event-of-launch = { $event } (launch "{ $launch }")
 gui-case-what-happened = What happened
 gui-case-what-happened-empty = Nothing has happened to this instance yet.

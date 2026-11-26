@@ -182,8 +182,9 @@ impl App {
                 .client(record.id)
                 .map_or_else(|_| record.root.clone(), |current| current.root);
             let launches = ephervex_storage::running_launches(&root);
-            let shared_log = self.last_log_line(DiagnosticScope::Client(record.id));
             for launch in launches {
+                let last_line =
+                    self.last_log_line(DiagnosticScope::Client(record.id), launch.id.as_deref());
                 running.push(RunningProcess {
                     host: InstalledHost::Instance(record.id),
                     handle: Some(crate::hosted_launch::launch_handle(&launch)),
@@ -194,9 +195,9 @@ impl App {
                     since: Some(launch.state.since),
                     // Only a launch whose runner is proven can be asked to stop.
                     controllable: launch.state.runner_is_proven(),
-                    // The instance's own log, which both clients write to
-                    // because they share the game directory.
-                    last_line: shared_log.clone(),
+                    // Each launch's own log: one run alongside the first
+                    // writes its `latest.log` under `logs/launch-<handle>/`.
+                    last_line,
                     usage: None,
                 });
             }
@@ -252,12 +253,14 @@ impl App {
         Ok(ephervex_storage::force_release(&root, launch)?)
     }
 
-    /// The last line of a client's `latest.log`, best effort.
-    fn last_log_line(&self, scope: DiagnosticScope) -> Option<String> {
+    /// The last line of the `latest.log` of one launch of a client (`None` for
+    /// its first launch), best effort.
+    fn last_log_line(&self, scope: DiagnosticScope, launch: Option<&str>) -> Option<String> {
+        let name = ephervex_storage::launch_latest_log_name(launch);
         let request = crate::diagnostics::DiagnosticRequest::new(
             scope,
             ephervex_storage::DiagnosticKind::Log,
-            "latest.log",
+            &name,
         )
         .with_anchor(ephervex_storage::TextAnchor::Tail)
         .with_budget(LAST_LINE_WINDOW);
@@ -476,6 +479,39 @@ mod tests {
         assert!(
             handles.contains(&None) && handles.contains(&Some("bob")),
             "each row names which launch it is: {handles:?}"
+        );
+    }
+
+    /// A launch run alongside another writes a log of its own, so the line
+    /// beside each row is its own launch's.
+    #[test]
+    fn each_launch_s_row_shows_the_last_line_of_its_own_log() {
+        let base = tempfile::tempdir().expect("temp dir");
+        let app = app_rooted_at(base.path());
+        let record = instance(&app, "Repro");
+        let logs = ephervex_storage::metadata::client_game_dir(&record.root).join("logs");
+        std::fs::create_dir_all(logs.join("launch-bob")).expect("logs");
+        std::fs::write(logs.join("latest.log"), "[main] first\n").expect("first log");
+        std::fs::write(logs.join("launch-bob").join("latest.log"), "[main] bob\n")
+            .expect("second log");
+
+        let _first = LaunchLock::acquire(&record.root).expect("the first launch");
+        let _second =
+            LaunchLock::acquire_additional(&record.root, "bob").expect("a second account");
+
+        let mut lines: Vec<(Option<String>, Option<String>)> = app
+            .running_processes()
+            .expect("query")
+            .into_iter()
+            .map(|process| (process.launch, process.last_line))
+            .collect();
+        lines.sort();
+        assert_eq!(
+            lines,
+            [
+                (None, Some("[main] first".to_owned())),
+                (Some("bob".to_owned()), Some("[main] bob".to_owned())),
+            ]
         );
     }
 
