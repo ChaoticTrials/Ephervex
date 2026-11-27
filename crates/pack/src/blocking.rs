@@ -35,4 +35,28 @@ mod tests {
     async fn blocking_work_returns_its_own_result() {
         assert_eq!(off_runtime(|| Ok(7)).await.expect("ok"), 7);
     }
+
+    #[tokio::test]
+    async fn blocking_work_runs_while_another_task_gets_the_only_worker() {
+        // A current-thread runtime has one worker, so the other task can only
+        // run once the awaiting task is suspended. The work waits for it, so
+        // work run on the worker itself would time out instead of finishing.
+        // Waiting on a channel keeps the outcome independent of how quickly
+        // the blocking thread runs.
+        let (sender, receiver) = std::sync::mpsc::channel::<()>();
+        let other_task = tokio::spawn(async move {
+            sender.send(()).expect("the work is still waiting");
+        });
+
+        let heard = off_runtime(move || {
+            Ok(receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .is_ok())
+        })
+        .await
+        .expect("ok");
+
+        other_task.await.expect("the other task finished");
+        assert!(heard, "another task never ran while the work was waiting");
+    }
 }
