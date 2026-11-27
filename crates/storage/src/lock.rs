@@ -1405,8 +1405,24 @@ mod tests {
             command.env(LAUNCH_RUN_VARIABLE, run.to_string());
         }
         let child = command.spawn().expect("a child");
+        if let Some(run) = run {
+            wait_until_the_process_carries(child.id(), run);
+        }
         let ticks = process_start_ticks(child.id()).expect("its start time");
         (child, ticks)
+    }
+
+    /// Waits until `/proc` shows the run id in the process's environment, so a
+    /// test never reads a process that `/proc` does not describe yet.
+    fn wait_until_the_process_carries(pid: u32, run: uuid::Uuid) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !process_carries_run(pid, run) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process {pid} never showed the run id in its environment"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     fn hosted_state(game: &std::process::Child, ticks: u64, run: uuid::Uuid) -> LaunchState {
@@ -1428,7 +1444,13 @@ mod tests {
         let run = uuid::Uuid::new_v4();
         let (mut game, ticks) = live_game_of_run(Some(run));
 
-        assert!(hosted_state(&game, ticks, run).game_is_alive());
+        let state = hosted_state(&game, ticks, run);
+        let start_ticks = process_start_ticks(game.id());
+        let carries_run = process_carries_run(game.id(), run);
+        assert!(
+            state.game_is_alive(),
+            "recorded start {ticks}, read {start_ticks:?}, carries run id {carries_run}"
+        );
 
         game.kill().expect("end the game");
         game.wait().expect("reap");
