@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-auth"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",
@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-cli"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-core"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "ephervex-auth",
@@ -1616,7 +1616,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-download"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "ephervex-model",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-gui"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "copypasta",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-i18n"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "fluent-syntax",
  "i18n-embed",
@@ -1676,7 +1676,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-java"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "ephervex-download",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-loaders"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "async-trait",
  "ephervex-download",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-minecraft"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "ephervex-download",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-mod-platform"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-model"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-options"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "ephervex-download",
  "ephervex-model",
@@ -1797,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-pack"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "ephervex-download",
  "ephervex-i18n",
@@ -1821,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-screenshots"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1842,7 +1842,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-server"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "ephervex-download",
@@ -1862,7 +1862,7 @@ dependencies = [
 
 [[package]]
 name = "ephervex-storage"
-version = "1.1.0"
+version = "1.1.1"
 dependencies = [
  "chrono",
  "directories",
